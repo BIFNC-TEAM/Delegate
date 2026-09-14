@@ -207,6 +207,34 @@ describe("sandbox provider contract", () => {
     expect(sandbox.updateNetworkSettings).toHaveBeenCalledWith({ networkBlockAll: true });
   });
 
+  it("uploads and verifies Daytona input bytes without putting them in a command", async () => {
+    const sandbox = createFakeDaytonaSandbox("sandbox-input");
+    const provider = new DaytonaSandboxProvider({
+      client: { get: vi.fn(async () => sandbox), create: vi.fn() },
+    });
+    const content = Buffer.from("private attachment bytes");
+
+    const result = await provider.writeInput({
+      lease: buildDaytonaLease("sandbox-input"),
+      sessionId: "session-1",
+      path: "/workspace/inputs/orders.csv",
+      content,
+      timeoutMs: 9_000,
+    });
+
+    expect(sandbox.fs?.uploadFile).toHaveBeenCalledWith(
+      content,
+      "/home/daytona/workspace/inputs/orders.csv",
+      9,
+    );
+    expect(sandbox.fs?.downloadFile).toHaveBeenCalledWith(
+      "/home/daytona/workspace/inputs/orders.csv",
+      9,
+    );
+    expect(result.bytes).toBe(content.byteLength);
+    expect(sandbox.process?.executeCommand).not.toHaveBeenCalled();
+  });
+
   it("fails closed and deletes a new sandbox when tier policy blocks network overrides", async () => {
     const sandbox = createFakeDaytonaSandbox("sandbox-tier-limited");
     sandbox.updateNetworkSettings = vi.fn(async () => {
@@ -421,6 +449,7 @@ function buildDaytonaLease(id: string) {
 }
 
 function createFakeDaytonaSandbox(id: string): DaytonaSandboxLike {
+  let uploaded = Buffer.alloc(0);
   return {
     id,
     labels: { "code-toolbox-language": "python" },
@@ -437,6 +466,10 @@ function createFakeDaytonaSandbox(id: string): DaytonaSandboxLike {
     setAutoArchiveInterval: vi.fn(async () => undefined),
     setAutoDeleteInterval: vi.fn(async () => undefined),
     ensureWorkspace: vi.fn(async () => "/home/daytona/workspace"),
+    fs: {
+      uploadFile: vi.fn(async (content) => { uploaded = Buffer.from(content); }),
+      downloadFile: vi.fn(async () => Buffer.from(uploaded)),
+    },
     process: {
       executeCommand: vi.fn(async () => ({
         exitCode: 0,

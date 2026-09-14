@@ -37,6 +37,15 @@ export type RemoteMcpToolDefinition = {
   annotations?: Record<string, unknown>;
 };
 
+export function isMcpToolErrorResult(value: unknown) {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (value as Record<string, unknown>)["isError"] === true,
+  );
+}
+
 export async function listRemoteMcpTools(params: {
   binding: Pick<BindingRecord, "serverUrl" | "transportKind">;
 }): Promise<RemoteMcpToolDefinition[]> {

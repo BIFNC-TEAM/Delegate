@@ -2,9 +2,11 @@ import type { Sandbox as E2BSandboxType } from "@e2b/code-interpreter";
 import type { DockerExecutionResult } from "./runner";
 import {
   SandboxProviderError,
+  requireWorkspaceInputFileName,
   truncateProviderOutput,
   type SandboxProvider,
   type SandboxProviderExecutionInput,
+  type SandboxProviderInputWriteInput,
   type SandboxProviderLease,
   type SandboxProviderStartInput,
 } from "./sandbox-provider";
@@ -27,6 +29,15 @@ export type TencentAgsxSandboxLike = {
       onStdout?: ((data: string) => void | Promise<void>) | undefined;
       onStderr?: ((data: string) => void | Promise<void>) | undefined;
     }): Promise<TencentAgsxCommandResult>;
+  };
+  files: {
+    write(path: string, data: ArrayBuffer, options?: {
+      requestTimeoutMs?: number | undefined;
+    }): Promise<unknown>;
+    read(path: string, options: {
+      format: "bytes";
+      requestTimeoutMs?: number | undefined;
+    }): Promise<Uint8Array>;
   };
   pause(options?: { keepMemory?: boolean | undefined }): Promise<boolean>;
   kill(): Promise<boolean>;
@@ -88,15 +99,18 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
             apiKey: this.apiKey,
             domain: this.domain,
             timeoutMs: this.sandboxTimeoutMs,
-            allowInternetAccess: false,
+            allowInternetAccess: input.networkMode === "full",
             metadata: buildTencentMetadata(input),
           });
 
-      await sandbox.commands.run(`mkdir -p ${TENCENT_WORKSPACE_ROOT}`, {
+      const prepared = await sandbox.commands.run(`mkdir -p ${TENCENT_WORKSPACE_ROOT}`, {
         cwd: "/home/user",
         timeoutMs: 10_000,
         requestTimeoutMs: 15_000,
       });
+      if (prepared.exitCode !== 0) {
+        throw new SandboxProviderError("CONFIG_INVALID", false);
+      }
 
       return {
         runnerType: input.runnerType,
@@ -125,7 +139,7 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
         domain: this.domain,
         timeoutMs: this.sandboxTimeoutMs,
       });
-      const result = await sandbox.commands.run(input.command, {
+      const result = await sandbox.commands.run(mapTencentCommand(input.command), {
         cwd: mapTencentWorkingDirectory(input.workingDirectory),
         timeoutMs: input.maxCommandSeconds * 1000,
         requestTimeoutMs: (input.maxCommandSeconds + 15) * 1000,
@@ -170,6 +184,37 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
         };
       }
       throw mapped;
+    }
+  }
+
+  async writeInput(input: SandboxProviderInputWriteInput) {
+    const providerSandboxId = requireProviderSandboxId(input.lease);
+    const fileName = requireWorkspaceInputFileName(input.path);
+    const remotePath = `${TENCENT_WORKSPACE_ROOT}/inputs/${fileName}`;
+    const requestTimeoutMs = input.timeoutMs ?? 30_000;
+    const startedAt = Date.now();
+    try {
+      const sandbox = await this.client.connect({
+        sandboxId: providerSandboxId,
+        apiKey: this.apiKey,
+        domain: this.domain,
+        timeoutMs: this.sandboxTimeoutMs,
+      });
+      await sandbox.files.write(
+        remotePath,
+        Uint8Array.from(input.content).buffer,
+        { requestTimeoutMs },
+      );
+      const verified = await sandbox.files.read(remotePath, {
+        format: "bytes",
+        requestTimeoutMs,
+      });
+      if (!Buffer.from(verified).equals(input.content)) {
+        throw new SandboxProviderError("TRANSFER_INTEGRITY", false);
+      }
+      return { bytes: input.content.byteLength, durationMs: Date.now() - startedAt };
+    } catch (error) {
+      throw mapTencentAgsxError(error, false);
     }
   }
 
@@ -235,15 +280,38 @@ function adaptE2BSandbox(sandbox: E2BSandboxType): TencentAgsxSandboxLike {
   return {
     sandboxId: sandbox.sandboxId,
     commands: {
-      run(command, options) {
-        return sandbox.commands.run(command, {
-          ...(options.cwd ? { cwd: options.cwd } : {}),
-          ...(typeof options.timeoutMs === "number" ? { timeoutMs: options.timeoutMs } : {}),
+      async run(command, options) {
+        try {
+          return await sandbox.commands.run(command, {
+            ...(options.cwd ? { cwd: options.cwd } : {}),
+            ...(typeof options.timeoutMs === "number" ? { timeoutMs: options.timeoutMs } : {}),
+            ...(typeof options.requestTimeoutMs === "number"
+              ? { requestTimeoutMs: options.requestTimeoutMs }
+              : {}),
+            ...(options.onStdout ? { onStdout: options.onStdout } : {}),
+            ...(options.onStderr ? { onStderr: options.onStderr } : {}),
+          });
+        } catch (error) {
+          const commandExit = readTencentCommandExitResult(error);
+          if (commandExit) return commandExit;
+          throw error;
+        }
+      },
+    },
+    files: {
+      write(path, data, options) {
+        return sandbox.files.write(path, data, {
+          ...(typeof options?.requestTimeoutMs === "number"
+            ? { requestTimeoutMs: options.requestTimeoutMs }
+            : {}),
+        });
+      },
+      read(path, options) {
+        return sandbox.files.read(path, {
+          format: "bytes",
           ...(typeof options.requestTimeoutMs === "number"
             ? { requestTimeoutMs: options.requestTimeoutMs }
             : {}),
-          ...(options.onStdout ? { onStdout: options.onStdout } : {}),
-          ...(options.onStderr ? { onStderr: options.onStderr } : {}),
         });
       },
     },
@@ -256,11 +324,28 @@ function adaptE2BSandbox(sandbox: E2BSandboxType): TencentAgsxSandboxLike {
   };
 }
 
+export function readTencentCommandExitResult(error: unknown): TencentAgsxCommandResult | null {
+  if (!error || typeof error !== "object") return null;
+  const record = error as Record<string, unknown>;
+  if (
+    record.name !== "CommandExitError"
+    || typeof record.exitCode !== "number"
+  ) return null;
+  return {
+    exitCode: record.exitCode,
+    stdout: typeof record.stdout === "string" ? record.stdout : "",
+    stderr: typeof record.stderr === "string" ? record.stderr : "",
+  };
+}
+
 function assertPhaseOneTencentPolicy(input: SandboxProviderStartInput) {
   if ((input.runtimeClass ?? "code") !== "code") {
     throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
   }
-  if (input.filesystemMode !== "ephemeral_full" || input.networkMode !== "no_network") {
+  if (
+    input.filesystemMode !== "ephemeral_full"
+    || !["no_network", "full"].includes(input.networkMode)
+  ) {
     throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
   }
 }
@@ -286,6 +371,28 @@ function mapTencentWorkingDirectory(value: string | null | undefined) {
     return `${TENCENT_WORKSPACE_ROOT}/${workingDirectory.slice("/workspace/".length)}`;
   }
   return workingDirectory;
+}
+
+function mapTencentCommand(command: string) {
+  const rewrittenInlineProgram = command.replace(
+    /'(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?'/gu,
+    (quoted) => {
+      const encoded = quoted.slice(1, -1);
+      try {
+        const decoded = Buffer.from(encoded, "base64").toString("utf8");
+        if (!decoded.includes("/workspace")) return quoted;
+        const rewritten = rewriteTencentWorkspacePaths(decoded);
+        return `'${Buffer.from(rewritten, "utf8").toString("base64")}'`;
+      } catch {
+        return quoted;
+      }
+    },
+  );
+  return rewriteTencentWorkspacePaths(rewrittenInlineProgram);
+}
+
+function rewriteTencentWorkspacePaths(value: string) {
+  return value.replace(/(?<!\/home\/user)\/workspace/gu, TENCENT_WORKSPACE_ROOT);
 }
 
 export function mapTencentAgsxError(error: unknown, creating: boolean) {

@@ -1,0 +1,50 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T07-06-50-642Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T07-06-50-642Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T07:06:50.642Z
+- Total: 209909.9 ms
+- Cases: 3/3; PASS 0, FAIL 3, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 0.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 3 | 3/0/0/0 | 0 | 2.6 | 0.9 | 1.1 | 1.3 | 1.3 | N/A |
+| model/generate | 21 | 21/0/0/0 | 0 | 207272.8 | 9870.1 | 6377.7 | 31143.8 | 31327.2 | N/A |
+| request/agent_run | 3 | 2/0/0/1 | 0 | 209881.3 | 69960.4 | 56503.2 | 123918.2 | 123918.2 | N/A |
+| response/stream | 3 | 2/0/0/1 | 0 | 206455.4 | 68818.5 | 55324.5 | 122660.7 | 122660.7 | N/A |
+| sandbox/execute | 10 | 6/3/1/0 | 0 | 2582.2 | 258.2 | 101.9 | 790.4 | 790.4 | N/A |
+| skill/discover | 3 | 3/0/0/0 | 0 | 0.2 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| skill/load | 2 | 2/0/0/0 | 0 | 0.2 | 0.1 | 0.1 | 0.2 | 0.2 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BOX-05 | FAIL | 1257.5 | 123918.7 | 8 | 7 | ASSERTION_FAILED: expected completed, got cancelled; chart image artifact missing; chart source-data artifact missing |
+| BOX-06 | FAIL | 989.6 | 29459.9 | 5 | 4 | ASSERTION_FAILED: repairable script did not show fail-then-retry execution; initial script failure evidence missing |
+| BOX-07 | FAIL | 1178.8 | 56503.4 | 8 | 6 | ASSERTION_FAILED: sandbox timeout was not disclosed |
+
+## Slowest cases
+
+- BOX-05: 123918.7 ms (request/agent_run)
+- BOX-07: 56503.4 ms (request/agent_run)
+- BOX-06: 29459.9 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

@@ -18,7 +18,6 @@ export async function recordExecutionCosts(params: {
   conversationId?: string | null;
   sessionId: string;
   toolExecutionId: string;
-  delegationTaskId?: string | null;
   computeCostCents: number;
   browserCostCents: number;
   providerCostCents: number;
@@ -41,9 +40,7 @@ export async function recordExecutionCosts(params: {
       where: { id: params.toolExecutionId },
       select: {
         billingSnapshot: true,
-        billingAdmission: true,
         executionLeaseToken: true,
-        planActionId: true,
         status: true,
       },
     });
@@ -54,13 +51,9 @@ export async function recordExecutionCosts(params: {
     ) {
       throw new SessionError(409, "compute_execution_claim_lost");
     }
-    const generationOwnedBilling = execution.planActionId !== null;
-    if (generationOwnedBilling) {
-      assertGenerationOwnedActionBillingAdmission(execution.billingAdmission);
-    }
     const existing = readExecutionCostSummary(execution.billingSnapshot);
     if (existing) {
-      return generationOwnedBilling ? zeroExecutionCostSummary() : existing;
+      return existing;
     }
 
     if (params.conversationId) {
@@ -76,10 +69,8 @@ export async function recordExecutionCosts(params: {
       conversationId: params.conversationId ?? null,
       sessionId: params.sessionId,
       toolExecutionId: params.toolExecutionId,
-      delegationTaskId: params.delegationTaskId ?? null,
     };
-    if (!generationOwnedBilling) {
-      await tx.ledgerEntry.create({
+    await tx.ledgerEntry.create({
         data: {
           ...common,
           kind: "COMPUTE_MINUTES",
@@ -88,8 +79,8 @@ export async function recordExecutionCosts(params: {
           costCents: params.computeCostCents,
           notes: "compute_usage",
         },
-      });
-      await tx.ledgerEntry.create({
+    });
+    await tx.ledgerEntry.create({
         data: {
           ...common,
           kind: "STORAGE_BYTES",
@@ -98,9 +89,9 @@ export async function recordExecutionCosts(params: {
           costCents: params.storageCostCents,
           notes: "artifact_storage_charge",
         },
-      });
-      if (params.capability === "browser") {
-        await tx.ledgerEntry.create({
+    });
+    if (params.capability === "browser") {
+      await tx.ledgerEntry.create({
           data: {
             ...common,
             kind: "BROWSER_MINUTES",
@@ -109,10 +100,10 @@ export async function recordExecutionCosts(params: {
             costCents: params.browserCostCents,
             notes: "browser_usage",
           },
-        });
-      }
-      if (params.providerCostCents > 0) {
-        await tx.ledgerEntry.create({
+      });
+    }
+    if (params.providerCostCents > 0) {
+      await tx.ledgerEntry.create({
           data: {
             ...common,
             kind: "MODEL_USAGE",
@@ -121,10 +112,10 @@ export async function recordExecutionCosts(params: {
             costCents: params.providerCostCents,
             notes: "native_provider_usage",
           },
-        });
-      }
-      if (params.mcpCostCents > 0) {
-        await tx.ledgerEntry.create({
+      });
+    }
+    if (params.mcpCostCents > 0) {
+      await tx.ledgerEntry.create({
           data: {
             ...common,
             kind: "MCP_CALLS",
@@ -133,22 +124,16 @@ export async function recordExecutionCosts(params: {
             costCents: params.mcpCostCents,
             notes: "mcp_remote_usage",
           },
-        });
-      }
+      });
     }
 
-    // V3 conversation Actions inherit the GenerationRun's single commercial
-    // reservation/settlement. Returning zeroes prevents the action response
-    // from presenting internal runtime measurements as a second charge.
-    const summary = generationOwnedBilling
-      ? zeroExecutionCostSummary()
-      : {
-          computeCostCents: params.computeCostCents,
-          browserCostCents: params.browserCostCents,
-          providerCostCents: params.providerCostCents,
-          mcpCostCents: params.mcpCostCents,
-          storageCostCents: params.storageCostCents,
-        } satisfies ExecutionCostSummary;
+    const summary = {
+      computeCostCents: params.computeCostCents,
+      browserCostCents: params.browserCostCents,
+      providerCostCents: params.providerCostCents,
+      mcpCostCents: params.mcpCostCents,
+      storageCostCents: params.storageCostCents,
+    } satisfies ExecutionCostSummary;
     const finalized = await tx.toolExecution.updateMany({
       where: {
         id: params.toolExecutionId,
@@ -166,29 +151,6 @@ export async function recordExecutionCosts(params: {
     }
     return summary;
   });
-}
-
-function assertGenerationOwnedActionBillingAdmission(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new SessionError(409, "v3_action_billing_admission_missing");
-  }
-  const admission = value as Record<string, unknown>;
-  if (
-    admission["decision"] !== "not_billable"
-    || admission["reasonCode"] !== "generation_run_owns_conversation_billing"
-  ) {
-    throw new SessionError(409, "v3_action_billing_admission_invalid");
-  }
-}
-
-function zeroExecutionCostSummary(): ExecutionCostSummary {
-  return {
-    computeCostCents: 0,
-    browserCostCents: 0,
-    providerCostCents: 0,
-    mcpCostCents: 0,
-    storageCostCents: 0,
-  };
 }
 
 function readExecutionCostSummary(value: unknown): ExecutionCostSummary | null {

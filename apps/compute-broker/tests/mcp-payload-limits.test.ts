@@ -13,6 +13,15 @@ const jsonLimits = {
 };
 
 describe("MCP payload limits", () => {
+  it("classifies an MCP isError result as a semantic failure", async () => {
+    process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
+    const { isMcpToolErrorResult } = await import("../src/mcp");
+
+    expect(isMcpToolErrorResult({ content: [], isError: true })).toBe(true);
+    expect(isMcpToolErrorResult({ content: [], isError: false })).toBe(false);
+    expect(isMcpToolErrorResult({ content: [] })).toBe(false);
+  });
+
   it("accepts bounded JSON-safe arguments", () => {
     expect(assertMcpJsonPayload(
       { city: "Shanghai", options: [true, 3, null] },

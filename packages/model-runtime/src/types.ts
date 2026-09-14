@@ -2,7 +2,6 @@ import type { Representative } from "@delegate/domain";
 import type { OpenVikingRecallItem } from "@delegate/openviking";
 import type {
   ConversationPlan,
-  NaturalLanguageDelegationPlan,
   ResolvedSubagentRoute,
   StructuredCollectorState,
 } from "@delegate/runtime";
@@ -45,7 +44,6 @@ export type ModelRuntimeEnv = {
   enabled: boolean;
   provider: string;
   fallbackProvider?: string;
-  plannerProvider?: string;
   state: ModelRuntimeState;
   timeoutMs: number;
   documentTimeoutMs: number;
@@ -182,18 +180,4 @@ export type RepresentativeReplyResult =
       contextTrace?: RepresentativeReplyContextTrace;
       provider?: string;
       model?: string;
-    };
-
-export type NaturalLanguageComputePlannerResult =
-  | {
-      ok: true;
-      plan: NaturalLanguageDelegationPlan | null;
-      source: "model" | "deterministic";
-      provider?: ModelProvider;
-      model?: string;
-    }
-  | {
-      ok: false;
-      reason: string;
-      state: ModelRuntimeState;
     };

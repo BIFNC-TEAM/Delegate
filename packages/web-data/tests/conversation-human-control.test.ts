@@ -318,6 +318,17 @@ describe("conversation human control and message-edit fencing", () => {
         lastMessageAt: expect.any(Date),
       },
     });
+    expect(mocks.tx.generationRun.updateMany).toHaveBeenCalledWith({
+      where: {
+        conversationId,
+        status: "WAITING_HUMAN",
+      },
+      data: expect.objectContaining({
+        status: "CANCELED",
+        canceledAt: expect.any(Date),
+        errorCode: "audience_canceled_handoff_request",
+      }),
+    });
     expect(mocks.tx.eventAudit.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         type: "HANDOFF_RESOLVED",
@@ -696,66 +707,6 @@ describe("conversation human control and message-edit fencing", () => {
 
     expect(mocks.tx.message.updateMany).not.toHaveBeenCalled();
     expect(mocks.tx.messageRevision.create).not.toHaveBeenCalled();
-  });
-
-  it("does not reinterpret a delegated task authorization as a normal message edit", async () => {
-    mockEditableMessage({
-      ...processingRun,
-      delegationTaskId: "delegation-task-1",
-    } as typeof processingRun);
-
-    await expect(
-      editConversationMessage({
-        representativeSlug: "representative",
-        conversationId,
-        messageId: inputMessageId,
-        text: "edited request",
-        editedBy: "@alice:example.org",
-      }),
-    ).rejects.toThrow("Cancel the task and submit a new message");
-
-    expect(mocks.tx.messageRevision.create).not.toHaveBeenCalled();
-    expect(mocks.tx.generationRun.create).not.toHaveBeenCalled();
-    expect(mocks.tx.outboxEvent.create).not.toHaveBeenCalled();
-    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
-  });
-
-  it("requires explicit delegation cancellation before operator takeover", async () => {
-    const delegatedRun = {
-      ...processingRun,
-      delegationTaskId: "delegation-task-1",
-      delegationTaskStepId: "delegation-step-1",
-    };
-    mocks.tx.conversation.findFirst.mockResolvedValue({
-      id: conversationId,
-      state: "PROCESSING",
-      representativeId: "representative-1",
-      contactId: "contact-1",
-      episodes: [{
-        id: episodeId,
-        sequence: 1,
-        status: "ACTIVE",
-      }],
-    });
-    mocks.tx.delegationTask.findMany.mockResolvedValue([
-      { id: "delegation-task-1" },
-    ]);
-    mocks.tx.generationRun.findMany.mockResolvedValue([delegatedRun]);
-    mocks.tx.generationRun.findUnique.mockResolvedValue(delegatedRun);
-
-    await expect(
-      assignConversationOperator({
-        representativeSlug: "representative",
-        conversationId,
-        operatorId: "operator-1",
-        operatorName: "Operator",
-      }),
-    ).rejects.toMatchObject({ code: "ACTIVE_DELEGATION_TASK" });
-
-    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
-    expect(mocks.tx.generationRun.updateMany).not.toHaveBeenCalled();
-    expect(mocks.tx.outboxEvent.updateMany).not.toHaveBeenCalled();
-    expect(mocks.tx.conversationAssignment.create).not.toHaveBeenCalled();
   });
 
   it("does not bypass package-required handoff access during direct takeover", async () => {

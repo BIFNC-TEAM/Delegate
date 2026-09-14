@@ -1,0 +1,194 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-09T01-34-12-891Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "controlled-dependencies-real-model",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-09T01:34:12.891Z",
+  "totalDurationMs": 113179.86070800001,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "PRODUCT_ATTACHMENT_FLOW_FAILED": 1
+  },
+  "moduleTimings": [
+    {
+      "module": "context",
+      "operation": "product.attachment_disclosure",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 27.093500000000176,
+      "averageMs": 27.093500000000176,
+      "p50Ms": 27.093500000000176,
+      "p95Ms": 27.093500000000176,
+      "maximumMs": 27.093500000000176,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "request",
+      "operation": "product.attachment_accept",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 185.92066599999998,
+      "averageMs": 185.92066599999998,
+      "p50Ms": 185.92066599999998,
+      "p95Ms": 185.92066599999998,
+      "maximumMs": 185.92066599999998,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "request",
+      "operation": "product.attachment_session",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 129.90862499999992,
+      "averageMs": 129.90862499999992,
+      "p50Ms": 129.90862499999992,
+      "p95Ms": 129.90862499999992,
+      "maximumMs": 129.90862499999992,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "response",
+      "operation": "product.attachment_sse",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 112833.603917,
+      "averageMs": 112833.603917,
+      "p50Ms": 112833.603917,
+      "p95Ms": 112833.603917,
+      "maximumMs": 112833.603917,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    }
+  ],
+  "uncalledModules": [
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "wait"
+  ],
+  "slowestCases": [
+    {
+      "id": "CHAT-02",
+      "durationMs": 113179.334875,
+      "dominantStage": "response/product.attachment_sse"
+    }
+  ],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "CHAT-02",
+      "title": "Attachment follow-up",
+      "status": "FAIL",
+      "applicable": true,
+      "attempt": 1,
+      "totalDurationMs": 113179.334875,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "PRODUCT_ATTACHMENT_FLOW_FAILED: product attachment response has no shenzhen-summary.csv",
+      "evidence": [
+        "No attachment result was accepted without upload, sandbox and download evidence."
+      ],
+      "spans": [
+        {
+          "traceId": "product-chat-02",
+          "runId": "product-chat-02",
+          "caseId": "CHAT-02",
+          "spanId": "7325bfb9-9bd5-4330-b255-79313085db95",
+          "module": "request",
+          "operation": "product.attachment_session",
+          "attempt": 1,
+          "startOffsetMs": 0.021834000000012566,
+          "durationMs": 129.90862499999992,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-chat-02",
+          "runId": "product-chat-02",
+          "caseId": "CHAT-02",
+          "spanId": "4907803f-4bac-44e5-a0a2-a99e36888cbf",
+          "module": "context",
+          "operation": "product.attachment_disclosure",
+          "attempt": 1,
+          "startOffsetMs": 130.26637499999993,
+          "durationMs": 27.093500000000176,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-chat-02",
+          "runId": "product-chat-02",
+          "caseId": "CHAT-02",
+          "spanId": "79ee0f58-f003-4adb-a49a-ec156644585f",
+          "module": "request",
+          "operation": "product.attachment_accept",
+          "attempt": 1,
+          "startOffsetMs": 158.31458399999997,
+          "durationMs": 185.92066599999998,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-chat-02",
+          "runId": "product-chat-02",
+          "caseId": "CHAT-02",
+          "spanId": "9b43e1a5-9d76-4d0f-abee-e443300f5302",
+          "module": "response",
+          "operation": "product.attachment_sse",
+          "attempt": 1,
+          "startOffsetMs": 344.39487499999996,
+          "durationMs": 112833.603917,
+          "status": "ok"
+        }
+      ]
+    }
+  ]
+}

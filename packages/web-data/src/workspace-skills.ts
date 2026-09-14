@@ -1,6 +1,10 @@
 import { createHash, verify as verifyCryptographicSignature } from "node:crypto";
 
-import { demoRepresentative, type RepresentativeSkill } from "@delegate/domain";
+import {
+  builtinSkillCatalog,
+  demoRepresentative,
+  type RepresentativeSkill,
+} from "@delegate/domain";
 import {
   fetchClawHubRepresentativeSkill,
   fetchClawHubRepresentativeSkillVersionTrust,
@@ -91,8 +95,15 @@ export function isWorkspaceSkillReleaseRuntimeTrusted(input: {
   registryTrustEligible?: boolean | null | undefined;
   signatureStatus?: WorkspaceSkillSignatureStatus | string | null | undefined;
 }): boolean {
-  if (input.executesCode) return false;
   const source = String(input.source).trim().toUpperCase();
+  if (input.executesCode) {
+    const signatureStatus = String(input.signatureStatus ?? "").trim().toUpperCase();
+    return source === SkillPackSource.BUILTIN
+      && (
+        input.registryTrustEligible === true
+        || signatureStatus === WorkspaceSkillSignatureStatus.VERIFIED
+      );
+  }
   if (source !== SkillPackSource.CLAWHUB) return true;
   const signatureStatus = String(input.signatureStatus ?? "").trim().toUpperCase();
   return input.registryTrustEligible === true
@@ -529,6 +540,192 @@ export async function getWorkspaceSkillSnapshot(input: {
       };
     }),
   };
+}
+
+export async function installBuiltinSkillForWorkspace(input: {
+  ownerId?: string | null;
+  activeRepresentativeSlug: string;
+  skillPackSlug: string;
+  installedBy: string;
+}) {
+  const builtin = builtinSkillCatalog.find((skill) =>
+    skill.slug === input.skillPackSlug);
+  if (!builtin) {
+    throw workspaceSkillNotFound(
+      `Built-in skill ${input.skillPackSlug} was not found.`,
+    );
+  }
+  if (!process.env.DATABASE_URL?.trim()) {
+    throw workspaceSkillConflict(
+      "Built-in workspace skill installation requires the persistent database.",
+    );
+  }
+
+  return runWithPrismaWriteConflictRetry(() => prisma.$transaction(async (tx) => {
+    const representative = await tx.representative.findFirst({
+      where: {
+        slug: input.activeRepresentativeSlug,
+        ...(input.ownerId ? { ownerId: input.ownerId } : {}),
+      },
+      select: { id: true, ownerId: true },
+    });
+    if (!representative) throw workspaceSkillNotFound("Representative not found.");
+
+    const skillPack = await tx.skillPack.upsert({
+      where: {
+        source_slug: {
+          source: SkillPackSource.BUILTIN,
+          slug: builtin.slug,
+        },
+      },
+      create: {
+        id: builtin.id,
+        source: SkillPackSource.BUILTIN,
+        slug: builtin.slug,
+        displayName: builtin.displayName,
+        summary: builtin.summary,
+        version: builtin.version,
+        sourceUrl: builtin.sourceUrl,
+        verificationTier: builtin.verificationTier,
+        capabilityTags: [...builtin.capabilityTags],
+        executesCode: builtin.executesCode,
+      },
+      update: {
+        displayName: builtin.displayName,
+        summary: builtin.summary,
+        version: builtin.version,
+        sourceUrl: builtin.sourceUrl,
+        verificationTier: builtin.verificationTier,
+        capabilityTags: [...builtin.capabilityTags],
+        executesCode: builtin.executesCode,
+      },
+    });
+    const existing = await tx.workspaceSkillInstall.findUnique({
+      where: {
+        ownerId_skillPackId: {
+          ownerId: representative.ownerId,
+          skillPackId: skillPack.id,
+        },
+      },
+      include: { releases: { select: { id: true, version: true, status: true } } },
+    });
+    if (existing?.status === WorkspaceSkillInstallStatus.ARCHIVED) {
+      throw workspaceSkillConflict(
+        "Restore the archived built-in skill before installing it again.",
+      );
+    }
+    const install = await tx.workspaceSkillInstall.upsert({
+      where: {
+        ownerId_skillPackId: {
+          ownerId: representative.ownerId,
+          skillPackId: skillPack.id,
+        },
+      },
+      create: {
+        ownerId: representative.ownerId,
+        skillPackId: skillPack.id,
+        status: WorkspaceSkillInstallStatus.INSTALLED,
+        reviewStatus: WorkspaceSkillReviewStatus.APPROVED,
+        updatePolicy: WorkspaceSkillUpdatePolicy.REVIEW_REQUIRED,
+        installedVersion: builtin.version,
+        installedBy: input.installedBy,
+      },
+      update: {
+        status: WorkspaceSkillInstallStatus.INSTALLED,
+        reviewStatus: WorkspaceSkillReviewStatus.APPROVED,
+        installedVersion: builtin.version,
+      },
+    });
+    await tx.workspaceSkillRelease.updateMany({
+      where: {
+        installId: install.id,
+        status: WorkspaceSkillReleaseStatus.INSTALLED,
+        version: { not: builtin.version },
+      },
+      data: { status: WorkspaceSkillReleaseStatus.SUPERSEDED },
+    });
+    const release = await tx.workspaceSkillRelease.upsert({
+      where: {
+        installId_version: {
+          installId: install.id,
+          version: builtin.version,
+        },
+      },
+      create: {
+        installId: install.id,
+        version: builtin.version,
+        status: WorkspaceSkillReleaseStatus.INSTALLED,
+        displayName: builtin.displayName,
+        summary: builtin.summary,
+        sourceUrl: builtin.sourceUrl,
+        verificationTier: builtin.verificationTier,
+        capabilityTags: [...builtin.capabilityTags],
+        executesCode: builtin.executesCode,
+        provenanceDigest: builtin.instructionsSha256,
+        signatureStatus: WorkspaceSkillSignatureStatus.VERIFIED,
+        registryTrustSource: "delegate_builtin",
+        registryVerified: true,
+        registryTrustEligible: true,
+        registryTrustEvidence: {
+          source: "delegate_builtin",
+          version: builtin.version,
+          instructionsSha256: builtin.instructionsSha256,
+        },
+        runtimeRequirements: {
+          requiredBins: ["python"],
+          requiredEnv: [],
+          optionalEnv: [],
+          networkMode: "no_network",
+        },
+        instructions: builtin.instructions,
+        instructionsSha256: builtin.instructionsSha256,
+        resources: [...builtin.resources],
+        reviewedBy: input.installedBy,
+        reviewedAt: new Date(),
+        adoptedAt: new Date(),
+      },
+      update: {
+        status: WorkspaceSkillReleaseStatus.INSTALLED,
+        displayName: builtin.displayName,
+        summary: builtin.summary,
+        sourceUrl: builtin.sourceUrl,
+        verificationTier: builtin.verificationTier,
+        capabilityTags: [...builtin.capabilityTags],
+        executesCode: builtin.executesCode,
+        provenanceDigest: builtin.instructionsSha256,
+        signatureStatus: WorkspaceSkillSignatureStatus.VERIFIED,
+        registryTrustSource: "delegate_builtin",
+        registryVerified: true,
+        registryTrustEligible: true,
+        instructions: builtin.instructions,
+        instructionsSha256: builtin.instructionsSha256,
+        resources: [...builtin.resources],
+      },
+    });
+    if (!existing) {
+      await tx.eventAudit.create({
+        data: {
+          ownerId: representative.ownerId,
+          representativeId: representative.id,
+          type: EventType.SKILL_INSTALLED,
+          payload: {
+            installId: install.id,
+            skillPackId: skillPack.id,
+            releaseId: release.id,
+            source: "builtin",
+            version: builtin.version,
+            installedBy: input.installedBy,
+          },
+        },
+      });
+    }
+    return {
+      installId: install.id,
+      skillPackId: skillPack.id,
+      releaseId: release.id,
+      status: "installed" as const,
+    };
+  }));
 }
 
 export async function installClawHubSkillForWorkspace(input: {
@@ -1135,7 +1332,11 @@ export async function setWorkspaceSkillRepresentativeBinding(input: {
         "This skill version must be reviewed before it can be enabled.",
       );
     }
-    if (input.enabled && install.skillPack.executesCode) {
+    if (
+      input.enabled
+      && install.skillPack.executesCode
+      && install.skillPack.source !== SkillPackSource.BUILTIN
+    ) {
       throw workspaceSkillRejected(
         "Executable registry packages cannot be enabled in Delegate.",
       );
@@ -2299,7 +2500,12 @@ export function resolveWorkspaceSkillReadiness(input: {
   signatureStatus?: WorkspaceSkillSignatureStatus | string | null;
   bindings: WorkspaceSkillSnapshot["skills"][number]["bindings"];
 }) {
-  if (input.executesCode) return { status: "blocked" as const, reason: "Executable third-party packages are blocked by the public-runtime trust boundary." };
+  if (
+    input.executesCode
+    && (input.source ?? SkillPackSource.BUILTIN) !== SkillPackSource.BUILTIN
+  ) {
+    return { status: "blocked" as const, reason: "Executable third-party packages are blocked by the public-runtime trust boundary." };
+  }
   if (!isWorkspaceSkillReleaseRuntimeTrusted({
     source: input.source ?? SkillPackSource.BUILTIN,
     executesCode: input.executesCode,

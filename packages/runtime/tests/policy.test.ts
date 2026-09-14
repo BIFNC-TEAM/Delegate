@@ -266,7 +266,7 @@ describe("conversation planning", () => {
     expect(plan.actions).toEqual([
       expect.objectContaining({
         kind: "cancel_pending_action",
-        requiredCapabilities: ["delegation.cancel"],
+        requiredCapabilities: ["generation.cancel"],
       }),
     ]);
   });

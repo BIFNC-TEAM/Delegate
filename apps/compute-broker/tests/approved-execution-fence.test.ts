@@ -4,7 +4,6 @@ const {
   mockPrisma,
   mockEvaluateExecutionRequest,
   mockFinalizeApproval,
-  mockValidateDelegatedExecution,
   executionState,
 } = vi.hoisted(() => {
   const executionState = buildQueuedExecution();
@@ -57,7 +56,6 @@ const {
     executionState,
     mockEvaluateExecutionRequest: vi.fn(),
     mockFinalizeApproval: vi.fn(),
-    mockValidateDelegatedExecution: vi.fn(),
     mockPrisma: {
       ...client,
       $transaction: vi.fn(
@@ -84,9 +82,6 @@ vi.mock("../src/lifecycle-hooks", () => ({
 
 vi.mock("@delegate/web-data", () => ({
   finalizeComputeApprovalConversation: mockFinalizeApproval,
-  markDelegationTaskRunningAfterApprovalInTransaction: vi.fn(),
-  validateDelegationApprovedExecutionInTransaction:
-    mockValidateDelegatedExecution,
 }));
 
 describe("approved execution claim fencing", () => {
@@ -99,7 +94,6 @@ describe("approved execution claim fencing", () => {
     mockPrisma.approvalRequest.findUnique.mockResolvedValue(
       buildApprovedApproval(),
     );
-    mockValidateDelegatedExecution.mockResolvedValue({ ready: true });
     mockEvaluateExecutionRequest.mockResolvedValue(
       buildEvaluatedRequest("deny"),
     );
@@ -151,42 +145,6 @@ describe("approved execution claim fencing", () => {
     });
   });
 
-  it("revalidates the delegated state immediately before execution", async () => {
-    mockEvaluateExecutionRequest.mockResolvedValue(
-      buildEvaluatedRequest("allow"),
-    );
-    mockValidateDelegatedExecution
-      .mockResolvedValueOnce({ ready: true })
-      .mockResolvedValueOnce({
-        ready: false,
-        reason: "delegation_conversation_human_controlled",
-      });
-    const { processNextApprovedExecution } = await import("../src/executions");
-
-    await expect(processNextApprovedExecution()).resolves.toBe(true);
-
-    expect(mockValidateDelegatedExecution).toHaveBeenCalledTimes(2);
-    const executionLeaseToken =
-      mockPrisma.toolExecution.updateMany.mock.calls[0]![0].data
-        .executionLeaseToken;
-    expect(mockPrisma.toolExecution.updateMany).toHaveBeenLastCalledWith({
-      where: {
-        id: "execution-1",
-        status: "RUNNING",
-        executionLeaseToken,
-      },
-      data: {
-        status: "FAILED",
-        finishedAt: expect.any(Date),
-        executionLeaseToken: null,
-      },
-    });
-    expect(mockFinalizeApproval).toHaveBeenCalledWith({
-      approvalId: "approval-1",
-      outcome: "failed",
-      failureReason: "delegation_conversation_human_controlled",
-    });
-  });
 });
 
 function buildQueuedExecution() {
@@ -196,8 +154,8 @@ function buildQueuedExecution() {
     mcpBindingId: null,
     capability: "WRITE",
     subagentId: "compute-agent",
-    delegationTaskId: "task-1",
-    delegationTaskStepId: "step-1",
+    delegationTaskId: null,
+    delegationTaskStepId: null,
     generationOutboxId: "outbox-1",
     generationLeaseAttempt: 1,
     requestPayloadHash: "request-hash",
@@ -230,8 +188,8 @@ function buildApprovedApproval() {
     contactId: "contact-1",
     conversationId: "conversation-1",
     generationRunId: "run-1",
-    delegationTaskId: "task-1",
-    delegationTaskStepId: "step-1",
+    delegationTaskId: null,
+    delegationTaskStepId: null,
     sessionId: "session-1",
     toolExecutionId: "execution-1",
     subagentId: "compute-agent",

@@ -11,7 +11,7 @@ import {
 } from "@delegate/web-data";
 
 import { sendMatrixRepresentativeMessage } from "../../apps/conversation-worker/src/matrix-outbound";
-import { processNextConversationWork } from "../../apps/conversation-worker/src/processor";
+import { processNextConversationWork } from "../../apps/conversation-worker/src/processor-pi";
 
 const homeserverUrl =
   process.env.MATRIX_LOCAL_HOMESERVER_URL?.trim()

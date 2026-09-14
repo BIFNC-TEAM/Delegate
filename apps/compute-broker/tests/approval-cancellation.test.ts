@@ -3,8 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   mockPrisma,
   mockFinalizeComputeApprovalConversation,
-  mockMarkDelegationTaskRunningAfterApproval,
-  mockValidateDelegationApprovedExecution,
 } = vi.hoisted(() => {
   const prismaMock = {
     approvalRequest: {
@@ -51,8 +49,6 @@ const {
   return {
     mockPrisma: prismaMock,
     mockFinalizeComputeApprovalConversation: vi.fn(),
-    mockMarkDelegationTaskRunningAfterApproval: vi.fn(),
-    mockValidateDelegationApprovedExecution: vi.fn(),
   };
 });
 
@@ -62,10 +58,6 @@ vi.mock("../src/prisma", () => ({
 
 vi.mock("@delegate/web-data", () => ({
   finalizeComputeApprovalConversation: mockFinalizeComputeApprovalConversation,
-  markDelegationTaskRunningAfterApprovalInTransaction:
-    mockMarkDelegationTaskRunningAfterApproval,
-  validateDelegationApprovedExecutionInTransaction:
-    mockValidateDelegationApprovedExecution,
 }));
 
 vi.mock("../src/lifecycle-hooks", () => ({
@@ -100,10 +92,6 @@ describe("approval workflow cancellation", () => {
     mockPrisma.computeSession.updateMany.mockResolvedValue({ count: 0 });
     mockPrisma.toolExecution.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.$executeRaw.mockResolvedValue(1);
-    mockMarkDelegationTaskRunningAfterApproval.mockResolvedValue({
-      transitioned: true,
-    });
-    mockValidateDelegationApprovedExecution.mockResolvedValue({ ready: true });
     mockPrisma.workflowRun.findMany.mockResolvedValue([
       {
         id: "workflow-temporal-1",
@@ -210,67 +198,6 @@ describe("approval workflow cancellation", () => {
         }),
       }),
     });
-  });
-
-  it("atomically resumes a delegated task before queueing its approved execution", async () => {
-    const pendingApproval = {
-      ...buildApproval("PENDING"),
-      conversationId: "conversation-1",
-      generationRunId: "run-1",
-      delegationTaskId: "task-1",
-      delegationTaskStepId: "step-1",
-      toolExecutionId: "execution-1",
-    };
-    const approvedApproval = {
-      ...pendingApproval,
-      status: "APPROVED",
-    };
-    mockPrisma.approvalRequest.findUnique.mockResolvedValue(pendingApproval);
-    mockPrisma.approvalRequest.findUniqueOrThrow.mockResolvedValue(
-      approvedApproval,
-    );
-    mockPrisma.toolExecution.findUnique.mockResolvedValue(
-      buildBlockedExecution(),
-    );
-    const { resolveApproval } = await import("../src/executions");
-
-    await resolveApproval("approval-1", {
-      resolution: "approved",
-      resolvedBy: "owner-1",
-    });
-
-    expect(
-      mockMarkDelegationTaskRunningAfterApproval,
-    ).toHaveBeenCalledWith(
-      mockPrisma,
-      {
-        taskId: "task-1",
-        stepId: "step-1",
-        generationRunId: "run-1",
-        originConversationId: "conversation-1",
-        approvalId: "approval-1",
-        actorId: "owner-1",
-      },
-    );
-    expect(mockPrisma.toolExecution.updateMany).toHaveBeenCalledWith({
-      where: { id: "execution-1", status: "BLOCKED" },
-      data: expect.objectContaining({
-        status: "QUEUED",
-        startedAt: null,
-        finishedAt: null,
-        executionLeaseToken: null,
-      }),
-    });
-    expect(
-      mockPrisma.approvalRequest.updateMany.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      mockMarkDelegationTaskRunningAfterApproval.mock.invocationCallOrder[0]!,
-    );
-    expect(
-      mockMarkDelegationTaskRunningAfterApproval.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      mockPrisma.toolExecution.updateMany.mock.invocationCallOrder.at(-1)!,
-    );
   });
 
   it("does not extend the compute session beyond its creation-time expiry", async () => {

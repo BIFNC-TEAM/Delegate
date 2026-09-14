@@ -1,0 +1,46 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T09-57-52-302Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T09-57-52-302Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T09:57:52.302Z
+- Total: 82115.7 ms
+- Cases: 1/1; PASS 0, FAIL 1, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 0.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 1 | 1/0/0/0 | 0 | 1.1 | 1.1 | 1.1 | 1.1 | 1.1 | N/A |
+| model/generate | 8 | 8/0/0/0 | 0 | 81950.5 | 10243.8 | 8876.8 | 18646.3 | 18646.3 | N/A |
+| request/agent_run | 1 | 1/0/0/0 | 0 | 82102.8 | 82102.8 | 82102.8 | 82102.8 | 82102.8 | N/A |
+| response/stream | 1 | 1/0/0/0 | 0 | 81212.5 | 81212.5 | 81212.5 | 81212.5 | 81212.5 | N/A |
+| sandbox/execute | 3 | 1/2/0/0 | 0 | 137.2 | 45.7 | 1.0 | 136.1 | 136.1 | N/A |
+| skill/discover | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| skill/load | 1 | 1/0/0/0 | 0 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| PERF-04 | FAIL | 890.3 | 82103.2 | 8 | 6 | ASSERTION_FAILED: large-file row count or total is incorrect |
+
+## Slowest cases
+
+- PERF-04: 82103.2 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

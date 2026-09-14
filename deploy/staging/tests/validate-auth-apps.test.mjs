@@ -97,6 +97,19 @@ test("staging advertises OpenViking model capability without copying its secret"
   assert.doesNotMatch(appEnvBlock, /OPENVIKING_MODEL_API_KEY:/u);
 });
 
+test("staging does not emit retired Agent planner configuration", () => {
+  for (const key of [
+    "DELEGATE_MODEL_PLANNER_PROVIDER",
+    "DELEGATE_MODEL_PLANNER_MAX_OUTPUT_TOKENS",
+    "TURN_PLANNER_V2_MODE",
+    "TURN_PLAN_V3_MODE",
+    "TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED",
+    "PENDING_CLARIFICATION_MODE",
+  ]) {
+    assert.equal(prepareEnv.includes(key), false);
+  }
+});
+
 test("staging payment collection is an explicit persistent source flag", () => {
   assert.match(
     prepareEnv,

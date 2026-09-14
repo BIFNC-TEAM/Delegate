@@ -1,0 +1,66 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-smoke-2026-09-08T03-25-04-038Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-smoke-2026-09-08T03-25-04-038Z
+
+- Suite: smoke
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T03:25:04.038Z
+- Total: 190373.8 ms
+- Cases: 15/15; PASS 12, FAIL 2, BLOCKED 1, SKIP 0, REVIEW 0
+- Strict pass rate: 80.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 14 | 14/0/0/0 | 0 | 4.9 | 0.4 | 0.3 | 0.8 | 0.8 | N/A |
+| handoff/request | 2 | 2/0/0/0 | 0 | 0.1 | 0.0 | 0.0 | 0.1 | 0.1 | N/A |
+| knowledge/retrieve | 3 | 3/0/0/0 | 0 | 0.5 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| mcp/orders-test.get_order | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| mcp/orders-test.list_orders | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| mcp/tickets-test.create_ticket | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| model/generate | 48 | 47/1/0/0 | 0 | 189232.2 | 3942.3 | 2304.7 | 9281.6 | 14418.8 | N/A |
+| request/agent_run | 14 | 13/0/0/1 | 0 | 190355.4 | 13596.8 | 4013.0 | 63667.0 | 63667.0 | N/A |
+| response/stream | 13 | 12/1/0/0 | 0 | 171614.0 | 13201.1 | 3253.4 | 62939.1 | 62939.1 | N/A |
+| sandbox/execute | 18 | 10/7/0/1 | 0 | 1078.3 | 59.9 | 70.8 | 83.9 | 83.9 | N/A |
+| skill/discover | 3 | 3/0/0/0 | 0 | 0.1 | 0.0 | 0.0 | 0.1 | 0.1 | N/A |
+| skill/load | 3 | 3/0/0/0 | 0 | 0.3 | 0.1 | 0.1 | 0.2 | 0.2 | N/A |
+| web/search | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BASIC-01 | PASS | 1080.1 | 1863.2 | 1 | 0 |  |
+| BASIC-02 | PASS | 929.7 | 2159.3 | 1 | 0 |  |
+| KB-01 | PASS | 973.8 | 4647.0 | 2 | 1 |  |
+| KB-03 | PASS | 872.9 | 4126.4 | 2 | 1 |  |
+| WEB-01 | PASS | 772.5 | 4013.1 | 2 | 1 |  |
+| SKILL-02 | FAIL | 727.9 | 63667.1 | 12 | 12 | ASSERTION_FAILED: expected completed, got partial; city ranking values missing |
+| BOX-01 | FAIL | 3063.4 | 3711.4 | 2 | 1 | ASSERTION_FAILED: square-sum result missing |
+| BOX-02 | PASS | 656.5 | 52992.1 | 8 | 7 |  |
+| MCP-01 | PASS | 999.2 | 4657.2 | 2 | 1 |  |
+| MCP-05 | PASS | 686.9 | 4450.8 | 2 | 1 |  |
+| HUMAN-01 | PASS | 2402.5 | 2886.9 | 2 | 1 |  |
+| HUMAN-03 | PASS | 2597.4 | 3452.2 | 2 | 1 |  |
+| FLOW-01 | PASS | 811.8 | 35563.2 | 8 | 7 |  |
+| CHAT-04 | PASS | N/A | 2166.9 | 2 | 1 |  |
+| ARCH-03 | BLOCKED | N/A | N/A | 0 | 0 | AGENT_TEST_BASE_URL_MISSING: actual UI/API smoke was not started |
+
+## Slowest cases
+
+- SKILL-02: 63667.1 ms (request/agent_run)
+- BOX-02: 52992.1 ms (request/agent_run)
+- FLOW-01: 35563.2 ms (request/agent_run)
+- MCP-01: 4657.2 ms (request/agent_run)
+- KB-01: 4647.0 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

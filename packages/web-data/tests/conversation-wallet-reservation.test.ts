@@ -816,44 +816,6 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
   });
 
-  it("does not settle or consume free allowance for an intermediate delegation step", async () => {
-    mocks.tx.generationRun.findUnique.mockResolvedValue({
-      ...reservedRun,
-      id: "run-task-step-1",
-      delegationTaskId: "task-1",
-      delegationTaskStepId: "step-1",
-      delegationTaskStep: { kind: "COMPUTE" },
-      runtimePolicySnapshot: {
-        billingMode: "free",
-      },
-    });
-
-    await completeInlineGenerationRun({
-      conversationId: reservedRun.conversationId,
-      runId: "run-task-step-1",
-      outboxId: "outbox-task-step-1",
-      leaseAttempt: 1,
-      replyText: "Step one completed",
-      senderDisplayName: "Representative",
-      countUsage: true,
-      keepConversationQueued: true,
-    });
-
-    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
-    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
-    expect(mocks.tx.conversation.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "conversation-1",
-        state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
-      },
-      data: { state: "AI_QUEUED" },
-    });
-    expect(mocks.tx.conversation.update).toHaveBeenCalledWith({
-      where: { id: "conversation-1" },
-      data: { lastMessageAt: expect.any(Date) },
-    });
-  });
-
   it("settles ordinary conversation usage only after channel delivery succeeds", async () => {
     mocks.tx.generationRun.findUnique.mockResolvedValueOnce(reservedRun);
 

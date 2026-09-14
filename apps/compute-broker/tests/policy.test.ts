@@ -8,7 +8,7 @@ vi.mock("@delegate/web-data", () => ({
   finalizeComputeApprovalConversation: vi.fn(),
   getRepresentativeRuntimeAuthoritySnapshot: vi.fn(),
   verifyAgentUsageEntitlementReservation: vi.fn(),
-  resolveServerOwnedMcpCapabilityPolicyV3: vi.fn((input: {
+  resolveServerOwnedMcpCapabilityPolicy: vi.fn((input: {
     serverUrl: string;
     transportKind: string;
     toolName: string;
@@ -352,6 +352,29 @@ describe("resolveEffectiveDecision", () => {
       reason: "auto_approve_token_limit_exceeded",
     });
   });
+
+  it("does not apply token approval to a server-verified read-only MCP call", async () => {
+    const { resolveEffectiveDecision } = await import("../src/executions");
+    const result = resolveEffectiveDecision({
+      context: {
+        profile: { networkMode: "allowlist", networkAllowlist: ["agent-test-mcp"], filesystemMode: "workspace_only" },
+        runtimeAuthority: { compute: { autoApproveTokenLimit: 0 } },
+      } as never,
+      input: {
+        capability: "mcp",
+        subagentId: "compute-agent",
+        estimatedTokens: 1_000,
+        serverVerifiedReadOnlyMcp: true,
+        approvalRequired: false,
+      } as never,
+      decision: { decision: "allow", reason: "server_verified_read_only_mcp" },
+    });
+
+    expect(result).toEqual({
+      decision: "allow",
+      reason: "server_verified_read_only_mcp",
+    });
+  });
 });
 
 describe("execution session selection", () => {
@@ -384,58 +407,6 @@ describe("execution session selection", () => {
 });
 
 describe("published runtime authority ceiling", () => {
-  it("verifies compiled task metadata only against the server-owned task step snapshot", async () => {
-    const { resolveServerVerifiedCompiledSandboxTask } = await import("../src/policy");
-    const code = "print(55)";
-    const encoded = Buffer.from(code, "utf8").toString("base64");
-    const command =
-      `python -c "exec(__import__('base64').b64decode('${encoded}').decode('utf-8'))"`;
-    const metadata = {
-      compilerVersion: "sandbox-task-compiler.v1" as const,
-      instructionHash: "a".repeat(64),
-      codeHash: "f4e2573b7ba2b405ee5f9024e1ad7e66f907d426a679246f0033844ec93c976d",
-      riskClass: "self_contained_compute" as const,
-      compilerProvider: "openai",
-      compilerModel: "gpt-test",
-    };
-    const stepInputSnapshot = {
-      request: {
-        capability: "exec",
-        displayTarget: "task",
-        command,
-        compiledTask: metadata,
-      },
-      executionRequest: { capabilityKey: "compute.task" },
-    };
-
-    expect(resolveServerVerifiedCompiledSandboxTask({
-      input: {
-        capability: "exec",
-        subagentId: "compute-agent",
-        command,
-        compiledTask: metadata,
-        hasPaidEntitlement: false,
-        browserMode: "deterministic",
-        maxSteps: 1,
-        allowMutations: false,
-      },
-      stepInputSnapshot,
-    })).toBe(true);
-    expect(() => resolveServerVerifiedCompiledSandboxTask({
-      input: {
-        capability: "exec",
-        subagentId: "compute-agent",
-        command: `${command} `,
-        compiledTask: metadata,
-        hasPaidEntitlement: false,
-        browserMode: "deterministic",
-        maxSteps: 1,
-        allowMutations: false,
-      },
-      stepInputSnapshot,
-    })).toThrow("compiled_sandbox_task_mismatch");
-  });
-
   it("recognizes only a server-pinned read-only MCP definition", async () => {
     const { resolveServerVerifiedReadOnlyMcp } = await import("../src/policy");
     const runtimeGrants = [{
@@ -484,12 +455,77 @@ describe("published runtime authority ceiling", () => {
     })).toBe(false);
   });
 
+  it("allows only explicitly configured private test MCP read coordinates", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousPrivate = process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS;
+    const previousTools = process.env.DELEGATE_MCP_READ_ONLY_TEST_TOOLS;
+    process.env.NODE_ENV = "test";
+    process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS = "true";
+    process.env.DELEGATE_MCP_READ_ONLY_TEST_TOOLS = "binding-orders:list_orders,binding-orders:get_order";
+    try {
+      const { resolveServerVerifiedReadOnlyMcp } = await import("../src/policy");
+      const runtimeGrants = [{
+        id: "binding-orders",
+        slug: "orders-test",
+        serverUrl: "http://agent-test-mcp:4050/mcp",
+        transportKind: "streamable_http" as const,
+        allowedToolNames: ["list_orders", "create_ticket"],
+        defaultToolName: "list_orders",
+        enabled: true as const,
+        approvalRequired: false,
+        estimatedTokensPerCall: 0,
+        maxRetries: 0,
+        retryBackoffMs: 0,
+        configRevision: 1,
+        toolDefinitions: [{
+          exactToolName: "list_orders",
+          inputSchema: { type: "object" },
+          outputSchema: null,
+          toolSchemaHash: "test-schema-hash",
+          bindingDefinitionHash: "test-binding-hash",
+          bindingRevision: 1,
+          canonicalizationVersion: "delegate-capability-v1",
+        }, {
+          exactToolName: "create_ticket",
+          inputSchema: { type: "object" },
+          outputSchema: null,
+          toolSchemaHash: "write-schema-hash",
+          bindingDefinitionHash: "test-binding-hash",
+          bindingRevision: 1,
+          canonicalizationVersion: "delegate-capability-v1",
+        }],
+      }];
+      const binding = {
+        id: "binding-orders",
+        serverUrl: "http://agent-test-mcp:4050/mcp",
+        transportKind: "STREAMABLE_HTTP",
+        configRevision: 1,
+      };
+      expect(resolveServerVerifiedReadOnlyMcp({ binding, runtimeGrants, toolName: "list_orders" })).toBe(true);
+      expect(resolveServerVerifiedReadOnlyMcp({ binding, runtimeGrants, toolName: "create_ticket" })).toBe(false);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousPrivate === undefined) delete process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS;
+      else process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS = previousPrivate;
+      if (previousTools === undefined) delete process.env.DELEGATE_MCP_READ_ONLY_TEST_TOOLS;
+      else process.env.DELEGATE_MCP_READ_ONLY_TEST_TOOLS = previousTools;
+    }
+  });
+
   it("relaxes only the managed approval rule for a verified read-only MCP", async () => {
     const { applyServerVerifiedReadOnlyMcpDecision } = await import("../src/policy");
 
     expect(applyServerVerifiedReadOnlyMcpDecision({
       decision: "ask",
       reason: "managed_human_approval_required",
+    }, true)).toEqual({
+      decision: "allow",
+      reason: "server_verified_read_only_mcp",
+    });
+    expect(applyServerVerifiedReadOnlyMcpDecision({
+      decision: "ask",
+      reason: "auto_approve_token_limit_exceeded",
     }, true)).toEqual({
       decision: "allow",
       reason: "server_verified_read_only_mcp",
@@ -676,17 +712,6 @@ describe("compute session expiry ceiling", () => {
     ).toBe(storedExpiresAt);
   });
 
-  it("applies the task duration when it is shorter than the representative ceiling", async () => {
-    const { resolveComputeSessionExpiryCeiling } = await import("../src/policy");
-
-    expect(resolveComputeSessionExpiryCeiling({
-      storedExpiresAt: new Date("2026-07-23T11:00:00.000Z"),
-      createdAt: new Date("2026-07-23T10:00:00.000Z"),
-      runtimeMaxSessionMinutes: 30,
-      taskMaxDurationMinutes: 3,
-    })).toEqual(new Date("2026-07-23T10:03:00.000Z"));
-  });
-
   it("fails closed for missing or expired session ceilings", async () => {
     const {
       assertComputeSessionExpiry,
@@ -706,191 +731,5 @@ describe("compute session expiry ceiling", () => {
         new Date("2026-07-23T10:05:00.000Z").getTime(),
       ),
     ).toThrow("compute_session_expired");
-  });
-});
-
-describe("delegation task resource policy", () => {
-  const resourcePolicy = {
-    allowedCapabilities: ["WRITE", "BROWSER", "MCP"],
-    allowedMcpBindingIds: ["binding-allowed"],
-    maxEstimatedTokens: 10,
-    requireApprovalForExternalSideEffects: true,
-  };
-
-  it("fails closed when a delegated execution has no resource policy", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      capability: "write",
-      estimatedTokens: 0,
-      delegatedExecution: true,
-      resourcePolicy: null,
-    })).toEqual({
-      decision: "deny",
-      reason: "delegation_task_resource_policy_missing",
-    });
-  });
-
-  it("denies a capability outside the task allowlist", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      capability: "exec",
-      estimatedTokens: 0,
-      resourcePolicy,
-    })).toEqual({
-      decision: "deny",
-      reason: "delegation_task_capability_not_allowed",
-    });
-  });
-
-  it("denies an MCP binding outside a non-empty task binding allowlist", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      capability: "mcp",
-      estimatedTokens: 1,
-      mcpBindingId: "binding-other",
-      resourcePolicy,
-    })).toEqual({
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_not_allowed",
-    });
-  });
-
-  it("fails closed when a delegated MCP task has no chosen binding or allowlist", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      capability: "mcp",
-      estimatedTokens: 1,
-      mcpBindingId: "binding-allowed",
-      delegatedExecution: true,
-      resourcePolicy: {
-        ...resourcePolicy,
-        allowedMcpBindingIds: [],
-      },
-    })).toEqual({
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_missing",
-    });
-  });
-
-  it("denies a runtime MCP binding that differs from the chosen task step", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      capability: "mcp",
-      estimatedTokens: 1,
-      mcpBindingId: "binding-other",
-      taskMcpBindingId: "binding-allowed",
-      delegatedExecution: true,
-      resourcePolicy,
-    })).toEqual({
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_changed",
-    });
-  });
-
-  it("denies a delegated MCP task whose persisted allowlist is empty", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      capability: "mcp",
-      estimatedTokens: 1,
-      mcpBindingId: "binding-allowed",
-      taskMcpBindingId: "binding-allowed",
-      delegatedExecution: true,
-      resourcePolicy: {
-        ...resourcePolicy,
-        allowedMcpBindingIds: [],
-      },
-    })).toEqual({
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_allowlist_missing",
-    });
-  });
-
-  it("denies estimated execution cost above the task maximum", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      capability: "write",
-      estimatedTokens: 11,
-      resourcePolicy,
-    })).toEqual({
-      decision: "deny",
-      reason: "delegation_task_token_limit_exceeded",
-    });
-  });
-
-  it.each([
-    [
-      "MCP call",
-      {
-        capability: "mcp" as const,
-        mcpBindingId: "binding-allowed",
-        browserMode: "deterministic" as const,
-        allowMutations: false,
-      },
-    ],
-    [
-      "native browser mutation",
-      {
-        capability: "browser" as const,
-        browserMode: "native" as const,
-        allowMutations: true,
-      },
-    ],
-  ])("raises an allowed %s to approval", async (_label, request) => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision: { decision: "allow", reason: "profile_allow" },
-      estimatedTokens: 1,
-      resourcePolicy,
-      ...request,
-    })).toEqual({
-      decision: "ask",
-      reason: "delegation_task_external_side_effect_requires_approval",
-    });
-  });
-
-  it("does not require external-effect approval for a read-only browser action", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-    const decision = { decision: "allow" as const, reason: "profile_allow" };
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision,
-      capability: "browser",
-      estimatedTokens: 1,
-      browserMode: "native",
-      allowMutations: false,
-      resourcePolicy,
-    })).toBe(decision);
-  });
-
-  it("does not reclassify a server-verified read-only MCP as an external side effect", async () => {
-    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
-    const decision = { decision: "allow" as const, reason: "server_verified_read_only_mcp" };
-
-    expect(applyDelegationTaskResourcePolicyDecision({
-      decision,
-      capability: "mcp",
-      estimatedTokens: 1,
-      mcpBindingId: "binding-allowed",
-      taskMcpBindingId: "binding-allowed",
-      delegatedExecution: true,
-      allowMutations: false,
-      serverVerifiedReadOnlyMcp: true,
-      resourcePolicy,
-    })).toBe(decision);
   });
 });

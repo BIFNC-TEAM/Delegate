@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="1" failures="0" skipped="1" time="0.000293"><testcase classname="agent.regression" name="ARCH-03" time="0.000000"><skipped message="AGENT_TEST_BASE_URL_MISSING: actual product API smoke was not started"/></testcase></testsuite>

@@ -1,0 +1,70 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-smoke-2026-09-09T00-29-48-082Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-smoke-2026-09-09T00-29-48-082Z
+
+- Suite: smoke
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model+isolated-product
+- Started: 2026-09-09T00:29:48.082Z
+- Total: 208534.4 ms
+- Cases: 15/15; PASS 15, FAIL 0, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 100.00%
+- Functional: PASS; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| artifact/product.artifact_download | 1 | 1/0/0/0 | 0 | 45.1 | 45.1 | 45.1 | 45.1 | 45.1 | N/A |
+| context/assemble | 15 | 15/0/0/0 | 0 | 6.6 | 0.4 | 0.5 | 0.8 | 0.8 | N/A |
+| context/product.memory_disclosure | 1 | 1/0/0/0 | 0 | 19.6 | 19.6 | 19.6 | 19.6 | 19.6 | N/A |
+| handoff/request | 2 | 2/0/0/0 | 0 | 0.3 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| knowledge/retrieve | 4 | 4/0/0/0 | 0 | 18.9 | 4.7 | 0.2 | 18.4 | 18.4 | N/A |
+| mcp/orders-test.get_order | 1 | 1/0/0/0 | 0 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | N/A |
+| mcp/orders-test.list_orders | 2 | 2/0/0/0 | 0 | 181.7 | 90.9 | 0.3 | 181.4 | 181.4 | N/A |
+| mcp/tickets-test.create_ticket | 1 | 1/0/0/0 | 0 | 8.8 | 8.8 | 8.8 | 8.8 | 8.8 | N/A |
+| model/generate | 43 | 42/1/0/0 | 0 | 205194.2 | 4772.0 | 2564.7 | 15117.2 | 18300.7 | N/A |
+| orchestration/product.runtime_evidence | 1 | 1/0/0/0 | 0 | 82.1 | 82.1 | 82.1 | 82.1 | 82.1 | N/A |
+| request/agent_run | 15 | 14/0/0/1 | 0 | 207210.4 | 13814.0 | 4051.3 | 52516.0 | 52516.0 | N/A |
+| request/product.accept | 1 | 1/0/0/0 | 0 | 68.6 | 68.6 | 68.6 | 68.6 | 68.6 | N/A |
+| request/product.session | 1 | 1/0/0/0 | 0 | 68.4 | 68.4 | 68.4 | 68.4 | 68.4 | N/A |
+| response/product.sse | 1 | 1/0/0/0 | 0 | 53431.9 | 53431.9 | 53431.9 | 53431.9 | 53431.9 | N/A |
+| response/stream | 14 | 14/0/0/0 | 0 | 187000.8 | 13357.2 | 3356.0 | 51467.9 | 51467.9 | N/A |
+| sandbox/execute | 9 | 6/2/0/1 | 0 | 1758.6 | 195.4 | 104.8 | 780.6 | 780.6 | N/A |
+| skill/discover | 4 | 4/0/0/0 | 0 | 1.3 | 0.3 | 0.0 | 1.1 | 1.1 | N/A |
+| skill/load | 4 | 4/0/0/0 | 0 | 0.6 | 0.2 | 0.0 | 0.3 | 0.3 | N/A |
+| web/search | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BASIC-01 | PASS | 1222.5 | 1812.3 | 1 | 0 |  |
+| BASIC-02 | PASS | 808.4 | 2237.1 | 1 | 0 |  |
+| KB-01 | PASS | 828.8 | 5570.2 | 2 | 1 |  |
+| KB-03 | PASS | 722.7 | 6657.8 | 2 | 1 |  |
+| WEB-01 | PASS | 745.2 | 4193.8 | 2 | 1 |  |
+| SKILL-02 | PASS | 694.2 | 36030.1 | 5 | 4 |  |
+| BOX-01 | PASS | 2798.9 | 3501.0 | 2 | 1 |  |
+| BOX-02 | PASS | 923.8 | 43693.4 | 6 | 5 |  |
+| MCP-01 | PASS | 1365.9 | 3988.8 | 2 | 1 |  |
+| MCP-05 | PASS | 695.4 | 4051.4 | 2 | 1 |  |
+| HUMAN-01 | PASS | 2962.0 | 3819.2 | 2 | 1 |  |
+| HUMAN-03 | PASS | 2567.6 | 3397.0 | 2 | 1 |  |
+| FLOW-01 | PASS | 668.5 | 33585.4 | 7 | 6 |  |
+| CHAT-04 | PASS | N/A | 2157.8 | 2 | 1 |  |
+| ARCH-03 | PASS | 1048.1 | 53724.3 | 5 | 6 |  |
+
+## Slowest cases
+
+- ARCH-03: 53724.3 ms (response/product.sse)
+- BOX-02: 43693.4 ms (request/agent_run)
+- SKILL-02: 36030.1 ms (request/agent_run)
+- FLOW-01: 33585.4 ms (request/agent_run)
+- KB-03: 6657.8 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

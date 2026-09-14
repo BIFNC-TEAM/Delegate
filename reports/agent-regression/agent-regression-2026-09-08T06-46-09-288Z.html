@@ -1,0 +1,56 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T06-46-09-288Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T06-46-09-288Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T06:46:09.288Z
+- Total: 362656.9 ms
+- Cases: 7/7; PASS 3, FAIL 4, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 42.86%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 7 | 7/0/0/0 | 0 | 6.6 | 0.9 | 0.9 | 1.9 | 1.9 | N/A |
+| knowledge/retrieve | 1 | 1/0/0/0 | 0 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | N/A |
+| model/generate | 42 | 42/0/0/0 | 0 | 360787.6 | 8590.2 | 7442.7 | 18318.7 | 33669.6 | N/A |
+| request/agent_run | 7 | 7/0/0/0 | 0 | 362538.6 | 51791.2 | 52127.1 | 98419.8 | 98419.8 | N/A |
+| response/stream | 7 | 7/0/0/0 | 0 | 355126.2 | 50732.3 | 50969.8 | 97679.9 | 97679.9 | N/A |
+| sandbox/execute | 19 | 11/8/0/0 | 0 | 1650.1 | 86.8 | 87.8 | 118.3 | 118.3 | N/A |
+| skill/discover | 5 | 5/0/0/0 | 0 | 2.7 | 0.5 | 0.1 | 2.4 | 2.4 | N/A |
+| skill/load | 5 | 5/0/0/0 | 0 | 0.5 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| SKILL-01 | PASS | 1157.3 | 52127.7 | 6 | 5 |  |
+| SKILL-03 | FAIL | 1111.2 | 61727.4 | 7 | 6 | ASSERTION_FAILED: dedup row counts or total missing |
+| SKILL-04 | FAIL | 1208.8 | 45721.5 | 6 | 5 | ASSERTION_FAILED: qualified temporary total missing |
+| SKILL-05 | FAIL | 934.6 | 3971.5 | 1 | 0 | ASSERTION_FAILED: empty spreadsheet was not inspected; empty data state missing; empty data produced a fabricated trend |
+| SKILL-06 | FAIL | 739.9 | 98420.4 | 8 | 7 | ASSERTION_FAILED: missing refund column not reported |
+| SKILL-07 | PASS | 979.1 | 31223.9 | 4 | 3 |  |
+| SKILL-08 | PASS | 1281.4 | 69349.4 | 10 | 9 |  |
+
+## Slowest cases
+
+- SKILL-06: 98420.4 ms (request/agent_run)
+- SKILL-08: 69349.4 ms (request/agent_run)
+- SKILL-03: 61727.4 ms (request/agent_run)
+- SKILL-01: 52127.7 ms (request/agent_run)
+- SKILL-04: 45721.5 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

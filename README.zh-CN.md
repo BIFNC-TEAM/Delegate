@@ -340,10 +340,7 @@ queue 配置不完整，Delegate 会以 `temporal_not_fully_configured` 失败�
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
 - `PUBLIC_CHAT_RATE_LIMIT_SECRET` 会先对网络、用户和对外代理限流键做 HMAC，再写入 Postgres；未配置时回退到 `REP_PUBLIC_CHAT_SESSION_SECRET`。三个 `PUBLIC_CHAT_*_REQUESTS_*` 变量用于调整分布式准入限额。只有受信反向代理会覆盖指定请求头时才设置 `PUBLIC_CHAT_CLIENT_IP_HEADER`，否则保持为空。
 - `PUBLIC_MATERIAL_LINK_SECRET` 用于签发十分钟有效、绑定对外代理、资料校验和与处理版本的公开资料链接。下载时会重新检查当前发布和审批状态，因此资料归档、停用、替换或取消公开后，已签发链接也会失效。
-- `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_MODEL_FALLBACK_PROVIDER` 和各 Provider 的模型配置控制 model-backed representative replies。`DELEGATE_MODEL_PLANNER_PROVIDER` 可将规划独立固定到支持原生 Strict Structured Outputs 的 Provider；本地默认建议优先 `agicto`，已配置的 AGICTO、OpenAI 和兼容百炼模型均走原生 Strict JSON Schema。默认主回答 Provider 也是独立的 `agicto`。
-- `TURN_PLAN_V3_MODE` 控制权威 Agent Runtime 发布（`disabled | shadow | active_readonly | active_governed`）。V3 active 只运行一次 V3 Planner，不调用 V2 或旧 natural-language Detailed Planner；公开对外代理先查授权知识，只有用户本轮明确允许通用来源、Knowledge 为 Verified miss/unavailable 且服务端确认非 Owner 权威事实时，才带固定说明回退通用知识；`active_governed` 再发布托管 Markdown/TXT、typed Compute 和 schema-pinned MCP。
-- 生产环境的 V3 active 还要求 `TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true`；只有对应 Lane 通过可执行 Shadow release gate 后才能设置。
-- `TURN_PLANNER_V2_MODE` 只控制 V2 回滚/兼容（`disabled | shadow | active_low_risk`）；V3 active 时 V2 不会成为第二套写入真相。
+- `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_MODEL_FALLBACK_PROVIDER` 和各 Provider 的模型配置控制 Pi 的模型调用与有界回退。新对话只运行内嵌的 `@earendil-works/pi-agent-core@0.85.1`，知识库、MCP、Skill、沙盒、产物和真人转接都通过 Delegate capability adapter 按需接入。旧 V2/V3 Planner 与 Composer 发布开关已移除；Worker 仍会明确拒绝遗留变量，以防运维人员误以为它们还能启用回退链路。
 - `DELEGATE_AGICTO_API_KEY` 启用 AGICTO；未单独配置时可以复用现有 `OPENVIKING_MODEL_API_KEY` 与 `OPENVIKING_MODEL_API_BASE`。AGICTO 仅在线路协议上兼容 OpenAI，不会被记录成 OpenAI Provider，也不会借用 `OPENAI_API_KEY`。长文档通过 `DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS`、`DELEGATE_MODEL_DOCUMENT_MAX_OUTPUT_TOKENS` 和 `DELEGATE_MODEL_DOCUMENT_MAX_PARTS` 设置独立超时、单段预算和有界续写段数。
 - `OPENVIKING_*` 控制 public memory sync、recall 和 commit 行为。
 - `COMPUTE_*` 控制 broker、Docker runner、browser image 和 native computer-use readiness。`COMPUTE_MCP_CATALOG_REFRESH_INTERVAL_MS` 默认 120 秒，应小于外部 Capability 5 分钟 Availability TTL。

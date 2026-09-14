@@ -15,6 +15,9 @@ import { TencentAgsxSandboxProvider } from "./tencent-agsx-provider";
 
 export type SandboxProviderRegistryConfig = {
   legacyProvider: SandboxProviderKind;
+  /** Local Docker is available only when the caller has already established
+   * that this is a non-production runtime. */
+  allowLocalDocker?: boolean;
   sandboxLifecycle: {
     idleStopMinutes: number;
     autoArchiveMinutes: number;
@@ -79,7 +82,10 @@ export class SandboxProviderRegistry {
     return Boolean(this.config.tencent.apiKey && this.config.tencent.domain && this.config.tencent.codeTool);
   }
 
-  resolveLegacyProvider(): CloudSandboxProviderKind {
+  resolveLegacyProvider(): SandboxProviderKind {
+    if (this.config.legacyProvider === "docker" && this.config.allowLocalDocker) {
+      return "docker";
+    }
     const preferred = this.config.legacyProvider === "docker"
       ? []
       : [this.config.legacyProvider];

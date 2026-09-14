@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-08T09-39-10-251Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "static-architecture-check",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-08T09:39:10.251Z",
+  "totalDurationMs": 0.3976670000000695,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 1,
+    "FAIL": 0,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 1,
+  "functionalConclusion": "PASS",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {},
+  "moduleTimings": [],
+  "uncalledModules": [
+    "request",
+    "context",
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "response",
+    "wait"
+  ],
+  "slowestCases": [],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "ARCH-02",
+      "title": "Production entry build",
+      "status": "PASS",
+      "applicable": true,
+      "attempt": 1,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "evidence": [
+        "officialPiDependency=true",
+        "productionPiMode=false",
+        "schedulerUsesPiProcessor=true",
+        "piProcessorImportsLegacy=false",
+        "legacyMarkers=none"
+      ],
+      "spans": []
+    }
+  ]
+}

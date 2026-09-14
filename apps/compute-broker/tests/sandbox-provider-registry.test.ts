@@ -20,6 +20,13 @@ describe("sandbox provider registry", () => {
     }).resolveLegacyProvider()).toBe("tencent");
   });
 
+  it("uses explicitly configured Docker only when non-production admission is enabled", () => {
+    expect(buildRegistry({
+      legacyProvider: "docker",
+      allowLocalDocker: true,
+    }).resolveLegacyProvider()).toBe("docker");
+  });
+
   it("does not silently construct an unconfigured cloud provider", async () => {
     const registry = buildRegistry();
     await expect(registry.create("daytona")).rejects.toMatchObject({ code: "AUTH_INVALID" });

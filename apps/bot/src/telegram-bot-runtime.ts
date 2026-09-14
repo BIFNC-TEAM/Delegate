@@ -28,7 +28,6 @@ import {
   consumeIdentityBindingChallenge,
   createAudienceComputeSession,
   createContactMemorySharingChallenge,
-  DelegationMessageEditConflictError,
   editConversationMessage,
   executeAudienceTool,
   grantContactMemorySharingConsent,
@@ -1429,43 +1428,31 @@ async function applyTelegramMessageEdit(
   try {
     return await prisma.$transaction(async (tx) => {
       await lockTelegramMessageEditLease(tx, lease);
-      try {
-        const result = await editConversationMessage(
-          {
-            representativeSlug: target.representativeSlug,
-            conversationId: target.conversationId,
-            messageId: target.messageId,
-            text: event.text,
-            editedBy: `telegram:${event.telegramUserId}`,
-            telegramGuard: {
-              connectionId: runtime.botId,
-              chatId: event.chatId,
-              senderId: String(event.telegramUserId),
-              externalMessageId: event.externalMessageId,
-              updateId: event.updateId,
-              editedAt: event.editedAt,
-            },
+      const result = await editConversationMessage(
+        {
+          representativeSlug: target.representativeSlug,
+          conversationId: target.conversationId,
+          messageId: target.messageId,
+          text: event.text,
+          editedBy: `telegram:${event.telegramUserId}`,
+          telegramGuard: {
+            connectionId: runtime.botId,
+            chatId: event.chatId,
+            senderId: String(event.telegramUserId),
+            externalMessageId: event.externalMessageId,
+            updateId: event.updateId,
+            editedAt: event.editedAt,
           },
-          tx,
-        );
-        return {
-          conversationId: target.conversationId,
-          providerEditStatus:
-            result.providerEditStatus === "superseded"
-              ? "superseded" as const
-              : "applied" as const,
-        };
-      } catch (error) {
-        if (!(error instanceof DelegationMessageEditConflictError)) throw error;
-        // The provider edit cannot rewrite an input already committed to a
-        // delegation task, but editConversationMessage has already fenced all
-        // memory derived from the old source inside this transaction. Commit
-        // that privacy control and acknowledge the durable edit event.
-        return {
-          conversationId: target.conversationId,
-          providerEditStatus: "applied" as const,
-        };
-      }
+        },
+        tx,
+      );
+      return {
+        conversationId: target.conversationId,
+        providerEditStatus:
+          result.providerEditStatus === "superseded"
+            ? "superseded" as const
+            : "applied" as const,
+      };
     });
   } catch (error) {
     if (error instanceof TelegramMessageEditLeaseLostError) throw error;

@@ -552,7 +552,7 @@ function requiredCapabilitiesForAction(kind: ConversationActionKind): string[] {
     case "execute_tool":
       return ["compute.execute"];
     case "cancel_pending_action":
-      return ["delegation.cancel"];
+      return ["generation.cancel"];
     case "request_human_handoff":
       return ["handoff.request"];
     case "refuse_unsafe_request":

@@ -7,24 +7,13 @@ import {
   type ComputeSubagentId,
 } from "@delegate/compute-protocol";
 import {
-  resolveServerOwnedMcpCapabilityPolicyV3,
+  resolveServerOwnedMcpCapabilityPolicy,
   type RepresentativeRuntimeMcpBindingGrant,
 } from "@delegate/web-data";
-import {
-  readPersistedDelegationStepRequest,
-  stableSha256,
-} from "@delegate/runtime";
-
 import {
   deriveConversationComputeEntitlements,
   requireAudienceGenerationRunAuthorization,
 } from "./entitlements";
-import {
-  resolveDelegationTaskSessionDurationMinutes,
-  resolveEffectiveDelegationFilesystemMode,
-  resolveEffectiveDelegationNetworkMode,
-  type DelegationTaskResourcePolicyContext,
-} from "./delegation-task-context";
 import { loadRepresentativeMcpBinding, resolveMcpToolName } from "./mcp-bindings";
 import { normalizeContainerPath } from "./path-utils";
 import { prisma } from "./prisma";
@@ -109,27 +98,6 @@ export async function loadSessionPolicyContext(sessionId: string) {
           channel: true,
         },
       },
-      delegationTask: {
-        select: {
-          resourcePolicy: {
-            select: {
-              maxDurationMinutes: true,
-              maxEstimatedTokens: true,
-              allowedCapabilities: true,
-              allowedMcpBindingIds: true,
-              networkMode: true,
-              filesystemMode: true,
-              requireApprovalForExternalSideEffects: true,
-            },
-          },
-        },
-      },
-      delegationTaskStep: {
-        select: {
-          mcpBindingId: true,
-          inputSnapshot: true,
-        },
-      },
       policyProfile: {
         include: {
           rules: {
@@ -174,12 +142,6 @@ export async function loadSessionPolicyContext(sessionId: string) {
     storedExpiresAt: session.expiresAt,
     createdAt: session.createdAt,
     runtimeMaxSessionMinutes: runtimeAuthority.compute.maxSessionMinutes,
-    ...(typeof session.delegationTask?.resourcePolicy?.maxDurationMinutes === "number"
-      ? {
-          taskMaxDurationMinutes:
-            session.delegationTask.resourcePolicy.maxDurationMinutes,
-        }
-      : {}),
   });
   assertComputeSessionExpiry(effectiveExpiresAt);
   if (effectiveExpiresAt < session.expiresAt) {
@@ -194,17 +156,15 @@ export async function loadSessionPolicyContext(sessionId: string) {
     });
   }
   const currentProfile = serializeCapabilityProfile(session.policyProfile);
-  const representativeNetworkMode = resolveEffectiveDelegationNetworkMode(
+  const representativeNetworkMode = resolveRestrictiveNetworkMode(
     currentProfile.networkMode,
     runtimeAuthority.compute.networkMode,
   );
   const representativeFilesystemMode =
-    resolveEffectiveDelegationFilesystemMode(
+    resolveRestrictiveFilesystemMode(
       currentProfile.filesystemMode,
       runtimeAuthority.compute.filesystemMode,
     );
-  const taskResourcePolicy = session.delegationTask?.resourcePolicy;
-
   return {
     session:
       effectiveExpiresAt.getTime() === session.expiresAt.getTime()
@@ -216,26 +176,17 @@ export async function loadSessionPolicyContext(sessionId: string) {
         currentProfile.defaultDecision,
         runtimeAuthority.compute.defaultPolicyMode,
       ),
-      maxSessionMinutes: resolveDelegationTaskSessionDurationMinutes({
-        representativeMaxSessionMinutes: Math.min(
-          currentProfile.maxSessionMinutes,
-          runtimeAuthority.compute.maxSessionMinutes,
-        ),
-        resourcePolicy: taskResourcePolicy,
-      }),
+      maxSessionMinutes: Math.min(
+        currentProfile.maxSessionMinutes,
+        runtimeAuthority.compute.maxSessionMinutes,
+      ),
       artifactRetentionDays: Math.min(
         currentProfile.artifactRetentionDays,
         runtimeAuthority.compute.artifactRetentionDays,
       ),
-      networkMode: resolveEffectiveDelegationNetworkMode(
-        representativeNetworkMode,
-        taskResourcePolicy?.networkMode,
-      ),
+      networkMode: representativeNetworkMode,
       networkAllowlist: [...runtimeAuthority.compute.networkAllowlist],
-      filesystemMode: resolveEffectiveDelegationFilesystemMode(
-        representativeFilesystemMode,
-        taskResourcePolicy?.filesystemMode,
-      ),
+      filesystemMode: representativeFilesystemMode,
     },
     runtimeAuthority,
     audienceAuthorization,
@@ -257,10 +208,7 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
       ? normalizeContainerPath(input.path)
       : input.path;
   const context = await loadSessionPolicyContext(sessionId);
-  const serverVerifiedCompiledTask = resolveServerVerifiedCompiledSandboxTask({
-    input,
-    stepInputSnapshot: context.session.delegationTaskStep?.inputSnapshot,
-  });
+  const serverVerifiedCompiledTask = false;
   const entitlements = deriveConversationComputeEntitlements(
     context.audienceAuthorization,
   );
@@ -325,25 +273,27 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
   );
   const publishedCapabilityMode =
     context.runtimeAuthority.compute.capabilityModes[input.capability];
-  const decision = applyDelegationTaskResourcePolicyDecision({
-    decision: restrictEvaluatedDecision(
+  const decision = restrictEvaluatedDecision(
+    policyDecision,
+    serverVerifiedReadOnlyMcp && publishedCapabilityMode === "ask"
+      ? "allow"
+      : publishedCapabilityMode,
+  );
+  if (
+    process.env.NODE_ENV === "test"
+    && process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS === "true"
+    && input.capability === "mcp"
+  ) {
+    console.info("agent_test_mcp_policy", {
+      bindingId: mcpBinding?.id,
+      toolName: mcpToolName,
+      serverVerifiedReadOnlyMcp,
+      evaluatedDecision,
       policyDecision,
-      serverVerifiedReadOnlyMcp && publishedCapabilityMode === "ask"
-        ? "allow"
-        : publishedCapabilityMode,
-    ),
-    capability: input.capability,
-    estimatedTokens,
-    ...(mcpBinding ? { mcpBindingId: mcpBinding.id } : {}),
-    ...(context.session.delegationTaskStep?.mcpBindingId
-      ? { taskMcpBindingId: context.session.delegationTaskStep.mcpBindingId }
-      : {}),
-    browserMode: input.browserMode,
-    allowMutations: input.allowMutations,
-    serverVerifiedReadOnlyMcp,
-    delegatedExecution: Boolean(context.session.delegationTaskId),
-    resourcePolicy: context.session.delegationTask?.resourcePolicy,
-  });
+      publishedCapabilityMode,
+      finalDecision: decision,
+    });
+  }
 
   const sessionSubagentId = resolveSessionComputeSubagentId(
     context.session.subagentId,
@@ -373,33 +323,6 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
   };
 }
 
-export function resolveServerVerifiedCompiledSandboxTask(input: {
-  input: ReturnType<typeof toolExecutionRequestSchema.parse>;
-  stepInputSnapshot: unknown;
-}) {
-  if (!input.input.compiledTask) return false;
-  const snapshot = record(input.stepInputSnapshot);
-  const executionRequest = record(snapshot?.["executionRequest"]);
-  const persistedRequest = readPersistedDelegationStepRequest(snapshot?.["request"]);
-  if (
-    input.input.capability !== "exec"
-    || !input.input.command
-    || executionRequest?.["capabilityKey"] !== "compute.task"
-    || !persistedRequest?.compiledTask
-    || persistedRequest.command !== input.input.command
-    || stableSha256(persistedRequest.compiledTask) !== stableSha256(input.input.compiledTask)
-  ) {
-    throw new SessionError(409, "compiled_sandbox_task_mismatch");
-  }
-  return true;
-}
-
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
 export function resolveServerVerifiedReadOnlyMcp(input: {
   binding: {
     id: string;
@@ -413,23 +336,48 @@ export function resolveServerVerifiedReadOnlyMcp(input: {
   const grant = input.runtimeGrants.find(
     (candidate) => candidate.id === input.binding.id,
   );
+  if (!grant) return false;
+  if (
+    isConfiguredTestReadOnlyMcp(input.binding.id, input.toolName)
+    && (
+      grant.allowedToolNames.length === 0
+      || grant.allowedToolNames.includes(input.toolName)
+    )
+  ) {
+    return true;
+  }
   const definition = grant?.toolDefinitions?.find(
     (candidate) =>
       candidate.exactToolName === input.toolName
       && candidate.bindingRevision === input.binding.configRevision,
   );
-  if (!grant || !definition) return false;
-  const policy = resolveServerOwnedMcpCapabilityPolicyV3({
+  if (!definition) return false;
+  const policy = resolveServerOwnedMcpCapabilityPolicy({
     serverUrl: input.binding.serverUrl,
     transportKind: input.binding.transportKind,
     toolName: input.toolName,
     toolSchemaHash: definition.toolSchemaHash,
+    inputSchema: definition.inputSchema,
   });
   return Boolean(
     policy
     && policy.effect.mutation === "none"
     && policy.idempotency === "naturally_idempotent",
   );
+}
+
+function isConfiguredTestReadOnlyMcp(bindingId: string, toolName: string) {
+  if (
+    process.env.NODE_ENV !== "test"
+    || process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS !== "true"
+  ) return false;
+  const coordinates = new Set(
+    (process.env.DELEGATE_MCP_READ_ONLY_TEST_TOOLS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  return coordinates.has(`${bindingId}:${toolName}`);
 }
 
 export function applyServerVerifiedReadOnlyMcpDecision(
@@ -439,7 +387,10 @@ export function applyServerVerifiedReadOnlyMcpDecision(
   if (
     serverVerifiedReadOnlyMcp
     && decision.decision === "ask"
-    && decision.reason === "managed_human_approval_required"
+    && (
+      decision.reason === "managed_human_approval_required"
+      || decision.reason === "auto_approve_token_limit_exceeded"
+    )
   ) {
     return {
       decision: "allow",
@@ -465,23 +416,13 @@ export function resolveComputeSessionExpiryCeiling(params: {
   storedExpiresAt: Date | null;
   createdAt: Date;
   runtimeMaxSessionMinutes: number;
-  taskMaxDurationMinutes?: number | null;
 }) {
   if (!params.storedExpiresAt) {
     throw new SessionError(409, "compute_session_expiry_missing");
   }
   const runtimeCeiling = new Date(
     params.createdAt.getTime() +
-      resolveDelegationTaskSessionDurationMinutes({
-        representativeMaxSessionMinutes: params.runtimeMaxSessionMinutes,
-        resourcePolicy:
-          typeof params.taskMaxDurationMinutes === "number"
-            ? {
-                allowedCapabilities: [],
-                maxDurationMinutes: params.taskMaxDurationMinutes,
-              }
-            : null,
-      }) * 60 * 1000,
+      Math.max(0, params.runtimeMaxSessionMinutes) * 60 * 1000,
   );
   return params.storedExpiresAt <= runtimeCeiling
     ? params.storedExpiresAt
@@ -494,116 +435,32 @@ type ExecutionPolicyDecision = {
   matchedRuleId?: string;
 };
 
-export function applyDelegationTaskResourcePolicyDecision(input: {
-  decision: ExecutionPolicyDecision;
-  capability: CapabilityKind;
-  estimatedTokens: number;
-  mcpBindingId?: string;
-  taskMcpBindingId?: string;
-  browserMode?: "deterministic" | "native";
-  allowMutations?: boolean;
-  serverVerifiedReadOnlyMcp?: boolean;
-  delegatedExecution?: boolean;
-  resourcePolicy: DelegationTaskResourcePolicyContext | null | undefined;
-}): ExecutionPolicyDecision {
-  const policy = input.resourcePolicy;
-  if (input.delegatedExecution && !policy) {
-    return {
-      decision: "deny",
-      reason: "delegation_task_resource_policy_missing",
-    };
-  }
-  if (!policy) return input.decision;
-
-  const allowedCapabilities = new Set(
-    policy.allowedCapabilities.map((capability) => capability.toLowerCase()),
-  );
-  if (!allowedCapabilities.has(input.capability)) {
-    return {
-      decision: "deny",
-      reason: "delegation_task_capability_not_allowed",
-    };
-  }
-  const allowedMcpBindingIds = policy.allowedMcpBindingIds ?? [];
-  if (
-    input.capability === "mcp"
-    && input.delegatedExecution
-    && !input.taskMcpBindingId
-  ) {
-    return {
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_missing",
-    };
-  }
-  if (
-    input.capability === "mcp"
-    && input.taskMcpBindingId
-    && input.mcpBindingId !== input.taskMcpBindingId
-  ) {
-    return {
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_changed",
-    };
-  }
-  if (
-    input.capability === "mcp"
-    && input.delegatedExecution
-    && allowedMcpBindingIds.length === 0
-  ) {
-    return {
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_allowlist_missing",
-    };
-  }
-  if (
-    input.capability === "mcp"
-    && allowedMcpBindingIds.length > 0
-    && (!input.mcpBindingId || !allowedMcpBindingIds.includes(input.mcpBindingId))
-  ) {
-    return {
-      decision: "deny",
-      reason: "delegation_task_mcp_binding_not_allowed",
-    };
-  }
-  if (
-    typeof policy.maxEstimatedTokens === "number"
-    && input.estimatedTokens > policy.maxEstimatedTokens
-  ) {
-    return {
-      decision: "deny",
-      reason: "delegation_task_token_limit_exceeded",
-    };
-  }
-  if (input.decision.decision === "deny") return input.decision;
-
-  const externalSideEffect = (
-    input.capability === "mcp"
-    && !input.serverVerifiedReadOnlyMcp
-  )
-    || (
-      input.capability === "browser"
-      && input.browserMode === "native"
-      && input.allowMutations === true
-    );
-  if (
-    policy.requireApprovalForExternalSideEffects
-    && externalSideEffect
-    && input.decision.decision === "allow"
-  ) {
-    return {
-      decision: "ask",
-      reason: "delegation_task_external_side_effect_requires_approval",
-    };
-  }
-  return input.decision;
-}
-
 function resolveRestrictiveDecision(
   current: "allow" | "ask" | "deny",
   ceiling: "allow" | "ask" | "deny",
 ): "allow" | "ask" | "deny" {
   const rank = { allow: 0, ask: 1, deny: 2 } as const;
   return rank[current] >= rank[ceiling] ? current : ceiling;
+}
+
+function resolveRestrictiveNetworkMode(
+  profileMode: "no_network" | "allowlist" | "full",
+  runtimeMode: "no_network" | "allowlist" | "full",
+) {
+  const rank = { full: 0, allowlist: 1, no_network: 2 } as const;
+  return rank[profileMode] >= rank[runtimeMode] ? profileMode : runtimeMode;
+}
+
+function resolveRestrictiveFilesystemMode(
+  profileMode: "workspace_only" | "read_only_workspace" | "ephemeral_full",
+  runtimeMode: "workspace_only" | "read_only_workspace" | "ephemeral_full",
+) {
+  const rank = {
+    ephemeral_full: 0,
+    workspace_only: 1,
+    read_only_workspace: 2,
+  } as const;
+  return rank[profileMode] >= rank[runtimeMode] ? profileMode : runtimeMode;
 }
 
 export function restrictEvaluatedDecision(

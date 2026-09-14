@@ -32,7 +32,6 @@ import {
   Channel,
   ComputeFilesystemMode,
   ComputeNetworkMode,
-  DelegationKnowledgeScope,
   EventType,
   GroupActivation,
   PolicyDecision,
@@ -130,15 +129,6 @@ const computeSetupSchema = z.object({
   capabilityModes: capabilityModesSchema,
 });
 
-const delegationSetupSchema = z.object({
-  enabled: z.boolean(),
-  naturalLanguageEnabled: z.boolean(),
-  explicitComputeEnabled: z.boolean(),
-  maxSteps: z.number().int().min(1).max(5),
-  maxEstimatedTokens: z.number().int().min(0).max(100_000_000),
-  knowledgeScope: z.enum(["user_input_only", "public_knowledge"]),
-});
-
 const editableKnowledgeDocumentSchema = z.object({
   id: z.string().trim().min(1).optional(),
   title: z.string().trim().min(1),
@@ -177,14 +167,6 @@ const representativeSetupUpdateSchema = z.object({
       browser: "ask",
       mcp: "ask",
     }),
-  }),
-  delegation: delegationSetupSchema.default({
-    enabled: true,
-    naturalLanguageEnabled: true,
-    explicitComputeEnabled: true,
-    maxSteps: 5,
-    maxEstimatedTokens: 0,
-    knowledgeScope: "user_input_only",
   }),
 });
 
@@ -234,14 +216,6 @@ export type RepresentativeSetupSnapshot = Pick<
     networkAllowlist: string[];
     filesystemMode: "workspace_only" | "read_only_workspace" | "ephemeral_full";
     capabilityModes: Record<"exec" | "read" | "write" | "process" | "browser" | "mcp", "allow" | "ask" | "deny">;
-  };
-  delegation: {
-    enabled: boolean;
-    naturalLanguageEnabled: boolean;
-    explicitComputeEnabled: boolean;
-    maxSteps: number;
-    maxEstimatedTokens: number;
-    knowledgeScope: "user_input_only" | "public_knowledge";
   };
 };
 
@@ -295,7 +269,6 @@ export type RepresentativeRuntimeMcpBindingGrant = {
 export type RepresentativeRuntimeAuthoritySnapshot = {
   representativeVersionId: string;
   compute: RepresentativeSetupSnapshot["compute"];
-  delegation: RepresentativeSetupSnapshot["delegation"];
   mcpBindings: RepresentativeRuntimeMcpBindingGrant[];
 };
 export type ComputePolicyAuditPayload = {
@@ -307,18 +280,12 @@ export type ComputePolicyAuditPayload = {
     networkMode: RepresentativeSetupSnapshot["compute"]["networkMode"];
     filesystemMode: RepresentativeSetupSnapshot["compute"]["filesystemMode"];
     capabilityModes: RepresentativeSetupSnapshot["compute"]["capabilityModes"];
-    delegationEnabled: boolean;
-    naturalLanguageEnabled: boolean;
-    explicitComputeEnabled: boolean;
-    knowledgeScope: RepresentativeSetupSnapshot["delegation"]["knowledgeScope"];
   };
   values: {
     maxSessionMinutes: number;
     autoApproveTokenLimit: number;
     artifactRetentionDays: number;
     networkAllowlistCount: number;
-    maxSteps: number;
-    maxEstimatedTokens: number;
   };
 };
 export type RepresentativeDirectoryItem = {
@@ -566,15 +533,6 @@ const defaultComputeSetup: RepresentativeSetupSnapshot["compute"] = {
   },
 };
 
-const defaultDelegationSetup: RepresentativeSetupSnapshot["delegation"] = {
-  enabled: true,
-  naturalLanguageEnabled: true,
-  explicitComputeEnabled: true,
-  maxSteps: 5,
-  maxEstimatedTokens: 0,
-  knowledgeScope: "user_input_only",
-};
-
 export async function listRepresentativeDirectoryItems(ownerId?: string | null): Promise<RepresentativeDirectoryItem[]> {
   const scopedOwnerId = ownerId?.trim();
   if (!process.env.DATABASE_URL?.trim()) {
@@ -694,12 +652,6 @@ export async function createRepresentative(
           computeNetworkMode: mapComputeNetworkModeToDb(template.compute.networkMode),
           computeNetworkAllowlist: sanitizeNetworkAllowlist(template.compute.networkAllowlist),
           computeFilesystemMode: mapComputeFilesystemModeToDb(template.compute.filesystemMode),
-          delegationEnabled: template.delegation.enabled,
-          delegationNaturalLanguageEnabled: template.delegation.naturalLanguageEnabled,
-          delegationExplicitComputeEnabled: template.delegation.explicitComputeEnabled,
-          delegationMaxSteps: template.delegation.maxSteps,
-          delegationMaxEstimatedTokens: template.delegation.maxEstimatedTokens,
-          delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(template.delegation.knowledgeScope),
           agentWallet: {
             create: {
               currency: "CNY",
@@ -976,7 +928,6 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
     return {
       representativeVersionId: requestedVersionId || "demo-version",
       compute: cloneComputeSetup(setup.compute),
-      delegation: { ...setup.delegation },
       mcpBindings: [],
     };
   }
@@ -1068,23 +1019,9 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
       representative.capabilityProfiles[0],
     ),
   };
-  const currentDelegation: RepresentativeSetupSnapshot["delegation"] = {
-    enabled: representative.delegationEnabled,
-    naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
-    explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
-    maxSteps: representative.delegationMaxSteps,
-    maxEstimatedTokens: representative.delegationMaxEstimatedTokens,
-    knowledgeScope: mapDelegationKnowledgeScopeFromDb(
-      representative.delegationKnowledgeScope,
-    ),
-  };
   return {
     representativeVersionId: version.id,
     compute: resolvePublishedComputeCeiling(currentCompute, snapshot?.compute),
-    delegation: resolvePublishedDelegationCeiling(
-      currentDelegation,
-      asJsonRecord(snapshot?.delegation),
-    ),
     mcpBindings: resolveRepresentativeRuntimeMcpBindings(
       representative.mcpBindings,
       version.snapshot,
@@ -1222,9 +1159,7 @@ export async function updateRepresentativeSetup(
     const existingSetup = serializeRepresentativeSetup(representative);
     const computePolicyAuditPayload = buildComputePolicyAuditPayload({
       currentCompute: existingSetup.compute,
-      currentDelegation: existingSetup.delegation,
       nextCompute: input.compute,
-      nextDelegation: input.delegation,
       changedBy: params.changedBy?.trim() || representative.ownerId,
     });
 
@@ -1264,12 +1199,6 @@ export async function updateRepresentativeSetup(
           computeNetworkMode: mapComputeNetworkModeToDb(input.compute.networkMode),
           computeNetworkAllowlist: sanitizeNetworkAllowlist(input.compute.networkAllowlist),
           computeFilesystemMode: mapComputeFilesystemModeToDb(input.compute.filesystemMode),
-          delegationEnabled: input.delegation.enabled,
-          delegationNaturalLanguageEnabled: input.delegation.naturalLanguageEnabled,
-          delegationExplicitComputeEnabled: input.delegation.explicitComputeEnabled,
-          delegationMaxSteps: input.delegation.maxSteps,
-          delegationMaxEstimatedTokens: input.delegation.maxEstimatedTokens,
-          delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(input.delegation.knowledgeScope),
         },
         select: { humanInLoop: true },
       });
@@ -1361,9 +1290,7 @@ export async function updateRepresentativeSetup(
 
 export function buildComputePolicyAuditPayload(params: {
   currentCompute: RepresentativeSetupSnapshot["compute"];
-  currentDelegation: RepresentativeSetupSnapshot["delegation"];
   nextCompute: RepresentativeSetupSnapshot["compute"];
-  nextDelegation: RepresentativeSetupSnapshot["delegation"];
   changedBy: string;
 }): ComputePolicyAuditPayload | null {
   const changedFields = [
@@ -1409,26 +1336,6 @@ export function buildComputePolicyAuditPayload(params: {
         ? `compute.capabilityModes.${capability}`
         : null,
     ),
-    params.currentDelegation.enabled !== params.nextDelegation.enabled
-      ? "delegation.enabled"
-      : null,
-    params.currentDelegation.naturalLanguageEnabled !==
-      params.nextDelegation.naturalLanguageEnabled
-      ? "delegation.naturalLanguageEnabled"
-      : null,
-    params.currentDelegation.explicitComputeEnabled !==
-      params.nextDelegation.explicitComputeEnabled
-      ? "delegation.explicitComputeEnabled"
-      : null,
-    params.currentDelegation.maxSteps !== params.nextDelegation.maxSteps
-      ? "delegation.maxSteps"
-      : null,
-    params.currentDelegation.maxEstimatedTokens !== params.nextDelegation.maxEstimatedTokens
-      ? "delegation.maxEstimatedTokens"
-      : null,
-    params.currentDelegation.knowledgeScope !== params.nextDelegation.knowledgeScope
-      ? "delegation.knowledgeScope"
-      : null,
   ].filter((field): field is string => Boolean(field));
   if (!changedFields.length) return null;
 
@@ -1441,10 +1348,6 @@ export function buildComputePolicyAuditPayload(params: {
       networkMode: params.nextCompute.networkMode,
       filesystemMode: params.nextCompute.filesystemMode,
       capabilityModes: { ...params.nextCompute.capabilityModes },
-      delegationEnabled: params.nextDelegation.enabled,
-      naturalLanguageEnabled: params.nextDelegation.naturalLanguageEnabled,
-      explicitComputeEnabled: params.nextDelegation.explicitComputeEnabled,
-      knowledgeScope: params.nextDelegation.knowledgeScope,
     },
     values: {
       maxSessionMinutes: params.nextCompute.maxSessionMinutes,
@@ -1453,8 +1356,6 @@ export function buildComputePolicyAuditPayload(params: {
       networkAllowlistCount: sanitizeNetworkAllowlist(
         params.nextCompute.networkAllowlist,
       ).length,
-      maxSteps: params.nextDelegation.maxSteps,
-      maxEstimatedTokens: params.nextDelegation.maxEstimatedTokens,
     },
   };
 }
@@ -1520,6 +1421,7 @@ function serializeRepresentativeSetup(
           : {}),
         capabilityTags: parseStringArray(release.capabilityTags, []),
         executesCode: release.executesCode,
+        ...resolveVerifiedSkillInstructions(release),
         enabled: true,
         installStatus: "installed",
       });
@@ -1558,14 +1460,21 @@ function serializeRepresentativeSetup(
       filesystemMode: mapComputeFilesystemModeFromDb(representative.computeFilesystemMode),
       capabilityModes: resolveCapabilityModesFromProfile(representative.capabilityProfiles[0]),
     },
-    delegation: {
-      enabled: representative.delegationEnabled,
-      naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
-      explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
-      maxSteps: representative.delegationMaxSteps,
-      maxEstimatedTokens: representative.delegationMaxEstimatedTokens,
-      knowledgeScope: mapDelegationKnowledgeScopeFromDb(representative.delegationKnowledgeScope),
-    },
+  };
+}
+
+export function resolveVerifiedSkillInstructions(release: {
+  instructions?: string | null;
+  instructionsSha256?: string | null;
+  resources?: Prisma.JsonValue | null;
+}) {
+  if (!release.instructions || !release.instructionsSha256) return {};
+  const digest = createHash("sha256").update(release.instructions).digest("hex");
+  if (digest !== release.instructionsSha256) return {};
+  return {
+    instructions: release.instructions,
+    instructionsSha256: release.instructionsSha256,
+    resources: parseStringArray(release.resources ?? [], []),
   };
 }
 
@@ -1579,7 +1488,6 @@ export function applyRepresentativeVersionSnapshot(
   const identity = asJsonRecord(snapshot.identity);
   const conversation = asJsonRecord(snapshot.conversation);
   const governance = asJsonRecord(snapshot.governance);
-  const delegation = asJsonRecord(snapshot.delegation);
   const knowledge = asJsonRecord(snapshot.knowledge);
   const parsedContract = conversationContractSchema.safeParse(conversation);
   const parsedGroupActivation = groupActivationSchema.safeParse(snapshot.groupActivation);
@@ -1602,20 +1510,19 @@ export function applyRepresentativeVersionSnapshot(
   const parsedSkillPacks = Array.isArray(snapshot.skills)
     ? snapshot.skills.flatMap((skill) => {
         const parsed = skillPackSchema.safeParse(skill);
-        if (!parsed.success || !parsed.data.enabled || parsed.data.executesCode) {
+        if (!parsed.success || !parsed.data.enabled) {
           return [];
         }
-
-        return currentlyAvailableSkillPacks.has(buildSkillPackAvailabilityKey(parsed.data))
-          ? [parsed.data]
-          : [];
+        const available = currentlyAvailableSkillPacks.get(
+          buildSkillPackAvailabilityKey(parsed.data),
+        );
+        if (!available || (parsed.data.executesCode && !available.executesCode)) {
+          return [];
+        }
+        return [parsed.data];
       })
     : [];
   const effectiveCompute = resolvePublishedComputeCeiling(current.compute, snapshot.compute);
-  const effectiveDelegation = resolvePublishedDelegationCeiling(
-    current.delegation,
-    delegation,
-  );
 
   return {
     ...current,
@@ -1664,7 +1571,6 @@ export function applyRepresentativeVersionSnapshot(
       readSnapshotString(conversation?.handoffPrompt) ?? current.handoffPrompt,
     ),
     compute: effectiveCompute,
-    delegation: effectiveDelegation,
   };
 }
 
@@ -1780,73 +1686,6 @@ export function resolvePublishedComputeCeiling(
       ),
     },
   };
-}
-
-export function resolvePublishedDelegationCeiling(
-  current: RepresentativeSetupSnapshot["delegation"],
-  published: Record<string, unknown> | null,
-): RepresentativeSetupSnapshot["delegation"] {
-  const publishedMaxSteps =
-    typeof published?.maxSteps === "number" &&
-    Number.isInteger(published.maxSteps) &&
-    published.maxSteps >= 1 &&
-    published.maxSteps <= 5
-      ? published.maxSteps
-      : 1;
-  const legacyMaxCost = published?.maxCostCents;
-  const normalizedMaxEstimatedTokens =
-    typeof published?.maxEstimatedTokens === "number"
-      ? published.maxEstimatedTokens
-      : typeof legacyMaxCost === "number"
-        ? legacyMaxCost * 100
-        : undefined;
-  const hasPublishedMaxEstimatedTokens =
-    typeof normalizedMaxEstimatedTokens === "number" &&
-    Number.isInteger(normalizedMaxEstimatedTokens) &&
-    normalizedMaxEstimatedTokens >= 0 &&
-    normalizedMaxEstimatedTokens <= 100_000_000;
-  const publishedMaxEstimatedTokens = hasPublishedMaxEstimatedTokens
-    ? normalizedMaxEstimatedTokens as number
-    : 0;
-  const publishedKnowledgeScope =
-    published?.knowledgeScope === "public_knowledge"
-      ? "public_knowledge"
-      : "user_input_only";
-
-  return {
-    enabled:
-      current.enabled &&
-      published?.enabled === true &&
-      hasPublishedMaxEstimatedTokens,
-    naturalLanguageEnabled:
-      current.naturalLanguageEnabled &&
-      published?.naturalLanguageEnabled === true &&
-      hasPublishedMaxEstimatedTokens,
-    explicitComputeEnabled:
-      current.explicitComputeEnabled &&
-      published?.explicitComputeEnabled === true &&
-      hasPublishedMaxEstimatedTokens,
-    maxSteps: Math.min(current.maxSteps, publishedMaxSteps),
-    maxEstimatedTokens: hasPublishedMaxEstimatedTokens
-      ? resolveRestrictiveDelegationTokenLimit(
-          current.maxEstimatedTokens,
-          publishedMaxEstimatedTokens,
-        )
-      : current.maxEstimatedTokens,
-    knowledgeScope:
-      current.knowledgeScope === "user_input_only" ||
-      publishedKnowledgeScope === "user_input_only"
-        ? "user_input_only"
-        : "public_knowledge",
-  };
-}
-
-function resolveRestrictiveDelegationTokenLimit(current: number, published: number): number {
-  // Zero means "unlimited" for delegation tasks, so it is the least
-  // restrictive value rather than the numerical minimum.
-  if (current === 0) return published;
-  if (published === 0) return current;
-  return Math.min(current, published);
 }
 
 function resolveRestrictivePolicyDecision(
@@ -2393,7 +2232,6 @@ function getOrCreateDemoFallbackSetupSnapshot(): RepresentativeSetupSnapshot {
       },
       handoffPrompt: demoRepresentative.handoffPrompt,
       compute: cloneComputeSetup(defaultComputeSetup),
-      delegation: { ...defaultDelegationSetup },
     };
   }
 
@@ -2433,7 +2271,6 @@ function updateDemoFallbackRepresentativeSetup(
     ...input.compute,
     capabilityModes: { ...input.compute.capabilityModes },
   };
-  snapshot.delegation = { ...input.delegation };
 
   return cloneRepresentativeSetupSnapshot(snapshot);
 }
@@ -2460,7 +2297,6 @@ function cloneRepresentativeSetupSnapshot(
       handoffWindowHours: snapshot.contract.handoffWindowHours,
     },
     compute: cloneComputeSetup(snapshot.compute),
-    delegation: { ...snapshot.delegation },
   };
 }
 
@@ -2514,7 +2350,6 @@ function buildRepresentativeTemplate(params: {
     },
     handoffPrompt: `${safeOwnerName} 的真人评估入口已经开启。请简要描述你的需求；真人接手后会再确认联系人、预算和时间等必要信息。`,
     compute: cloneComputeSetup(defaultComputeSetup),
-    delegation: { ...defaultDelegationSetup },
   };
 }
 
@@ -3117,20 +2952,4 @@ function mapComputeFilesystemModeToDb(
 
 function mapComputeFilesystemModeFromDb(value: ComputeFilesystemMode) {
   return value.toLowerCase() as RepresentativeSetupSnapshot["compute"]["filesystemMode"];
-}
-
-function mapDelegationKnowledgeScopeToDb(
-  value: RepresentativeSetupSnapshot["delegation"]["knowledgeScope"],
-) {
-  return value === "public_knowledge"
-    ? DelegationKnowledgeScope.PUBLIC_KNOWLEDGE
-    : DelegationKnowledgeScope.USER_INPUT_ONLY;
-}
-
-function mapDelegationKnowledgeScopeFromDb(
-  value: DelegationKnowledgeScope,
-): RepresentativeSetupSnapshot["delegation"]["knowledgeScope"] {
-  return value === DelegationKnowledgeScope.PUBLIC_KNOWLEDGE
-    ? "public_knowledge"
-    : "user_input_only";
 }

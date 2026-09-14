@@ -14,6 +14,7 @@ import {
   acquireRunnerLease,
   releaseRunnerLease,
   runRunnerExecution,
+  writeRunnerInputFile,
   type DockerExecutionResult,
   type RunnerExecutionInput,
   type RunnerLease,
@@ -56,6 +57,14 @@ export type SandboxProviderStopInput = {
 
 export type SandboxProviderDeleteInput = SandboxProviderStopInput;
 
+export type SandboxProviderInputWriteInput = {
+  lease: SandboxProviderLease;
+  sessionId: string;
+  path: string;
+  content: Buffer;
+  timeoutMs?: number | undefined;
+};
+
 export type SandboxProviderErrorCode =
   | "THROTTLED"
   | "TRANSPORT_TIMEOUT"
@@ -66,7 +75,8 @@ export type SandboxProviderErrorCode =
   | "RUNTIME_NOT_FOUND"
   | "COMMAND_TIMEOUT"
   | "AMBIGUOUS_CREATE"
-  | "OUTPUT_LIMIT";
+  | "OUTPUT_LIMIT"
+  | "TRANSFER_INTEGRITY";
 
 export class SandboxProviderError extends Error {
   readonly code: SandboxProviderErrorCode;
@@ -86,6 +96,7 @@ export type SandboxProvider = {
   readonly kind: SandboxProviderKind;
   start(input: SandboxProviderStartInput): Promise<SandboxProviderLease>;
   execute(input: SandboxProviderExecutionInput): Promise<DockerExecutionResult>;
+  writeInput?(input: SandboxProviderInputWriteInput): Promise<{ bytes: number; durationMs: number }>;
   stop(input: SandboxProviderStopInput): Promise<void>;
   delete(input: SandboxProviderDeleteInput): Promise<void>;
 };
@@ -191,6 +202,17 @@ export function createDockerSandboxProvider(
         maxStderrBytes: input.maxStderrBytes,
       });
     },
+    async writeInput(input) {
+      const fileName = requireWorkspaceInputFileName(input.path);
+      if (!input.lease.containerId) throw new SandboxProviderError("RUNTIME_NOT_FOUND", false);
+      return writeRunnerInputFile({
+        runnerType: input.lease.runnerType,
+        containerId: input.lease.containerId,
+        fileName,
+        content: input.content,
+        ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+      });
+    },
     async stop(input) {
       await release({
         runnerType: input.lease.runnerType,
@@ -271,6 +293,12 @@ function adaptDaytonaSdkSandbox(sandbox: DaytonaSdkSandboxType): DaytonaSandboxL
       }
       return `${home.replace(/\/+$/u, "")}/workspace`;
     },
+    fs: {
+      uploadFile: (content, remotePath, timeoutSeconds) =>
+        sandbox.fs.uploadFile(content, remotePath, timeoutSeconds),
+      downloadFile: (remotePath, timeoutSeconds) =>
+        sandbox.fs.downloadFile(remotePath, timeoutSeconds),
+    },
     process: {
       executeCommand: (command, cwd, env, timeoutSeconds) =>
         sandbox.process.executeCommand(command, cwd, env, timeoutSeconds),
@@ -333,6 +361,10 @@ export type DaytonaSandboxLike = {
   setAutoArchiveInterval?: ((minutes: number) => Promise<unknown>) | undefined;
   setAutoDeleteInterval?: ((minutes: number) => Promise<unknown>) | undefined;
   ensureWorkspace?: (() => Promise<string>) | undefined;
+  fs?: {
+    uploadFile?: ((content: Buffer, remotePath: string, timeoutSeconds?: number) => Promise<void>) | undefined;
+    downloadFile?: ((remotePath: string, timeoutSeconds?: number) => Promise<Buffer>) | undefined;
+  } | undefined;
   process?: {
     executeCommand?: ((
       command: string,
@@ -514,6 +546,31 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     };
   }
 
+  async writeInput(input: SandboxProviderInputWriteInput) {
+    const startedAt = Date.now();
+    try {
+      requireWorkspaceInputFileName(input.path);
+      const sandbox = await this.getExistingSandbox(assertProviderSandboxId(input.lease));
+      const upload = sandbox.fs?.uploadFile;
+      const download = sandbox.fs?.downloadFile;
+      if (!upload || !download) throw new SandboxProviderError("CONFIG_INVALID", false);
+      const remotePath = mapDaytonaWorkingDirectory(
+        input.path,
+        resolveDaytonaSessionRoot(input.lease.sessionRoot),
+      );
+      const timeoutSeconds = Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1_000));
+      await upload(input.content, remotePath, timeoutSeconds);
+      const verified = await download(remotePath, timeoutSeconds);
+      if (!Buffer.from(verified).equals(input.content)) {
+        throw new SandboxProviderError("TRANSFER_INTEGRITY", false);
+      }
+      return { bytes: input.content.byteLength, durationMs: Date.now() - startedAt };
+    } catch (error) {
+      if (error instanceof SandboxProviderError) throw error;
+      throw mapDaytonaError(error, "execute");
+    }
+  }
+
   async stop(input: SandboxProviderStopInput): Promise<void> {
     try {
       const sandbox = await this.getExistingSandbox(assertProviderSandboxId(input.lease));
@@ -592,6 +649,12 @@ function mapDaytonaWorkingDirectory(value: string | null | undefined, sessionRoo
     return `${sessionRoot}/${workingDirectory.slice("/workspace/".length)}`;
   }
   return workingDirectory;
+}
+
+export function requireWorkspaceInputFileName(path: string) {
+  const match = /^\/workspace\/inputs\/([A-Za-z0-9][A-Za-z0-9._-]{0,179})$/u.exec(path);
+  if (!match?.[1]) throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
+  return match[1];
 }
 
 function isDaytonaConflictError(error: unknown) {

@@ -342,7 +342,6 @@ describe("web audience identity resolver", () => {
     expect(client.userWallets[0]?.audienceIdentityId).toBe(target.id);
     expect(client.sandboxIdentities[0]?.audienceIdentityId).toBe(target.id);
     expect(client.memoryRecords[0]?.audienceIdentityId).toBe(target.id);
-    expect(client.delegationTasks[0]?.audienceIdentityId).toBe(target.id);
     expect(client.identityLinks.every((link) => link.audienceIdentityId !== source.id)).toBe(true);
     expect(client.audienceIdentities.find((identity) => identity.id === source.id)).toMatchObject({
       status: "MERGED",
@@ -1195,7 +1194,6 @@ describe("web audience identity resolver", () => {
     const merged = client.audienceIdentities.find((identity) => identity.id === source.id);
     expect(merged?.status).toBe("MERGED");
     expect([firstTarget.id, secondTarget.id]).toContain(merged?.mergedIntoId);
-    expect(client.delegationTasks[0]?.audienceIdentityId).toBe(merged?.mergedIntoId);
   });
 
   it("creates one conversation per web audience contact", async () => {

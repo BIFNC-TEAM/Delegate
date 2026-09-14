@@ -1,4 +1,10 @@
-# Agent Runtime V3
+# Agent Runtime V3 (legacy persisted-work protocol)
+
+> Superseded for new conversation turns by the embedded Pi runtime documented
+> in [Pi Agent rearchitecture](./pi-agent-rearchitecture.md). This document is
+> retained temporarily as the protocol reference for draining persisted V3
+> plans without repeating external effects. It is no longer the active runtime
+> specification for new production input.
 
 This document is the source of truth for Delegate's conversation planning and
 capability-execution runtime. It describes the target contract implemented by
@@ -474,30 +480,14 @@ V3 lane has exactly one commercial owner: `GenerationRun`. V3 Action Attempts
 therefore never create `LedgerEntry` charges or expose a second Action bill;
 the Broker fails closed if that explicit Generation-owned admission is missing.
 
-## Rollout and rollback
+## Retired rollout mechanism
 
-`TURN_PLAN_V3_MODE` supports:
-
-- `disabled`: V3 is off; V2 compatibility may run.
-- `shadow`: V3 records comparison plans and never owns execution.
-- `active_readonly`: only authorized knowledge and stable general composition
-  are published.
-- `active_governed`: managed document, typed Compute, and schema-pinned MCP
-  lanes are published. Unsupported or unavailable Skill executors are omitted
-  from the active catalog and fail closed.
-
-Active V3 never runs the V2 planner. V2 code and persisted rows remain readable
-for rollback; they do not become a second active write authority.
-
-Rollout is lane-specific and evaluated by `evaluateV3ReleaseGate`. Hard safety
-metrics (duplicate effects/settlement, silent tool fallback, unsupported live
-claims, provider-unknown resend, stale-plan execution, policy bypass, unknown
-composer evidence) must remain zero. A lane also requires at least 1,000 shadow
-samples, seven consecutive passing days, strict-schema success of 99.5% or
-better, validated plans of 99% or better, and the configured latency/cost budget.
-Production additionally refuses to start an active mode unless deployment sets
-`TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true`; that attestation is valid only after
-the lane's release-gate review has passed.
+The V3 rollout modes documented in earlier revisions are retired. Production
+has one Agent runtime, Pi, and rejects the former V2/V3 Planner and
+clarification environment switches. This file remains as historical protocol
+context while the old test corpus is migrated; it is not a production runtime
+configuration guide. Use [pi-agent-rearchitecture.md](./pi-agent-rearchitecture.md)
+for the current architecture and migration preflight.
 
 ## Skill and pi framework decision
 
@@ -506,15 +496,13 @@ as executable unless a trusted, version-pinned runtime adapter exists. Current
 workspace Skill governance intentionally blocks third-party package code in the
 public runtime; summaries/tags alone are not executable semantics.
 
-The [pi monorepo](https://github.com/badlogic/pi-mono) provides useful agent-core,
-multi-provider, tool, extension, session, and coding-agent primitives. It does
-not replace Delegate's domain protocols: immutable Plan revisions, Postgres
-truth, policy/approval ceilings, entitlement reservation, ExternalEffect
-reconciliation, Temporal waits, Artifact CAS, or provider delivery acceptance.
-Therefore pi is not introduced as the top-level Agent framework. It may be
-evaluated later behind the existing `SkillExecutionRequest` or isolated Compute
-adapter, where its output remains subject to the same admission and result
-contracts.
+The [pi monorepo](https://github.com/badlogic/pi-mono) now provides Delegate's
+top-level Agent loop, model interaction and tool orchestration. Delegate keeps
+only business adapters and durable product boundaries such as Postgres state,
+entitlement reservation, artifact delivery, handoff state and provider
+delivery acceptance. Historical V3 Plan protocols in this document are
+migration context, not a second active execution authority. Pi tool output
+remains subject to the capability adapter's admission and result contracts.
 
 ## Reused foundations
 
@@ -523,7 +511,7 @@ contracts.
 - Compute Broker Policy, approval, sandbox, MCP, and Artifact execution;
 - OpenViking authorized recall and UseRun citations;
 - Artifact CAS and provider-acceptance delivery;
-- V2 rows, traces, and code as rollback/read compatibility.
+- read-only legacy state during the bounded migration window.
 
 ## Not in scope
 

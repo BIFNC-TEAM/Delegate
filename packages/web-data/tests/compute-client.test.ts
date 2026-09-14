@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   callComputeBroker,
   ComputeBrokerError,
+  uploadAudienceComputeInput,
 } from "../src/compute-client";
 
 const previousInternalToken = process.env.COMPUTE_BROKER_INTERNAL_TOKEN;
@@ -15,6 +16,38 @@ afterEach(() => {
 });
 
 describe("compute client public error boundary", () => {
+  it("projects attachment records onto the Broker's strict session-input contract", async () => {
+    configureBroker();
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({
+      fileName: "orders.csv",
+      sandboxPath: "/workspace/inputs/orders.csv",
+      mimeType: "text/csv",
+      sizeBytes: 1,
+      checksum: "0".repeat(64),
+      transferDurationMs: 1,
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const attachmentRecord = {
+      id: "attachment-database-id",
+      fileName: "orders.csv",
+      mimeType: "text/csv",
+      sizeBytes: 1,
+      checksum: "0".repeat(64),
+      base64: "eA==",
+    };
+    await uploadAudienceComputeInput("session-1", attachmentRecord);
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      fileName: "orders.csv",
+      mimeType: "text/csv",
+      sizeBytes: 1,
+      checksum: "0".repeat(64),
+      base64: "eA==",
+    });
+  });
+
   it("maps an allowlisted broker code to fixed public semantics", async () => {
     configureBroker();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({

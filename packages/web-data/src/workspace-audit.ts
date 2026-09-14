@@ -399,7 +399,7 @@ export function classifyWorkspaceAuditEvent(type: string): WorkspaceAuditCategor
     || normalized.includes("withdraw")
   ) return "wallet";
   if (normalized.includes("tool") || normalized.includes("compute") || normalized.includes("browser") || normalized.includes("mcp")) return "tools";
-  if (normalized.includes("workflow") || normalized.includes("delegation_task")) return "workflow";
+  if (normalized.includes("workflow")) return "workflow";
   if (normalized.includes("published") || normalized.includes("version_activated") || normalized.includes("channel")) return "publishing";
   if (normalized.includes("conversation") || normalized.includes("message") || normalized.includes("handoff") || normalized.includes("lead")) return "conversation";
   if (normalized.includes("login") || normalized.includes("auth") || normalized.includes("policy") || normalized.includes("security")) return "security";

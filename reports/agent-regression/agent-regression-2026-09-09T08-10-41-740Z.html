@@ -1,0 +1,46 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-09T08-10-41-740Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-09T08-10-41-740Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model+isolated-product
+- Started: 2026-09-09T08:10:41.740Z
+- Total: 49230.1 ms
+- Cases: 1/1; PASS 0, FAIL 1, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 0.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/product.attachment_disclosure | 1 | 1/0/0/0 | 0 | 48.6 | 48.6 | 48.6 | 48.6 | 48.6 | N/A |
+| request/product.attachment_accept | 1 | 1/0/0/0 | 0 | 418.9 | 418.9 | 418.9 | 418.9 | 418.9 | N/A |
+| request/product.attachment_session | 1 | 1/0/0/0 | 0 | 362.4 | 362.4 | 362.4 | 362.4 | 362.4 | N/A |
+| response/product.attachment_sse | 1 | 1/0/0/0 | 0 | 48384.7 | 48384.7 | 48384.7 | 48384.7 | 48384.7 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| model/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| skill/未调用 | — | — | — | — | — | — | — | — | N/A |
+| sandbox/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| PERF-04 | FAIL | N/A | 49227.9 | 0 | 0 | PRODUCT_ATTACHMENT_FLOW_FAILED: product attachment response has no large-file-summary.csv |
+
+## Slowest cases
+
+- PERF-04: 49227.9 ms (response/product.attachment_sse)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

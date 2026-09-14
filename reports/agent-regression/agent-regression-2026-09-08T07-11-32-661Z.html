@@ -1,0 +1,45 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T07-11-32-661Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T07-11-32-661Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T07:11:32.661Z
+- Total: 75598.3 ms
+- Cases: 1/1; PASS 0, FAIL 1, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 0.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 1 | 1/0/0/0 | 0 | 0.9 | 0.9 | 0.9 | 0.9 | 0.9 | N/A |
+| model/generate | 11 | 11/0/0/0 | 0 | 75105.7 | 6827.8 | 6266.8 | 9729.6 | 9729.6 | N/A |
+| request/agent_run | 1 | 1/0/0/0 | 0 | 75590.2 | 75590.2 | 75590.2 | 75590.2 | 75590.2 | N/A |
+| response/stream | 1 | 1/0/0/0 | 0 | 74599.5 | 74599.5 | 74599.5 | 74599.5 | 74599.5 | N/A |
+| sandbox/execute | 8 | 1/7/0/0 | 0 | 470.8 | 58.9 | 88.5 | 97.3 | 97.3 | N/A |
+| skill/discover | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BOX-07 | FAIL | 990.7 | 75590.4 | 11 | 9 | ASSERTION_FAILED: sandbox timeout was not disclosed |
+
+## Slowest cases
+
+- BOX-07: 75590.4 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

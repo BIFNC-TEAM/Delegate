@@ -1,0 +1,194 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-09T01-52-30-594Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "controlled-dependencies-real-model+isolated-product",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-09T01:52:30.594Z",
+  "totalDurationMs": 39551.178375,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "PRODUCT_ATTACHMENT_FLOW_FAILED": 1
+  },
+  "moduleTimings": [
+    {
+      "module": "context",
+      "operation": "product.attachment_disclosure",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 22.099958000000015,
+      "averageMs": 22.099958000000015,
+      "p50Ms": 22.099958000000015,
+      "p95Ms": 22.099958000000015,
+      "maximumMs": 22.099958000000015,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "request",
+      "operation": "product.attachment_accept",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 177.99916600000006,
+      "averageMs": 177.99916600000006,
+      "p50Ms": 177.99916600000006,
+      "p95Ms": 177.99916600000006,
+      "maximumMs": 177.99916600000006,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "request",
+      "operation": "product.attachment_session",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 71.63125000000002,
+      "averageMs": 71.63125000000002,
+      "p50Ms": 71.63125000000002,
+      "p95Ms": 71.63125000000002,
+      "maximumMs": 71.63125000000002,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "response",
+      "operation": "product.attachment_sse",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 39265.796,
+      "averageMs": 39265.796,
+      "p50Ms": 39265.796,
+      "p95Ms": 39265.796,
+      "maximumMs": 39265.796,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    }
+  ],
+  "uncalledModules": [
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "wait"
+  ],
+  "slowestCases": [
+    {
+      "id": "PERF-04",
+      "durationMs": 39550.107875,
+      "dominantStage": "response/product.attachment_sse"
+    }
+  ],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "PERF-04",
+      "title": "Large file",
+      "status": "FAIL",
+      "applicable": true,
+      "attempt": 1,
+      "totalDurationMs": 39550.107875,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "PRODUCT_ATTACHMENT_FLOW_FAILED: product attachment response has no large-file-summary.csv",
+      "evidence": [
+        "No attachment result was accepted without upload, sandbox and download evidence."
+      ],
+      "spans": [
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "ae836381-7f72-4a82-8d93-05f6d56c57b2",
+          "module": "request",
+          "operation": "product.attachment_session",
+          "attempt": 1,
+          "startOffsetMs": 0.020125000000007276,
+          "durationMs": 71.63125000000002,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "f5ce3377-a918-466c-a0f5-513981e24c2d",
+          "module": "context",
+          "operation": "product.attachment_disclosure",
+          "attempt": 1,
+          "startOffsetMs": 71.97508300000004,
+          "durationMs": 22.099958000000015,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "4420e1e9-d01a-4dec-97ec-a5afcd84824d",
+          "module": "request",
+          "operation": "product.attachment_accept",
+          "attempt": 1,
+          "startOffsetMs": 97.72362499999997,
+          "durationMs": 177.99916600000006,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "dcca39f2-a215-4bd6-b3b1-f5633245f9d2",
+          "module": "response",
+          "operation": "product.attachment_sse",
+          "attempt": 1,
+          "startOffsetMs": 276.4145,
+          "durationMs": 39265.796,
+          "status": "ok"
+        }
+      ]
+    }
+  ]
+}

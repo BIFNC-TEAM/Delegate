@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="1" failures="1" skipped="0" time="52.176179"><testcase classname="agent.regression" name="ERROR-05" time="52.159519"><failure message="ASSERTION_FAILED: corrupt file was not accurately reported"/></testcase></testsuite>

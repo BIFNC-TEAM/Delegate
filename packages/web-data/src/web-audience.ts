@@ -437,12 +437,6 @@ export type WebAudienceClient = {
       data: { audienceIdentityId: string };
     }): Promise<{ count: number }>;
   };
-  delegationTask: {
-    updateMany(args: {
-      where: { audienceIdentityId: string };
-      data: { audienceIdentityId: string };
-    }): Promise<{ count: number }>;
-  };
   identityBindingChallenge?: {
     updateMany(args: {
       where: {
@@ -1337,10 +1331,6 @@ export async function mergeAudienceIdentity(
       data: { audienceIdentityId: targetIdentity.id },
     });
     await tx.openVikingMemoryRecord.updateMany({
-      where: { audienceIdentityId: sourceIdentity.id },
-      data: { audienceIdentityId: targetIdentity.id },
-    });
-    await tx.delegationTask.updateMany({
       where: { audienceIdentityId: sourceIdentity.id },
       data: { audienceIdentityId: targetIdentity.id },
     });

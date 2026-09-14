@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-smoke" tests="2" failures="0" skipped="0" time="65.417277"><testcase classname="agent.smoke" name="BOX-02" time="35.401991"></testcase><testcase classname="agent.smoke" name="FLOW-01" time="30.012350"></testcase></testsuite>

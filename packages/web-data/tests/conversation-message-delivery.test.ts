@@ -75,7 +75,7 @@ describe("conversation message delivery outbox", () => {
     await enqueueConversationMessageDeliveryInTransaction(tx as never, {
       conversationId: "conversation-1",
       messageId: "message-1",
-      deliveryKind: "delegation_task_status",
+      deliveryKind: "system_notification",
     });
 
     expect(tx.message.update).toHaveBeenCalledWith({
@@ -96,7 +96,7 @@ describe("conversation message delivery outbox", () => {
           conversationId: "conversation-1",
           channel: "web",
           senderType: "SYSTEM",
-          deliveryKind: "delegation_task_status",
+          deliveryKind: "system_notification",
         },
       }),
       update: {},
@@ -125,7 +125,7 @@ describe("conversation message delivery outbox", () => {
       connectionId: null,
       payload: {
         version: 1,
-        deliveryKind: "delegation_task_status",
+          deliveryKind: "system_notification",
       },
     });
     tx.message.findUnique.mockResolvedValue({
@@ -151,7 +151,7 @@ describe("conversation message delivery outbox", () => {
       leaseAttempt: 1,
       messageId: "message-1",
       channel: "web",
-      deliveryKind: "delegation_task_status",
+          deliveryKind: "system_notification",
       senderType: "SYSTEM",
     });
     expect(tx.message.updateMany).toHaveBeenCalledWith({
@@ -332,7 +332,7 @@ describe("conversation message delivery outbox", () => {
       aggregateId: "message-1",
       attemptCount: 1,
       connectionId: null,
-      payload: { deliveryKind: "delegation_task_status" },
+      payload: { deliveryKind: "system_notification" },
     });
     tx.message.findUnique.mockResolvedValue({
       id: "message-1",
@@ -386,7 +386,7 @@ describe("conversation message delivery outbox", () => {
       aggregateId: "message-1",
       attemptCount: 1,
       connectionId: null,
-      payload: { deliveryKind: "delegation_task_status" },
+      payload: { deliveryKind: "system_notification" },
     });
     tx.message.findUnique.mockResolvedValue({
       id: "message-1",

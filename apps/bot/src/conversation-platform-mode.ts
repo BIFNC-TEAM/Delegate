@@ -1,5 +1,3 @@
-import { ChannelUnavailableError } from "@delegate/web-data";
-
 export type TelegramConversationPlatformMode = "legacy" | "shadow" | "worker";
 
 export function resolveTelegramConversationPlatformMode(
@@ -8,25 +6,10 @@ export function resolveTelegramConversationPlatformMode(
   const configuredMode =
     env.TELEGRAM_CONVERSATION_PLATFORM_MODE?.trim().toLowerCase() || "worker";
   if (
-    configuredMode !== "legacy"
-    && configuredMode !== "shadow"
-    && configuredMode !== "worker"
-  ) {
-    throw new Error(
-      `Unsupported TELEGRAM_CONVERSATION_PLATFORM_MODE "${configuredMode}".`,
-    );
-  }
-  if (env.NODE_ENV === "production" && configuredMode !== "worker") {
-    throw new Error(
-      "Production Telegram traffic must use TELEGRAM_CONVERSATION_PLATFORM_MODE=worker.",
-    );
-  }
-  if (
     configuredMode !== "worker"
-    && env.TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED?.trim().toLowerCase() !== "true"
   ) {
     throw new Error(
-      "Telegram legacy/shadow modes require TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED=true and are diagnostics-only.",
+      `TELEGRAM_CONVERSATION_PLATFORM_MODE must be worker; legacy and shadow ownership are retired.`,
     );
   }
   return configuredMode;
@@ -51,5 +34,7 @@ export function shouldFailClosedAfterConversationPlatformWrite(
   mode: TelegramConversationPlatformMode,
   error: unknown,
 ) {
-  return mode === "worker" || error instanceof ChannelUnavailableError;
+  void mode;
+  void error;
+  return true;
 }

@@ -97,6 +97,9 @@ export const skillPackSchema = z.object({
   verificationTier: z.string().optional(),
   capabilityTags: z.array(z.string()),
   executesCode: z.boolean(),
+  instructions: z.string().min(1).optional(),
+  instructionsSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  resources: z.array(z.string().min(1)).max(32).optional(),
   enabled: z.boolean(),
   installStatus: z.enum(["available", "installed", "update_available"]),
 });

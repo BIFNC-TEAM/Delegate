@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-08T08-21-02-751Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "static-architecture-check",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-08T08:21:02.751Z",
+  "totalDurationMs": 0.5953339999999798,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "LEGACY_RUNTIME_DEPENDENCY_REMAINS": 1
+  },
+  "moduleTimings": [],
+  "uncalledModules": [
+    "request",
+    "context",
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "response",
+    "wait"
+  ],
+  "slowestCases": [],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "ARCH-02",
+      "title": "Production entry build",
+      "status": "FAIL",
+      "applicable": true,
+      "attempt": 1,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "LEGACY_RUNTIME_DEPENDENCY_REMAINS: planTurnV2(, planTurnV3(, composeTurnV3(",
+      "evidence": [
+        "officialPiDependency=true",
+        "productionPiMode=false",
+        "piEntryBeforeLegacy=false",
+        "legacyMarkers=planTurnV2(,planTurnV3(,composeTurnV3("
+      ],
+      "spans": []
+    }
+  ]
+}

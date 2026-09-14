@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-09T03-41-25-123Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "isolated-product-browser",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-09T03:41:25.123Z",
+  "totalDurationMs": 28244.420917,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "PRODUCT_UI_FAILED": 1
+  },
+  "moduleTimings": [
+    {
+      "module": "response",
+      "operation": "product.ui_handoff_lifecycle",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 0,
+      "failed": 1,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 28243.546208,
+      "averageMs": 28243.546208,
+      "p50Ms": 28243.546208,
+      "p95Ms": 28243.546208,
+      "maximumMs": 28243.546208,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    }
+  ],
+  "uncalledModules": [
+    "request",
+    "context",
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "wait"
+  ],
+  "slowestCases": [
+    {
+      "id": "ARCH-04",
+      "durationMs": 28243.546208,
+      "dominantStage": "response/product.ui_handoff_lifecycle"
+    }
+  ],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "ARCH-04",
+      "title": "UI lifecycle states",
+      "status": "FAIL",
+      "applicable": true,
+      "attempt": 1,
+      "totalDurationMs": 28243.546208,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "PRODUCT_UI_FAILED: test operator assignment failed: \nnode:internal/modules/run_main:122\n    triggerUncaughtException(\n    ^\nError: Transform failed with 2 errors:\n/Users/neo/Documents/project/Delegate/scripts/agent-test-accept-handoff.ts:8:39: ERROR: Top-level await is currently not supported with the \"cjs\" output format\n/Users/neo/Documents/project/Delegate/scripts/agent-test-accept-handoff.ts:9:15: ERROR: Top-level await is currently not supported with the \"cjs\" output format\n    at failureErrorWithLog (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:1748:15)\n    at /Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:1017:50\n    at responseCallbacks.<computed> (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:884:9)\n    at handleIncomingPacket (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:939:12)\n    at Socket.readFromStdout (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:862:7)\n    at Socket.emit (node:events:518:28)\n    at addChunk (node:internal/streams/readable:561:12)\n    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)\n    at Readable.push (node:internal/streams/readable:392:5)\n    at Pipe.onStreamRead (node:internal/stream_base_commons:189:23) {\n  name: 'TransformError'\n}\n\nNode.js v22.11.0\n",
+      "evidence": [
+        "queued=visible",
+        "cancelButton=visible",
+        "cancelled=converged",
+        "busyAfterCancel=false"
+      ],
+      "spans": [
+        {
+          "traceId": "product-arch-04",
+          "runId": "product-arch-04",
+          "caseId": "ARCH-04",
+          "spanId": "2dbccedb-e886-4a09-9926-5c824dc9b42b",
+          "module": "response",
+          "operation": "product.ui_handoff_lifecycle",
+          "attempt": 1,
+          "startOffsetMs": 0,
+          "durationMs": 28243.546208,
+          "status": "error",
+          "error": "test operator assignment failed: \nnode:internal/modules/run_main:122\n    triggerUncaughtException(\n    ^\nError: Transform failed with 2 errors:\n/Users/neo/Documents/project/Delegate/scripts/agent-test-accept-handoff.ts:8:39: ERROR: Top-level await is currently not supported with the \"cjs\" output format\n/Users/neo/Documents/project/Delegate/scripts/agent-test-accept-handoff.ts:9:15: ERROR: Top-level await is currently not supported with the \"cjs\" output format\n    at failureErrorWithLog (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:1748:15)\n    at /Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:1017:50\n    at responseCallbacks.<computed> (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:884:9)\n    at handleIncomingPacket (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:939:12)\n    at Socket.readFromStdout (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:862:7)\n    at Socket.emit (node:events:518:28)\n    at addChunk (node:internal/streams/readable:561:12)\n    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)\n    at Readable.push (node:internal/streams/readable:392:5)\n    at Pipe.onStreamRead (node:internal/stream_base_commons:189:23) {\n  name: 'TransformError'\n}\n\nNode.js v22.11.0\n"
+        }
+      ]
+    }
+  ]
+}

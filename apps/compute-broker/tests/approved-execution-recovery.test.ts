@@ -43,7 +43,6 @@ describe("approved execution recovery", () => {
       where: {
         status: "RUNNING",
         approvalRequestId: { not: null },
-        planActionId: null,
         AND: [
           {
             OR: [

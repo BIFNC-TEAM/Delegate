@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="1" failures="1" skipped="0" time="28.244421"><testcase classname="agent.regression" name="ARCH-04" time="28.243546"><failure message="PRODUCT_UI_FAILED: test operator assignment failed:
+node:internal/modules/run_main:122
+    triggerUncaughtException(
+    ^
+Error: Transform failed with 2 errors:
+/Users/neo/Documents/project/Delegate/scripts/agent-test-accept-handoff.ts:8:39: ERROR: Top-level await is currently not supported with the &quot;cjs&quot; output format
+/Users/neo/Documents/project/Delegate/scripts/agent-test-accept-handoff.ts:9:15: ERROR: Top-level await is currently not supported with the &quot;cjs&quot; output format
+    at failureErrorWithLog (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:1748:15)
+    at /Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:1017:50
+    at responseCallbacks.&lt;computed&gt; (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:884:9)
+    at handleIncomingPacket (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:939:12)
+    at Socket.readFromStdout (/Users/neo/Documents/project/Delegate/node_modules/.pnpm/esbuild@0.27.4/node_modules/esbuild/lib/main.js:862:7)
+    at Socket.emit (node:events:518:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+    at Readable.push (node:internal/streams/readable:392:5)
+    at Pipe.onStreamRead (node:internal/stream_base_commons:189:23) {
+  name: &apos;TransformError&apos;
+}
+
+Node.js v22.11.0
+"/></testcase></testsuite>

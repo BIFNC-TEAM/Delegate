@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="3" failures="0" skipped="0" time="32.575384"><testcase classname="agent.regression" name="KB-08" time="3.029686"></testcase><testcase classname="agent.regression" name="MCP-04" time="10.544652"></testcase><testcase classname="agent.regression" name="ERROR-08" time="18.977750"></testcase></testsuite>

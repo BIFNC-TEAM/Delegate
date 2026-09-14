@@ -2,11 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   approvalExpirationDedupeKey,
-  buildDelegationExecutionWorkflowId,
   buildWorkflowExternalId,
-  delegationExecutionSignalSchema,
-  delegationExecutionSignalName,
-  delegationExecutionTransitionInputSchema,
   getWorkflowEngineConfig,
   handoffFollowUpDedupeKey,
   isWorkflowEnginePhaseTerminal,
@@ -76,7 +72,7 @@ describe("workflow helpers", () => {
     expect(() =>
       resolveWorkflowDispatchTarget({
         config,
-        kind: "delegation_execution",
+        kind: "handoff_follow_up",
         representativeKey: "rep-1",
         subjectId: "task-1",
       }),
@@ -92,48 +88,6 @@ describe("workflow helpers", () => {
     }).configuredEngine).toBe("local_runner");
     expect(() => getWorkflowEngineConfig({ WORKFLOW_ENGINE: "typo" }))
       .toThrow("workflow_engine_invalid");
-  });
-
-  it("uses the delegation task id as the stable Temporal workflow id", () => {
-    expect(buildDelegationExecutionWorkflowId("task-123")).toBe(
-      "delegate:delegation_execution:task-123",
-    );
-    expect(
-      buildWorkflowExternalId({
-        kind: "delegation_execution",
-        representativeKey: "rep-ignored",
-        subjectId: "task-123",
-      }),
-    ).toBe("delegate:delegation_execution:task-123");
-  });
-
-  it("validates every durable delegation signal and transition envelope", () => {
-    const signal = delegationExecutionSignalSchema.parse({
-      signalId: "approval:approval-1:approved",
-      kind: "approval_resolved",
-      approvalId: "approval-1",
-      resolution: "approved",
-      occurredAt: "2026-08-17T08:00:00.000Z",
-    });
-    expect(
-      delegationExecutionTransitionInputSchema.parse({
-        workflowRunId: "workflow-1",
-        delegationTaskId: "task-1",
-        turnPlanId: "plan-1",
-        transitionId: "signal:approval:approval-1:approved",
-        signal,
-      }),
-    ).toMatchObject({
-      delegationTaskId: "task-1",
-      transitionId: "signal:approval:approval-1:approved",
-      signal: {
-        signalId: "approval:approval-1:approved",
-        kind: "approval_resolved",
-      },
-    });
-    expect(delegationExecutionSignalName(signal)).toBe(
-      "delegation.approval_resolved",
-    );
   });
 
   it("builds a Temporal-ready dispatch target when the config is complete", () => {

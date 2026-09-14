@@ -1,0 +1,139 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T03-39-12-841Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T03-39-12-841Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T03:39:12.841Z
+- Total: 288722.4 ms
+- Cases: 90/90; PASS 9, FAIL 80, BLOCKED 1, SKIP 0, REVIEW 0
+- Strict pass rate: 10.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 14 | 14/0/0/0 | 0 | 4.9 | 0.4 | 0.3 | 0.9 | 0.9 | N/A |
+| handoff/request | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| knowledge/retrieve | 3 | 3/0/0/0 | 0 | 0.3 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| mcp/orders-test.list_orders | 1 | 1/0/0/0 | 0 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | N/A |
+| model/generate | 29 | 23/6/0/0 | 0 | 288415.2 | 9945.4 | 2912.2 | 30003.4 | 30004.5 | N/A |
+| request/agent_run | 14 | 9/4/0/1 | 0 | 288705.0 | 20621.8 | 20495.7 | 49781.9 | 49781.9 | N/A |
+| response/stream | 9 | 8/1/0/0 | 0 | 107858.1 | 11984.2 | 3193.3 | 49075.8 | 49075.8 | N/A |
+| sandbox/execute | 4 | 2/2/0/0 | 0 | 261.8 | 65.5 | 61.4 | 81.3 | 81.3 | N/A |
+| skill/discover | 2 | 2/0/0/0 | 0 | 0.1 | 0.1 | 0.0 | 0.1 | 0.1 | N/A |
+| skill/load | 2 | 2/0/0/0 | 0 | 0.1 | 0.1 | 0.0 | 0.1 | 0.1 | N/A |
+| web/search | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BASIC-01 | PASS | 1617.4 | 2250.3 | 1 | 0 |  |
+| BASIC-02 | PASS | 1137.4 | 2469.9 | 1 | 0 |  |
+| BASIC-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BASIC-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BASIC-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BASIC-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BASIC-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BASIC-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| KB-01 | PASS | 1000.0 | 4416.9 | 2 | 1 |  |
+| KB-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| KB-03 | PASS | 961.0 | 5359.5 | 2 | 1 |  |
+| KB-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| KB-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| KB-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| KB-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| KB-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| WEB-01 | PASS | 1074.7 | 4268.0 | 2 | 1 |  |
+| WEB-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| WEB-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| WEB-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| WEB-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| WEB-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| WEB-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| WEB-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| SKILL-01 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| SKILL-02 | PASS | 706.1 | 49782.0 | 6 | 5 |  |
+| SKILL-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| SKILL-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| SKILL-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| SKILL-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| SKILL-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| SKILL-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BOX-01 | PASS | 2881.9 | 3603.6 | 2 | 1 |  |
+| BOX-02 | FAIL | N/A | 30005.1 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; sandbox was not executed; readable CSV artifact missing; city totals missing |
+| BOX-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BOX-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BOX-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BOX-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BOX-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| BOX-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| MCP-01 | FAIL | N/A | 30002.2 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; MCP order arguments incorrect; order state missing |
+| MCP-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| MCP-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| MCP-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| MCP-05 | FAIL | N/A | 30001.7 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; ticket MCP arguments incorrect; expected one ticket effect, got 0; actual ticket id missing |
+| MCP-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| MCP-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| MCP-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| HUMAN-01 | FAIL | N/A | 30002.0 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; handoff was not connected; transfer id missing |
+| HUMAN-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| HUMAN-03 | PASS | 19557.5 | 20495.7 | 2 | 1 |  |
+| HUMAN-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| HUMAN-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| HUMAN-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| HUMAN-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| HUMAN-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| FLOW-01 | FAIL | 1897.2 | 46046.0 | 6 | 5 | ASSERTION_FAILED: expected completed, got partial; FLOW CSV artifact missing; FLOW totals missing |
+| FLOW-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| FLOW-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| FLOW-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| FLOW-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| FLOW-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| FLOW-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| FLOW-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| CHAT-01 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| CHAT-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| CHAT-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| CHAT-04 | PASS | N/A | 30002.9 | 1 | 0 |  |
+| CHAT-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| CHAT-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| CHAT-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| CHAT-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-01 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-07 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ERROR-08 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| PERF-01 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| PERF-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| PERF-03 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| PERF-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| PERF-05 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| PERF-06 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ARCH-01 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ARCH-02 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+| ARCH-03 | BLOCKED | N/A | N/A | 0 | 0 | AGENT_TEST_BASE_URL_MISSING: actual UI/API smoke was not started |
+| ARCH-04 | FAIL | N/A | N/A | 0 | 0 | NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case |
+
+## Slowest cases
+
+- SKILL-02: 49782.0 ms (request/agent_run)
+- FLOW-01: 46046.0 ms (request/agent_run)
+- BOX-02: 30005.1 ms (request/agent_run)
+- CHAT-04: 30002.9 ms (request/agent_run)
+- MCP-01: 30002.2 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

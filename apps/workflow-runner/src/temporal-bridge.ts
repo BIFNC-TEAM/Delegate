@@ -5,16 +5,12 @@ import {
 } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import {
-  delegationExecutionSignalName,
-  delegationExecutionSignalSchema,
-  type DelegationExecutionSignal,
   type WorkflowEngineConfig,
 } from "@delegate/workflows";
 import { fileURLToPath } from "node:url";
 
 import type { TemporalWorkflowDispatcher } from "./runner";
 import {
-  executeDelegationExecutionTransitionActivity,
   executeWorkflowRunActivity,
 } from "./temporal/activities";
 
@@ -25,11 +21,6 @@ export type TemporalBridgeState = {
 
 export type TemporalBridge = TemporalWorkflowDispatcher & {
   getState(): TemporalBridgeState;
-  signalDelegationExecution(params: {
-    workflowId: string;
-    runId?: string;
-    signal: DelegationExecutionSignal;
-  }): Promise<void>;
 };
 
 export async function createTemporalBridge(
@@ -61,7 +52,6 @@ export async function createTemporalBridge(
     workflowsPath: fileURLToPath(new URL("./temporal/workflows.ts", import.meta.url)),
     activities: {
       executeWorkflowRunActivity,
-      executeDelegationExecutionTransitionActivity,
     },
   });
 
@@ -77,26 +67,10 @@ export async function createTemporalBridge(
     },
     async startWorkflowExecution(params) {
       try {
-        const isDelegationExecution =
-          params.workflowKind === "DELEGATION_EXECUTION";
-        if (isDelegationExecution && !params.delegationTaskId) {
-          throw new Error("delegation_execution_task_missing");
-        }
         const handle = await client.workflow.start(
-          isDelegationExecution
-            ? "runDelegationExecutionWorkflow"
-            : "runDelegateWorkflowRun",
+          "runDelegateWorkflowRun",
           {
-          args: isDelegationExecution
-            ? [{
-                workflowRunId: params.workflowRunId,
-                delegationTaskId: params.delegationTaskId!,
-                // Plan revisions remain Postgres truth and may change while
-                // this long-lived workflow is waiting. Pinning the initial
-                // plan here would make a later signal fail its DB coordinate
-                // check after an authorized replan.
-              }]
-            : [{
+          args: [{
                 workflowRunId: params.workflowRunId,
                 scheduledAt: params.scheduledAt.toISOString(),
               }],
@@ -160,17 +134,6 @@ export async function createTemporalBridge(
 
         throw error;
       }
-    },
-    async signalDelegationExecution(params) {
-      const signal = delegationExecutionSignalSchema.parse(params.signal);
-      const handle = client.workflow.getHandle(
-        params.workflowId,
-        params.runId,
-      );
-      await handle.signal(
-        delegationExecutionSignalName(signal),
-        signal,
-      );
     },
   };
 }

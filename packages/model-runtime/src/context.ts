@@ -153,7 +153,7 @@ function buildRepresentativeSnapshot(representative: Representative, plan: Conve
     `- Published skill declarations: ${representative.skillPacks
       .filter((pack) => pack.enabled)
       .map((pack) => JSON.stringify(
-        `${pack.displayName}@${pack.version ?? "unversioned"} [${pack.capabilityTags.join(", ") || "declarative"}]`,
+        `${pack.displayName}@${pack.version ?? "unversioned"}`,
       ))
       .join("; ") || "none"}`,
     `- Action reason: ${plan.reasons.join(" ")}`,

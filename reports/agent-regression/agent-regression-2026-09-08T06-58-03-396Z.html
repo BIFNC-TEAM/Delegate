@@ -1,0 +1,50 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T06-58-03-396Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T06-58-03-396Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T06:58:03.396Z
+- Total: 143295.7 ms
+- Cases: 3/3; PASS 2, FAIL 1, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 66.67%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 3 | 3/0/0/0 | 0 | 2.0 | 0.7 | 0.7 | 1.0 | 1.0 | N/A |
+| knowledge/retrieve | 1 | 1/0/0/0 | 0 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | N/A |
+| model/generate | 19 | 19/0/0/0 | 0 | 142649.7 | 7507.9 | 6943.8 | 20328.5 | 20328.5 | N/A |
+| request/agent_run | 3 | 3/0/0/0 | 0 | 143264.7 | 47754.9 | 42145.8 | 76498.6 | 76498.6 | N/A |
+| response/stream | 3 | 3/0/0/0 | 0 | 140172.6 | 46724.2 | 41058.4 | 75538.2 | 75538.2 | N/A |
+| sandbox/execute | 6 | 6/0/0/0 | 0 | 580.2 | 96.7 | 92.3 | 123.8 | 123.8 | N/A |
+| skill/discover | 3 | 3/0/0/0 | 0 | 0.4 | 0.1 | 0.1 | 0.2 | 0.2 | N/A |
+| skill/load | 3 | 3/0/0/0 | 0 | 0.2 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| SKILL-04 | PASS | 960.4 | 76499.2 | 8 | 7 |  |
+| SKILL-05 | PASS | 1044.3 | 24620.4 | 5 | 4 |  |
+| SKILL-06 | FAIL | 1087.4 | 42146.0 | 6 | 5 | ASSERTION_FAILED: missing refund column not reported |
+
+## Slowest cases
+
+- SKILL-04: 76499.2 ms (request/agent_run)
+- SKILL-06: 42146.0 ms (request/agent_run)
+- SKILL-05: 24620.4 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

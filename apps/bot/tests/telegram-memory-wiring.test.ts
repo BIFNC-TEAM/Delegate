@@ -87,11 +87,11 @@ describe("Telegram memory runtime wiring", () => {
       source.indexOf("async function applyTelegramMessageEdit"),
       source.indexOf("async function initializeTelegramBot"),
     );
-    expect(apply).toContain(
-      "if (!(error instanceof DelegationMessageEditConflictError)) throw error",
-    );
+    expect(apply).toContain('result.providerEditStatus === "superseded"');
+    expect(apply).toContain('? "superseded" as const');
     expect(apply.indexOf("await editConversationMessage"))
-      .toBeLessThan(apply.indexOf("DelegationMessageEditConflictError"));
+      .toBeLessThan(apply.indexOf('result.providerEditStatus === "superseded"'));
+    expect(apply).not.toContain("DelegationMessageEditConflictError");
     expect(source.indexOf("await waitForTelegramMessageEditDurabilityFence()"))
       .toBeLessThan(source.indexOf("await bot.stop()"));
     expect(source).toContain(

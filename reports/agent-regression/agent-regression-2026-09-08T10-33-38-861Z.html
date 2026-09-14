@@ -1,0 +1,59 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T10-33-38-861Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T10-33-38-861Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T10:33:38.861Z
+- Total: 183281.1 ms
+- Cases: 7/7; PASS 4, FAIL 3, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 57.14%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 7 | 7/0/0/0 | 0 | 5.1 | 0.7 | 0.6 | 1.3 | 1.3 | N/A |
+| knowledge/retrieve | 2 | 2/0/0/0 | 0 | 0.4 | 0.2 | 0.1 | 0.3 | 0.3 | N/A |
+| mcp/fault-test.oversized_result | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| mcp/orders-test.get_order | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| mcp/orders-test.list_orders | 2 | 2/0/0/0 | 0 | 8.8 | 4.4 | 0.2 | 8.6 | 8.6 | N/A |
+| mcp/tickets-test.create_ticket | 3 | 3/0/0/0 | 0 | 0.4 | 0.1 | 0.1 | 0.2 | 0.2 | N/A |
+| model/generate | 32 | 32/0/0/0 | 0 | 179639.8 | 5613.7 | 4185.3 | 13473.8 | 13643.3 | N/A |
+| request/agent_run | 7 | 7/0/0/0 | 0 | 183219.2 | 26174.2 | 15229.8 | 84041.1 | 84041.1 | N/A |
+| response/stream | 7 | 7/0/0/0 | 0 | 168979.7 | 24140.0 | 14399.1 | 83209.0 | 83209.0 | N/A |
+| sandbox/execute | 6 | 4/2/0/0 | 0 | 3523.6 | 587.3 | 97.2 | 1132.1 | 1132.1 | N/A |
+| skill/discover | 3 | 3/0/0/0 | 0 | 0.2 | 0.1 | 0.0 | 0.1 | 0.1 | N/A |
+| skill/load | 3 | 3/0/0/0 | 0 | 0.2 | 0.1 | 0.0 | 0.2 | 0.2 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| KB-08 | FAIL | 1298.1 | 4187.6 | 1 | 0 | ASSERTION_FAILED: probation leave entitlement was inferred beyond the source |
+| SKILL-05 | PASS | 810.1 | 25986.9 | 5 | 3 |  |
+| SKILL-06 | PASS | 985.3 | 36156.1 | 5 | 5 |  |
+| MCP-04 | FAIL | 853.1 | 8613.0 | 2 | 1 | ASSERTION_FAILED: all eight rows were not reported |
+| FLOW-05 | PASS | 831.9 | 84041.7 | 11 | 9 |  |
+| ERROR-03 | PASS | 8630.4 | 9005.3 | 2 | 1 |  |
+| ERROR-08 | FAIL | 830.6 | 15229.9 | 6 | 5 | ASSERTION_FAILED: unverified success was presented as complete |
+
+## Slowest cases
+
+- FLOW-05: 84041.7 ms (request/agent_run)
+- SKILL-06: 36156.1 ms (request/agent_run)
+- SKILL-05: 25986.9 ms (request/agent_run)
+- ERROR-08: 15229.9 ms (request/agent_run)
+- ERROR-03: 9005.3 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

@@ -184,7 +184,6 @@ export async function PATCH(
                 filesystemMode: "workspace_only",
                 capabilityModes: normalizeCapabilityModes(null),
               },
-        delegation: normalizeDelegationSetup(body.delegation),
       },
     });
 
@@ -236,22 +235,6 @@ function normalizeCapabilityModes(value: unknown) {
     const mode = record[key];
     return [key, mode === "allow" || mode === "ask" || mode === "deny" ? mode : fallback];
   })) as Record<keyof typeof defaults, "allow" | "ask" | "deny">;
-}
-
-function normalizeDelegationSetup(value: unknown) {
-  const record = typeof value === "object" && value ? value as Record<string, unknown> : {};
-  return {
-    enabled: record.enabled === undefined ? true : Boolean(record.enabled),
-    naturalLanguageEnabled:
-      record.naturalLanguageEnabled === undefined ? true : Boolean(record.naturalLanguageEnabled),
-    explicitComputeEnabled:
-      record.explicitComputeEnabled === undefined ? true : Boolean(record.explicitComputeEnabled),
-    maxSteps: Number(record.maxSteps ?? 5),
-    maxEstimatedTokens: Number(record.maxEstimatedTokens ?? 0),
-    knowledgeScope: record.knowledgeScope === "public_knowledge"
-      ? "public_knowledge" as const
-      : "user_input_only" as const,
-  };
 }
 
 function normalizeKnowledgeDocuments(value: unknown): Array<{

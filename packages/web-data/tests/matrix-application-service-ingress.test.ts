@@ -2137,63 +2137,6 @@ describe("Matrix application service ingress", () => {
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it("treats edits to delegated input as a permanent Matrix conflict", async () => {
-    mockPrisma.message.findFirst.mockResolvedValue({
-      id: "message-delegated",
-      senderId: aliceMatrixUserId,
-      senderType: "AUDIENCE",
-    });
-    tx.message.findFirst.mockResolvedValue({
-      id: "message-delegated",
-      conversationId: "conversation-1",
-      episodeId: "episode-1",
-      text: "original request",
-      redactedAt: null,
-      revisions: [],
-      inputForGenerationRuns: [{
-        id: "run-delegated",
-        delegationTaskId: "task-delegated",
-      }],
-    });
-
-    const result = await ingestMatrixApplicationServiceTransaction({
-      transactionId: "transaction-delegated-edit",
-      events: [{
-        event_id: "$event-delegated-edit",
-        type: "m.room.message",
-        room_id: "!room:example.org",
-        sender: aliceMatrixUserId,
-        content: {
-          msgtype: "m.text",
-          body: "* revised",
-          "m.new_content": { msgtype: "m.text", body: "revised" },
-          "m.relates_to": {
-            rel_type: "m.replace",
-            event_id: "$event-original-delegated",
-          },
-        },
-      }],
-    });
-
-    expect(result).toEqual([{
-      eventId: "$event-delegated-edit",
-      status: "ignored",
-      reason: "matrix_edit_delegation_active",
-    }]);
-    expect(mockInvalidateMemoryExtractionForSourceMessage).toHaveBeenCalledWith(
-      fencedTx,
-      {
-        messageId: "message-delegated",
-        reasonCode: "source_message_edited",
-      },
-    );
-    expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: "FAILED" }),
-      }),
-    );
-  });
-
   it("keeps inbound messages waiting for an operator without inventing an active assignment", async () => {
     tx.conversation.findFirst.mockResolvedValue({
       id: "conversation-1",
@@ -2314,55 +2257,6 @@ describe("Matrix application service ingress", () => {
     });
   });
 
-  it("treats redaction of active delegated input as a permanent Matrix conflict", async () => {
-    mockPrisma.message.findFirst.mockResolvedValueOnce({
-      id: "message-delegated",
-      senderId: aliceMatrixUserId,
-      senderType: "AUDIENCE",
-    });
-    tx.message.findFirst.mockResolvedValueOnce({
-      id: "message-delegated",
-      conversationId: "conversation-1",
-      episodeId: "episode-1",
-      inputForGenerationRuns: [{ id: "run-delegated" }],
-    });
-    tx.generationRun.findUnique.mockResolvedValueOnce({
-      id: "run-delegated",
-      status: "PROCESSING",
-      delegationTaskId: "task-delegated",
-      runtimePolicySnapshot: null,
-    });
-
-    const result = await ingestMatrixApplicationServiceTransaction({
-      transactionId: "transaction-redact-delegated",
-      events: [{
-        event_id: "$event-redact-delegated",
-        type: "m.room.redaction",
-        room_id: "!room:example.org",
-        sender: aliceMatrixUserId,
-        redacts: "$event-original-delegated",
-        content: {},
-      }],
-    });
-
-    expect(result).toEqual([{
-      eventId: "$event-redact-delegated",
-      status: "ignored",
-      reason: "matrix_redaction_delegation_active",
-    }]);
-    expect(mockInvalidateMemoryExtractionForSourceMessage).toHaveBeenCalledWith(
-      fencedTx,
-      {
-        messageId: "message-delegated",
-        reasonCode: "source_message_redacted",
-        occurredAt: expect.any(Date),
-      },
-    );
-    expect(tx.generationRun.updateMany).not.toHaveBeenCalled();
-    expect(tx.outboxEvent.updateMany).not.toHaveBeenCalled();
-    expect(tx.message.update).not.toHaveBeenCalled();
-  });
-
   it("cancels queued generation and releases its entitlement when the input is redacted", async () => {
     mockPrisma.message.findFirst.mockResolvedValueOnce({
       id: "message-alice",
@@ -2447,50 +2341,6 @@ describe("Matrix application service ingress", () => {
         processedAt: expect.any(Date),
       }),
     });
-  });
-
-  it("rejects redaction when a failed run still belongs to an active delegation task", async () => {
-    mockPrisma.message.findFirst.mockResolvedValueOnce({
-      id: "message-delegated-failed",
-      senderId: aliceMatrixUserId,
-      senderType: "AUDIENCE",
-    });
-    tx.message.findFirst.mockResolvedValueOnce({
-      id: "message-delegated-failed",
-      conversationId: "conversation-1",
-      episodeId: "episode-1",
-      inputForGenerationRuns: [{ id: "run-delegated-failed" }],
-    });
-    tx.generationRun.findUnique.mockResolvedValueOnce({
-      id: "run-delegated-failed",
-      status: "FAILED",
-      delegationTaskId: "task-delegated",
-      delegationTask: { status: "WAITING_FOR_OWNER" },
-      outputMessageId: null,
-      outputMessage: null,
-      runtimePolicySnapshot: null,
-    });
-
-    const result = await ingestMatrixApplicationServiceTransaction({
-      transactionId: "transaction-redact-failed-delegated",
-      events: [{
-        event_id: "$event-redact-failed-delegated",
-        type: "m.room.redaction",
-        room_id: "!room:example.org",
-        sender: aliceMatrixUserId,
-        redacts: "$event-original-delegated",
-        content: {},
-      }],
-    });
-
-    expect(result).toEqual([{
-      eventId: "$event-redact-failed-delegated",
-      status: "ignored",
-      reason: "matrix_redaction_delegation_active",
-    }]);
-    expect(tx.outboxEvent.updateMany).not.toHaveBeenCalled();
-    expect(tx.generationRun.updateMany).not.toHaveBeenCalled();
-    expect(tx.message.update).not.toHaveBeenCalled();
   });
 
   it("cancels completed output that has not crossed the delivery boundary", async () => {

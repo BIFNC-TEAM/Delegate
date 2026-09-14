@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-08T09-11-40-763Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "isolated-product-browser",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-08T09:11:40.763Z",
+  "totalDurationMs": 24494.6185,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "PRODUCT_UI_FAILED": 1
+  },
+  "moduleTimings": [
+    {
+      "module": "response",
+      "operation": "product.ui_handoff_lifecycle",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 0,
+      "failed": 1,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 24493.316625,
+      "averageMs": 24493.316625,
+      "p50Ms": 24493.316625,
+      "p95Ms": 24493.316625,
+      "maximumMs": 24493.316625,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    }
+  ],
+  "uncalledModules": [
+    "request",
+    "context",
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "wait"
+  ],
+  "slowestCases": [
+    {
+      "id": "ARCH-04",
+      "durationMs": 24493.316625,
+      "dominantStage": "response/product.ui_handoff_lifecycle"
+    }
+  ],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "ARCH-04",
+      "title": "UI lifecycle states",
+      "status": "FAIL",
+      "applicable": true,
+      "attempt": 1,
+      "totalDurationMs": 24493.316625,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "PRODUCT_UI_FAILED: browser status failed: [browse] Starting server...\n[browse] Server failed to start:\n[browse] Failed to start: [browse] No available port after 5 attempts in range 10000-60000\n\n",
+      "evidence": [],
+      "spans": [
+        {
+          "traceId": "product-arch-04",
+          "runId": "product-arch-04",
+          "caseId": "ARCH-04",
+          "spanId": "7bb3fa08-2515-4ecc-a232-628a3790c8b9",
+          "module": "response",
+          "operation": "product.ui_handoff_lifecycle",
+          "attempt": 1,
+          "startOffsetMs": 0,
+          "durationMs": 24493.316625,
+          "status": "error",
+          "error": "browser status failed: [browse] Starting server...\n[browse] Server failed to start:\n[browse] Failed to start: [browse] No available port after 5 attempts in range 10000-60000\n\n"
+        }
+      ]
+    }
+  ]
+}

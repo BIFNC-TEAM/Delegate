@@ -13,6 +13,17 @@ describe("conversation generation runtime outcome", () => {
     })).toEqual({ mode: "model" });
   });
 
+  it("preserves only the verified tool-evidence flag for model outcomes", () => {
+    expect(readConversationGenerationRuntimeOutcome({
+      runtimeOutcome: {
+        version: 1,
+        mode: "model",
+        verifiedToolEvidence: true,
+        rawToolOutput: "must-not-leak",
+      },
+    })).toEqual({ mode: "model", verifiedToolEvidence: true });
+  });
+
   it("returns only the allowlisted fallback reason", () => {
     expect(readConversationGenerationRuntimeOutcome({
       runtimeOutcome: {

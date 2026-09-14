@@ -4,10 +4,10 @@ import {
   conversationWorkerMemoryLoopDefaults,
   type ConversationWorkerConfig,
 } from "./config";
-import { processNextConversationWork } from "./processor";
+import { processNextPiConversationWork } from "./processor-pi";
 
 type ConversationWorkResult = Awaited<
-  ReturnType<typeof processNextConversationWork>
+  ReturnType<typeof processNextPiConversationWork>
 >;
 
 type ScheduleHandle = ReturnType<typeof setTimeout>;
@@ -150,7 +150,7 @@ export function startConversationWorkerLoops(
   const processReconciliation = dependencies.processReconciliation
     ?? (() => invokeMemoryWorker("runNextMemoryReconciliation"));
   const processConversation = dependencies.processConversation
-    ?? processNextConversationWork;
+    ?? processNextPiConversationWork;
 
   const controls: LaneControl[] = [
     startLane({

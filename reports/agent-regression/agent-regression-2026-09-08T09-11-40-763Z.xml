@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="1" failures="1" skipped="0" time="24.494619"><testcase classname="agent.regression" name="ARCH-04" time="24.493317"><failure message="PRODUCT_UI_FAILED: browser status failed: [browse] Starting server...
+[browse] Server failed to start:
+[browse] Failed to start: [browse] No available port after 5 attempts in range 10000-60000
+
+"/></testcase></testsuite>

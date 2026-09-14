@@ -1,0 +1,124 @@
+# Isolated Agent regression stack. This override never reuses the developer
+# stack's container names, host ports, images, or named volumes.
+services:
+  postgres:
+    container_name: delegate-agent-test-postgres
+    ports: !override
+      - "15432:5432"
+    volumes: !override
+      - delegate-agent-test-postgres-data:/var/lib/postgresql/data
+
+  artifact-store:
+    container_name: delegate-agent-test-artifact-store
+    ports: !override
+      - "19000:9000"
+      - "19001:9001"
+    volumes: !override
+      - delegate-agent-test-artifact-data:/data
+
+  migrate:
+    image: delegate-agent-test-app:local
+    command: >
+      sh -lc "pnpm db:generate && pnpm db:deploy && pnpm db:seed"
+
+  reps:
+    image: delegate-agent-test-app:local
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_REPRESENTATIVE_URL: http://localhost:13002
+      DELEGATE_AUTH_SESSION_SECRET: delegate-agent-test-auth-session-secret
+      REP_PUBLIC_CHAT_SESSION_SECRET: delegate-agent-test-public-chat-session-secret
+      DELEGATE_AUTH_DEV_LOGIN: "true"
+      NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS: "true"
+      DELEGATE_WECHAT_PAY_ENABLED: "false"
+      DELEGATE_WECHAT_PAY_COLLECTION_ENABLED: "false"
+      DELEGATE_WECHAT_PAY_PROCESSING_ENABLED: "false"
+      WECHAT_PAY_APP_ID: ""
+      WECHAT_PAY_MERCHANT_ID: ""
+      WECHAT_PAY_MERCHANT_CERTIFICATE_SERIAL_NUMBER: ""
+      WECHAT_PAY_MERCHANT_PRIVATE_KEY_BASE64: ""
+      WECHAT_PAY_API_V3_KEY: ""
+      WECHAT_PAY_PUBLIC_KEY_ID: ""
+      WECHAT_PAY_PUBLIC_KEY_BASE64: ""
+      WECHAT_PAY_PLATFORM_CERTIFICATE_SERIAL_NUMBER: ""
+      WECHAT_PAY_PLATFORM_CERTIFICATE_BASE64: ""
+      WECHAT_PAY_VERIFICATION_KEYS_JSON: ""
+      WECHAT_PAY_NOTIFY_URL: ""
+      WECHAT_PAY_REFUND_NOTIFY_URL: ""
+    ports: !override
+      - "13002:3002"
+
+  compute-broker:
+    image: delegate-agent-test-app:local
+    environment:
+      NODE_ENV: test
+      SANDBOX_PROVIDER: docker
+      SANDBOX_ROUTING_MODE: legacy
+      SANDBOX_PROVIDER_ROUTING_JSON: ""
+      DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS: "true"
+      DELEGATE_MCP_READ_ONLY_TEST_TOOLS: "agent_test_mcp_orders:list_orders,agent_test_mcp_orders:get_order"
+    depends_on:
+      agent-test-mcp:
+        condition: service_healthy
+    volumes:
+      - ./apps/compute-broker/src:/app/apps/compute-broker/src:ro
+    ports: !override
+      - "14010:4010"
+
+  conversation-worker:
+    image: delegate-agent-test-conversation-worker:local
+    environment:
+      DELEGATE_AGENT_RUNTIME: pi
+      CONVERSATION_WORKER_PORT: "4040"
+    ports: !override
+      - "14040:4040"
+    volumes:
+      - ./apps/conversation-worker/src:/app/apps/conversation-worker/src:ro
+      - ./packages/model-runtime/src:/app/packages/model-runtime/src:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./packages/runtime/src:/app/packages/runtime/src:ro
+      - ./packages/domain/src:/app/packages/domain/src:ro
+      - ./packages/openviking/src:/app/packages/openviking/src:ro
+      - ./packages/compute-protocol/src:/app/packages/compute-protocol/src:ro
+      - ./packages/artifacts/src:/app/packages/artifacts/src:ro
+      - ./packages/registry/src:/app/packages/registry/src:ro
+      - ./packages/workflows/src:/app/packages/workflows/src:ro
+
+  agent-test-mcp:
+    image: delegate-agent-test-conversation-worker:local
+    command: >
+      sh -lc "node --import tsx packages/agent-regression/src/test-mcp-server.ts"
+    environment:
+      AGENT_TEST_MCP_PORT: "4050"
+    ports: !override
+      - "14050:4050"
+    volumes:
+      - ./packages/agent-regression/src/test-mcp-server.ts:/app/packages/agent-regression/src/test-mcp-server.ts:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4050/health').then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  openviking:
+    container_name: delegate-agent-test-openviking
+    image: delegate-agent-test-openviking:v0.4.12-compat
+    ports: !override
+      - "11933:1933"
+    volumes: !override
+      - ./deploy/openviking:/opt/delegate-openviking:ro
+      - delegate-agent-test-openviking-config:/etc/openviking
+      - delegate-agent-test-openviking-data:/app/data
+
+volumes:
+  delegate-agent-test-postgres-data:
+  delegate-agent-test-artifact-data:
+  delegate-agent-test-openviking-config:
+  delegate-agent-test-openviking-data:

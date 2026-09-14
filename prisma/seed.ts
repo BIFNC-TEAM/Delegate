@@ -458,11 +458,34 @@ export async function seedDatabase(
             verificationTier: pack.verificationTier ?? null,
             capabilityTags: pack.capabilityTags,
             executesCode: pack.executesCode,
+            instructions: pack.instructions ?? null,
+            instructionsSha256: pack.instructionsSha256 ?? null,
+            resources: pack.resources ?? [],
+            signatureStatus:
+              pack.source === "builtin" && pack.executesCode ? "VERIFIED" : "UNAVAILABLE",
+            registryTrustSource:
+              pack.source === "builtin" ? "delegate_builtin" : null,
+            registryVerified: pack.source === "builtin",
+            registryTrustEligible: pack.source === "builtin",
             reviewedBy: owner.id,
             reviewedAt: now,
             adoptedAt: now,
           },
-          update: {},
+          update: {
+            displayName: pack.displayName,
+            summary: pack.summary,
+            capabilityTags: pack.capabilityTags,
+            executesCode: pack.executesCode,
+            instructions: pack.instructions ?? null,
+            instructionsSha256: pack.instructionsSha256 ?? null,
+            resources: pack.resources ?? [],
+            signatureStatus:
+              pack.source === "builtin" && pack.executesCode ? "VERIFIED" : "UNAVAILABLE",
+            registryTrustSource:
+              pack.source === "builtin" ? "delegate_builtin" : null,
+            registryVerified: pack.source === "builtin",
+            registryTrustEligible: pack.source === "builtin",
+          },
         });
       }
 

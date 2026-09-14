@@ -1,0 +1,106 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-09T03-42-28-462Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "isolated-product-browser",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-09T03:42:28.462Z",
+  "totalDurationMs": 29910.287,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 1,
+    "FAIL": 0,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 1,
+  "functionalConclusion": "PASS",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {},
+  "moduleTimings": [
+    {
+      "module": "response",
+      "operation": "product.ui_handoff_lifecycle",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 29909.504459,
+      "averageMs": 29909.504459,
+      "p50Ms": 29909.504459,
+      "p95Ms": 29909.504459,
+      "maximumMs": 29909.504459,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    }
+  ],
+  "uncalledModules": [
+    "request",
+    "context",
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "wait"
+  ],
+  "slowestCases": [
+    {
+      "id": "ARCH-04",
+      "durationMs": 29909.504459,
+      "dominantStage": "response/product.ui_handoff_lifecycle"
+    }
+  ],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "ARCH-04",
+      "title": "UI lifecycle states",
+      "status": "PASS",
+      "applicable": true,
+      "attempt": 1,
+      "totalDurationMs": 29909.504459,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "evidence": [
+        "queued=visible",
+        "cancelButton=visible",
+        "cancelled=converged",
+        "busyAfterCancel=false",
+        "connected=visible",
+        "busyAfterConnect=false",
+        "conversation=cmttjz05200uhqm0nq6b1t1mo"
+      ],
+      "spans": [
+        {
+          "traceId": "product-arch-04",
+          "runId": "product-arch-04",
+          "caseId": "ARCH-04",
+          "spanId": "25c59cba-0280-420e-ad0f-4ffc0827251c",
+          "module": "response",
+          "operation": "product.ui_handoff_lifecycle",
+          "attempt": 1,
+          "startOffsetMs": 0,
+          "durationMs": 29909.504459,
+          "status": "ok"
+        }
+      ]
+    }
+  ]
+}

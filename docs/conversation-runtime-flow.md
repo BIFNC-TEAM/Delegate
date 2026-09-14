@@ -1,8 +1,8 @@
 # 对外代理统一对话运行流程
 
-本文描述 Web、Matrix、Telegram 的共同业务流程。Agent 规划与能力执行的完整协议见
-[Agent Runtime V3](./agent-runtime-v3.md)；该文档是规划、执行、审批、证据、交付和
-回滚的权威规范。
+本文主体是已退休 V3 协议的历史迁移资料，不代表当前生产执行链。新输入的统一流程以
+[Pi Agent rearchitecture](./pi-agent-rearchitecture.md) 为准；旧 Planner/Composer 执行代码
+已经删除，由 Pi 直接负责模型与工具循环。
 
 ## 核心原则
 
@@ -269,21 +269,13 @@ Approval、Clarification、Handoff、Cancellation 和 Reconciliation 通过 Work
 Postgres 并按稳定 `signalId` 去重。Postgres 是任务、审批、账本和交付状态的唯一业务
 真相。
 
-## 发布模式
+## Pi 发布模式
 
-`TURN_PLAN_V3_MODE`：
-
-- `disabled`：关闭 V3，可运行 V2 回滚兼容；
-- `shadow`：保存 V3 决策差异，不拥有执行；
-- `active_readonly`：只发布授权知识和稳定通用回答；
-- `active_governed`：发布托管文档、typed Compute 和 schema-pinned MCP。
-
-active V3 不调用 V2 Planner 或旧 natural-language Detailed Planner。V2 表、Plan 和代码
-仍可读取，并在显式 disabled/shadow 回滚窗口中使用；它们不是第二套 active 写真相。
-
-发布扩大必须通过 `evaluateV3ReleaseGate`：重复 Effect/结算、静默工具降级、无证据实时
-回答、provider unknown 自动重发、旧 Plan 执行、Policy 绕过和未知 Evidence Ref 必须为
-0；每个 Lane 至少 1,000 个 Shadow 样本并连续 7 天满足质量、时延和成本门槛。
+新会话只有一个生产运行模式：Pi。`conversation-worker` 的 scheduler 直接导入
+`processor-pi.ts`，不再读取 V2/V3 Planner 或 clarification rollout 开关，也不会自动回退
+旧处理器。上线前使用 `pnpm agent:pi:legacy-preflight` 只读确认旧 Plan、DelegationTask、
+关联 GenerationRun、Workflow 和 Approval 均无活跃记录；检查失败时停止发布并先完成数据
+收敛。
 
 ## 验证重点
 

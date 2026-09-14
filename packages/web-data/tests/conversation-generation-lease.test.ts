@@ -8,6 +8,10 @@ const mocks = vi.hoisted(() => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    toolExecution: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      updateMany: vi.fn(),
+    },
     conversationTurnPlan: {
       findFirst: vi.fn(),
     },
@@ -277,9 +281,6 @@ describe("conversation generation work leases", () => {
     expect(lockedQuery).toContain("FOR UPDATE OF outbox SKIP LOCKED");
     expect(lockedQuery).toContain(
       "run.\"conversationId\"\n          IS NOT DISTINCT FROM ?",
-    );
-    expect(lockedQuery).toContain(
-      "run.\"delegationTaskId\"\n          IS NOT DISTINCT FROM ?",
     );
     expect(
       mocks.tx.$executeRaw.mock.calls.map((call) => call[1]),
@@ -656,38 +657,4 @@ describe("conversation generation work leases", () => {
     expect(mocks.tx.conversation.updateMany).not.toHaveBeenCalled();
   });
 
-  it("keeps delegated MCP billing reserved while its owner reconciliation is pending", async () => {
-    mocks.tx.generationRun.update.mockResolvedValue({
-      ...validRun,
-      delegationTaskId: "task-uncertain-effect",
-      delegationTaskStepId: "step-uncertain-effect",
-      delegationTaskStep: { kind: "MCP" },
-    });
-
-    await failGenerationRun({
-      conversationId: validRun.conversationId,
-      runId: validRun.id,
-      outboxId: "outbox-stale",
-      leaseAttempt: 5,
-      errorCode: "conversation_worker_failed",
-      errorMessage: "The remote effect requires owner reconciliation.",
-    });
-
-    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
-    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
-      where: {
-        id: "outbox-stale",
-        aggregateType: "generation_run",
-        aggregateId: validRun.id,
-        eventType: "generation.requested",
-        status: "PROCESSING",
-        attemptCount: 5,
-      },
-      data: {
-        status: "DEAD_LETTER",
-        lastError: "The remote effect requires owner reconciliation.",
-        availableAt: expect.any(Date),
-      },
-    });
-  });
 });

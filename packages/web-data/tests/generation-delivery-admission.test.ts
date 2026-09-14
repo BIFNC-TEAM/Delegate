@@ -24,8 +24,6 @@ vi.mock("../src/memory-use-execution", async (importOriginal) => ({
 
 import {
   admitGenerationMessageProviderDelivery,
-  GenerationPlanDeliverySupersededError,
-  markGenerationDeliveryComplete,
   withGenerationMessageProviderDeliveryFence,
   type GenerationMessageDeliveryFenceInput,
 } from "../src/conversation-platform";
@@ -40,10 +38,6 @@ function buildInput(): GenerationMessageDeliveryFenceInput {
     deliveryAdmission: {
       attemptNumber: 4,
       leaseToken: "delivery-lease-4",
-      planId: "plan-2",
-      planRevision: 2,
-      executionEpoch: 9,
-      planActionId: "compose-action-2",
     },
   };
 }
@@ -55,7 +49,6 @@ function buildTx() {
       findUnique: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    planExecutionFence: { findUnique: vi.fn() },
     outboxEvent: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     message: {
       findFirst: vi.fn().mockResolvedValue(null),
@@ -77,12 +70,7 @@ function currentPreparedAttempt() {
     leaseExpiresAt: new Date(Date.now() + 60_000),
     deliveryOutboxId: "generation-outbox-1",
     deliveryLeaseAttempt: 4,
-    planId: "plan-2",
-    planRevision: 2,
-    executionEpoch: 9,
-    planActionId: "compose-action-2",
     failureCode: null,
-    plan: { scopeKey: "turn-plan-scope:conversation-1" },
   };
 }
 
@@ -100,17 +88,12 @@ describe("generation delivery atomic admission", () => {
       .mockResolvedValue({ authorized: true });
   });
 
-  it("moves the exact current Plan delivery from prepared to response-received around one provider call", async () => {
+  it("moves the leased delivery from prepared to response-received around one provider call", async () => {
     const tx = buildTx();
     databaseMocks.state.tx = tx;
     tx.messageDeliveryAttempt.findUnique
       .mockResolvedValueOnce(currentPreparedAttempt())
       .mockResolvedValueOnce(currentCallStartedAttempt());
-    tx.planExecutionFence.findUnique.mockResolvedValue({
-      activePlanId: "plan-2",
-      activeRevision: 2,
-      executionEpoch: 9,
-    });
     const provider = vi.fn().mockResolvedValue("provider-message-1");
 
     await expect(admitGenerationMessageProviderDelivery(
@@ -150,54 +133,12 @@ describe("generation delivery atomic admission", () => {
     );
   });
 
-  it("closes a stale revision before the provider callback can run", async () => {
-    const tx = buildTx();
-    databaseMocks.state.tx = tx;
-    tx.messageDeliveryAttempt.findUnique.mockResolvedValue(
-      currentPreparedAttempt(),
-    );
-    tx.planExecutionFence.findUnique.mockResolvedValue({
-      activePlanId: "plan-3",
-      activeRevision: 3,
-      executionEpoch: 10,
-    });
-    const provider = vi.fn();
-
-    await expect(admitGenerationMessageProviderDelivery(
-      buildInput(),
-    )).rejects.toBeInstanceOf(GenerationPlanDeliverySupersededError);
-
-    expect(provider).not.toHaveBeenCalled();
-    expect(tx.messageDeliveryAttempt.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: "CANCELED",
-          attemptPhase: "CANCELED_BEFORE_START",
-          failureCode: "turn_plan_superseded_before_delivery",
-        }),
-      }),
-    );
-    expect(tx.outboxEvent.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: "DEAD_LETTER",
-          lastError: "turn_plan_superseded_before_delivery",
-        }),
-      }),
-    );
-  });
-
   it("keeps CALL_STARTED in the committed admission when the provider outcome throws", async () => {
     const tx = buildTx();
     databaseMocks.state.tx = tx;
     tx.messageDeliveryAttempt.findUnique
       .mockResolvedValueOnce(currentPreparedAttempt())
       .mockResolvedValueOnce(currentCallStartedAttempt());
-    tx.planExecutionFence.findUnique.mockResolvedValue({
-      activePlanId: "plan-2",
-      activeRevision: 2,
-      executionEpoch: 9,
-    });
 
     await admitGenerationMessageProviderDelivery(buildInput());
     await expect(withGenerationMessageProviderDeliveryFence(
@@ -217,38 +158,4 @@ describe("generation delivery atomic admission", () => {
     );
   });
 
-  it("does not let Web mark SENT after the frozen Plan revision is superseded", async () => {
-    const tx = buildTx();
-    databaseMocks.state.tx = tx;
-    tx.messageDeliveryAttempt.findUnique.mockResolvedValue(
-      currentPreparedAttempt(),
-    );
-    tx.planExecutionFence.findUnique.mockResolvedValue({
-      activePlanId: "plan-3",
-      activeRevision: 3,
-      executionEpoch: 10,
-    });
-
-    await expect(markGenerationDeliveryComplete({
-      runId: "run-1",
-      outboxId: "generation-outbox-1",
-      leaseAttempt: 4,
-      outputMessageId: "output-message-1",
-      deliveryAdmission: buildInput().deliveryAdmission,
-    })).rejects.toBeInstanceOf(GenerationPlanDeliverySupersededError);
-
-    expect(tx.message.updateMany).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ deliveryStatus: "SENT" }),
-      }),
-    );
-    expect(tx.message.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          deliveryStatus: "CANCELED",
-          failureCode: "turn_plan_superseded_before_delivery",
-        }),
-      }),
-    );
-  });
 });

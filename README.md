@@ -445,10 +445,7 @@ The default `.env.example` is safe for local development. Important settings:
 - `PUBLIC_CHAT_RATE_LIMIT_SECRET` HMACs network/audience/representative rate-limit keys before they reach Postgres; it falls back to `REP_PUBLIC_CHAT_SESSION_SECRET`. The three `PUBLIC_CHAT_*_REQUESTS_*` variables tune distributed admission limits. Set `PUBLIC_CHAT_CLIENT_IP_HEADER` only when a trusted reverse proxy overwrites that header, otherwise leave it empty.
 - `PUBLIC_MATERIAL_LINK_SECRET` signs ten-minute public-material links that are bound to the representative, asset checksum, and processing version. Downloads re-check the current published/approved state, so archiving, disabling, replacing, or unpublishing an asset invalidates outstanding links.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_MODEL_FALLBACK_PROVIDER`, and the provider-specific model variables control model-backed representative replies.
-- `TURN_PLAN_V3_MODE` controls the authoritative Agent Runtime rollout (`disabled | shadow | active_readonly | active_governed`). Active V3 runs one V3 Planner and does not invoke V2 or the legacy natural-language detailed planner. Public representatives try authorized knowledge first; disclosed General fallback additionally requires an explicit turn-level source instruction, a verified miss, and a server-approved non-Owner authority boundary. `active_governed` additionally publishes managed Markdown/TXT documents, typed Compute, and schema-pinned MCP.
-- Production active V3 additionally requires `TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true`, set only after the lane passes the executable Shadow release gates.
-- `TURN_PLANNER_V2_MODE` controls rollback/compatibility planning (`disabled | shadow | active_low_risk`). V2 never becomes a second active write authority while a V3 active mode is selected.
-- `DELEGATE_MODEL_PLANNER_PROVIDER` pins planning independently from reply generation. Local deployments prefer `agicto`; configured AGICTO, OpenAI, and compatible Bailian models use native Strict JSON Schema. `DELEGATE_MODEL_PLANNER_MAX_OUTPUT_TOKENS` is the independent budget for structured plans (default `2048`); providers using native strict output may manage their own completion ceiling. JSON-only planners remain untrusted until the server's strict proposal and capability validators both pass.
+- New conversation turns run through embedded `@earendil-works/pi-agent-core@0.85.1`; see [`docs/pi-agent-rearchitecture.md`](docs/pi-agent-rearchitecture.md). Pi owns the model/tool loop, while Delegate adapts knowledge, MCP, Skill metadata, the isolated Compute sandbox, artifacts and human handoff. The production scheduler imports only `processor-pi.ts`; retired V2/V3 planner rollout variables are rejected instead of selecting a fallback runtime.
 - `DELEGATE_MODEL_DOCUMENT_MAX_OUTPUT_TOKENS`, `DELEGATE_MODEL_DOCUMENT_MAX_PARTS`, and `DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS` are the independent output, bounded-continuation, and request budgets for complete managed documents. A length-limited response continues with the same Provider instead of restarting on a fallback; exhaustion still fails closed and never creates an Artifact.
 - `DELEGATE_AGICTO_API_KEY` enables the distinct AGICTO provider at `DELEGATE_AGICTO_BASE_URL`; when omitted it may reuse the already configured `OPENVIKING_MODEL_API_KEY` and `OPENVIKING_MODEL_API_BASE`. AGICTO uses an OpenAI-compatible wire format but is never recorded or credentialed as the OpenAI provider. `DELEGATE_MODEL_API_KEY` (or `OPENAI_API_KEY`), `DELEGATE_BAILIAN_API_KEY`, and `ANTHROPIC_API_KEY` remain isolated credentials for OpenAI, Bailian, and Anthropic respectively.
 - `OPENVIKING_*` controls public memory sync, recall, and commit behavior.
@@ -463,7 +460,7 @@ The default `.env.example` is safe for local development. Important settings:
 
 Knowledge files are persisted before background processing reads the original object, extracts and normalizes text, prepares retrieval chunks, and writes the document into OpenViking's vector index. An asset becomes `READY` only after source storage, extraction, and vector indexing all succeed. Archive and permanent-delete flows remove the vector index as well, preventing revoked content from remaining retrievable.
 
-When model providers are unavailable, legacy presentation-only paths may use deterministic previews. Active V3 planning, evidence retrieval, tool execution, and composition fail closed and never replace a missing tool/evidence result with model knowledge.
+When model providers are unavailable, presentation-only previews may use deterministic content. Pi evidence retrieval, tool execution, and response delivery fail closed and never replace a missing tool or evidence result with model knowledge.
 
 ## Useful Commands
 
@@ -673,6 +670,27 @@ transaction.
 
 The first product path to dogfood is the browser representative page at `http://localhost:3102/reps/lin-founder-rep`, plus the owner dashboard at `http://localhost:3101/dashboard?view=overview`.
 
+## Pi Agent regression
+
+New production conversation turns run through the embedded Pi Agent runtime.
+The isolated end-to-end regression stack has separate ports, database and
+artifact volumes from the developer stack:
+
+```bash
+pnpm test:agent:stack:up
+pnpm test:agent:stack:seed
+pnpm test:agent:smoke:product
+pnpm test:agent:stack:down
+```
+
+`test:agent:smoke:product` runs the 15 core cases with a real configured model
+and includes an actual product HTTP/SSE flow through fictional KB data, the
+local `orders-test` MCP server, Skill discovery/load, Docker sandbox execution
+and a downloaded CSV. JSON, JUnit, Markdown and HTML reports are written to
+`reports/agent-regression/`. See
+[Pi Agent rearchitecture](./docs/pi-agent-rearchitecture.md) for architecture,
+evidence rules, limitations and the remaining migration work.
+
 ## Design System
 
 Delegate uses the **Dispatch Editorial** direction from [DESIGN.md](./DESIGN.md):
@@ -688,8 +706,9 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 ## Documentation Map
 
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
-- [Agent Runtime V3](./docs/agent-runtime-v3.md): the authoritative PlannerProposal, TurnPlan, capability, approval, execution, evidence, delivery, billing, rollout, and pi-framework decision.
-- [Conversation runtime flow](./docs/conversation-runtime-flow.md): the channel-neutral V3 execution flow in Chinese.
+- [Pi Agent rearchitecture](./docs/pi-agent-rearchitecture.md): active Pi runtime path, capability adapters, timing and executable regression status.
+- [Agent Runtime V3](./docs/agent-runtime-v3.md): archived pre-Pi protocol and migration context; not an active runtime guide.
+- [Conversation runtime flow](./docs/conversation-runtime-flow.md): archived V3 flow plus the pointer to the current Pi path.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
 - [Public audience identity](./docs/public-audience-identity.md): web identity, Contact/Conversation, service purchase, and sandbox linkage.
 - [Wallet & Billing product contract](./docs/wallet-billing-product-contract.md): V1 package, price-version, entitlement, revenue, refund, and production-gate rules.

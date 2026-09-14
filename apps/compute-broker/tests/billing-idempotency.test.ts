@@ -6,8 +6,6 @@ const { mockPrisma, tx, executionState } = vi.hoisted(() => {
     executionLeaseToken: "lease-token-1",
     billingFinalizedAt: null as Date | null,
     billingSnapshot: null as Record<string, unknown> | null,
-    billingAdmission: null as Record<string, unknown> | null,
-    planActionId: null as string | null,
   };
   const tx = {
     $executeRaw: vi.fn().mockResolvedValue(1),
@@ -49,8 +47,6 @@ describe("execution cost recording idempotency", () => {
     executionState.executionLeaseToken = "lease-token-1";
     executionState.billingFinalizedAt = null;
     executionState.billingSnapshot = null;
-    executionState.billingAdmission = null;
-    executionState.planActionId = null;
   });
 
   it("replays the persisted cost summary without recording twice", async () => {
@@ -83,34 +79,6 @@ describe("execution cost recording idempotency", () => {
     expect(tx.ledgerEntry.create).not.toHaveBeenCalled();
   });
 
-  it("does not create an Action-level ledger when the GenerationRun owns billing", async () => {
-    executionState.planActionId = "action-1";
-    executionState.billingAdmission = {
-      decision: "not_billable",
-      reasonCode: "generation_run_owns_conversation_billing",
-    };
-    const { recordExecutionCosts } = await import("../src/billing");
-
-    await expect(recordExecutionCosts(buildCostInput())).resolves.toEqual({
-      computeCostCents: 0,
-      browserCostCents: 0,
-      providerCostCents: 0,
-      mcpCostCents: 0,
-      storageCostCents: 0,
-    });
-    expect(tx.ledgerEntry.create).not.toHaveBeenCalled();
-  });
-
-  it("fails closed when a V3 Action is missing the Generation-owned billing admission", async () => {
-    executionState.planActionId = "action-1";
-    const { recordExecutionCosts } = await import("../src/billing");
-
-    await expect(recordExecutionCosts(buildCostInput())).rejects.toMatchObject({
-      statusCode: 409,
-      message: "v3_action_billing_admission_missing",
-    });
-    expect(tx.ledgerEntry.create).not.toHaveBeenCalled();
-  });
 });
 
 function buildCostInput() {

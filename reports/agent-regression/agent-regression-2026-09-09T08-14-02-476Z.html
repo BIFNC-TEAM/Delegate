@@ -1,0 +1,52 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-09T08-14-02-476Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-09T08-14-02-476Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model+isolated-product
+- Started: 2026-09-09T08:14:02.476Z
+- Total: 54128.9 ms
+- Cases: 1/1; PASS 1, FAIL 0, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 100.00%
+- Functional: PASS; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| artifact/product.attachment_download | 1 | 1/0/0/0 | 0 | 92.4 | 92.4 | 92.4 | 92.4 | 92.4 | N/A |
+| context/assemble | 1 | 1/0/0/0 | 0 | 3.8 | 3.8 | 3.8 | 3.8 | 3.8 | N/A |
+| context/product.attachment_disclosure | 1 | 1/0/0/0 | 0 | 30.0 | 30.0 | 30.0 | 30.0 | 30.0 | N/A |
+| model/generate | 6 | 6/0/0/0 | 0 | 40974.0 | 6829.0 | 8785.1 | 9535.9 | 9535.9 | N/A |
+| request/agent_run | 1 | 1/0/0/0 | 0 | 52563.7 | 52563.7 | 52563.7 | 52563.7 | 52563.7 | N/A |
+| request/product.attachment_accept | 1 | 1/0/0/0 | 0 | 294.3 | 294.3 | 294.3 | 294.3 | 294.3 | N/A |
+| request/product.attachment_session | 1 | 1/0/0/0 | 0 | 275.7 | 275.7 | 275.7 | 275.7 | 275.7 | N/A |
+| response/product.attachment_sse | 1 | 1/0/0/0 | 0 | 53327.5 | 53327.5 | 53327.5 | 53327.5 | 53327.5 | N/A |
+| response/stream | 1 | 1/0/0/0 | 0 | 51340.4 | 51340.4 | 51340.4 | 51340.4 | 51340.4 | N/A |
+| sandbox/execute | 4 | 4/0/0/0 | 0 | 9946.6 | 2486.7 | 2069.8 | 3772.6 | 3772.6 | N/A |
+| sandbox/skill_resource_recovery | 1 | 1/0/0/0 | 0 | 1590.4 | 1590.4 | 1590.4 | 1590.4 | 1590.4 | N/A |
+| skill/discover | 1 | 1/0/0/0 | 0 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | N/A |
+| skill/load | 1 | 1/0/0/0 | 0 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | N/A |
+| skill/load_recovery_resource | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| PERF-04 | PASS | 1223.5 | 54127.3 | 6 | 7 |  |
+
+## Slowest cases
+
+- PERF-04: 54127.3 ms (response/product.attachment_sse)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

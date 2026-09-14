@@ -17,8 +17,6 @@ import { workflowRunnerConfig } from "./config";
 import { buildWorkflowRunnerReadiness } from "./health";
 import { createTemporalBridge, type TemporalBridge } from "./temporal-bridge";
 import { runWorkflowTick, type TemporalWorkflowDispatcher, type WorkflowTickSummary } from "./runner";
-import { reconcileV3RuntimeInvariants } from "./v3-reconciliation";
-export { reconcileV3RuntimeInvariants } from "./v3-reconciliation";
 import {
   runWeChatPayOperationsTick,
   type WeChatPayOperationsTickResult,
@@ -31,7 +29,6 @@ import {
 let lastTickAt: string | null = null;
 let lastTickSummary: WorkflowTickSummary | null = null;
 let lastError: string | null = null;
-let lastV3ReconciliationAtMs = 0;
 let paymentReconciliationActive = false;
 let lastPaymentReconciliationAt: string | null = null;
 let lastPaymentReconciliationSummary:
@@ -329,10 +326,6 @@ async function tickLoop(
     }
 
     const result = await runWorkflowTick(options);
-    if (Date.now() - lastV3ReconciliationAtMs >= 60_000) {
-      await reconcileV3RuntimeInvariants();
-      lastV3ReconciliationAtMs = Date.now();
-    }
     lastTickAt = new Date().toISOString();
     lastTickSummary = result;
     lastError = null;

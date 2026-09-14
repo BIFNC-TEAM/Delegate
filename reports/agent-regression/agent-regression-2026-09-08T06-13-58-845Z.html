@@ -1,0 +1,49 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T06-13-58-845Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T06-13-58-845Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T06:13:58.845Z
+- Total: 16140.4 ms
+- Cases: 3/3; PASS 2, FAIL 1, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 66.67%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 3 | 3/0/0/0 | 0 | 2.8 | 0.9 | 1.0 | 1.2 | 1.2 | N/A |
+| knowledge/retrieve | 2 | 2/0/0/0 | 0 | 0.4 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| model/generate | 5 | 5/0/0/0 | 0 | 16124.5 | 3224.9 | 3292.2 | 3879.0 | 3879.0 | N/A |
+| request/agent_run | 3 | 3/0/0/0 | 0 | 16135.6 | 5378.5 | 5528.4 | 7175.1 | 7175.1 | N/A |
+| response/stream | 3 | 3/0/0/0 | 0 | 13135.2 | 4378.4 | 4458.1 | 6191.1 | 6191.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| skill/未调用 | — | — | — | — | — | — | — | — | N/A |
+| sandbox/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| KB-03 | PASS | 1070.2 | 5528.7 | 2 | 1 |  |
+| KB-04 | PASS | 984.0 | 7175.3 | 2 | 1 |  |
+| KB-08 | FAIL | 946.2 | 3432.2 | 1 | 0 | ASSERTION_FAILED: probation leave entitlement was inferred beyond the source |
+
+## Slowest cases
+
+- KB-04: 7175.3 ms (request/agent_run)
+- KB-03: 5528.7 ms (request/agent_run)
+- KB-08: 3432.2 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

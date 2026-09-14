@@ -111,6 +111,8 @@ function mapSandboxProviderError(error: SandboxProviderError): PublicBrokerError
       return { statusCode: 504, code: "sandbox_command_timeout", logPrivateDetail: false };
     case "OUTPUT_LIMIT":
       return { statusCode: 413, code: "sandbox_output_limit", logPrivateDetail: false };
+    case "TRANSFER_INTEGRITY":
+      return { statusCode: 502, code: "sandbox_input_integrity_failed", logPrivateDetail: false };
     case "AMBIGUOUS_CREATE":
       return { statusCode: 503, code: "sandbox_creation_pending_reconciliation", logPrivateDetail: false };
     case "THROTTLED":

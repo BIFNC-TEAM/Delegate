@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="1" failures="1" skipped="0" time="82.115740"><testcase classname="agent.regression" name="PERF-04" time="82.103159"><failure message="ASSERTION_FAILED: large-file row count or total is incorrect"/></testcase></testsuite>

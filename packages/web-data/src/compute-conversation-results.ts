@@ -17,11 +17,14 @@ import {
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
 import { prisma } from "./prisma";
-import { finalizeComputeDelegationTaskInTransaction } from "./delegation-tasks";
 import {
   releaseConversationEntitlementByGenerationRunId,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
+import {
+  markPiApprovalContinuationCompleted,
+  readPiApprovalContinuation,
+} from "./pi-approval-continuation";
 
 export type ComputeApprovalConversationOutcome =
   | "completed"
@@ -95,30 +98,6 @@ export async function finalizeComputeApprovalConversation(input: {
           approvalId: approval.id,
         });
       }
-      const finalization = approval.delegationTaskId
-        ? await finalizeComputeDelegationTaskInTransaction(tx, {
-            taskId: approval.delegationTaskId,
-            ...(approval.delegationTaskStepId
-              ? { stepId: approval.delegationTaskStepId }
-              : {}),
-            generationRunId: run.id,
-            outcome: mapComputeOutcomeToTaskOutcome(input.outcome),
-            ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
-            ...(input.failureReason ? { failureReason: input.failureReason } : {}),
-          })
-        : null;
-      if (
-        finalization?.hasMoreSteps
-        && message.deliveryStatus !== MessageDeliveryStatus.SENT
-      ) {
-        message = await tx.message.update({
-          where: { id: message.id },
-          data: {
-            text:
-              "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。",
-          },
-        });
-      }
       return {
         message,
       };
@@ -138,15 +117,12 @@ export async function finalizeComputeApprovalConversation(input: {
     const walletReservation = readGenerationWalletReservation(
       run.runtimePolicySnapshot,
     );
-    const delegationTaskOwnsBilling = Boolean(
-      approval.delegationTaskId && approval.delegationTaskStepId,
-    );
     if (
       conversation.state === "HUMAN_ACTIVE"
       || conversation.state === "NEEDS_HUMAN"
     ) {
       const releasedSnapshot =
-        walletReservation && !delegationTaskOwnsBilling
+        walletReservation
           ? markComputeGenerationWalletReleased(
               run.runtimePolicySnapshot,
               now,
@@ -171,16 +147,14 @@ export async function finalizeComputeApprovalConversation(input: {
           "Compute generation changed while deferring its approval result to human control.",
         );
       }
-      if (!delegationTaskOwnsBilling) {
-        await releaseConversationEntitlementByGenerationRunId(
-          {
-            generationRunId: run.id,
-            reason: "generation_deferred_for_human",
-          },
-          tx as unknown as ServiceEntitlementClient,
-        );
-      }
-      if (walletReservation && !delegationTaskOwnsBilling) {
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "generation_deferred_for_human",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
+      if (walletReservation) {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -191,6 +165,92 @@ export async function finalizeComputeApprovalConversation(input: {
           tx as unknown as UsageChargeClient,
         );
       }
+      return null;
+    }
+
+    const piContinuation = readPiApprovalContinuation(run.contextSnapshot);
+    if (
+      input.outcome === "completed"
+      && piContinuation?.status === "pending"
+      && piContinuation.approvalId === approval.id
+    ) {
+      const continuationArtifacts = (input.artifacts ?? []).map((artifact) => ({
+        id: artifact.id,
+        kind: artifact.kind,
+        mimeType: artifact.mimeType,
+        sizeBytes: artifact.sizeBytes,
+        ...(artifact.fileName ? { fileName: artifact.fileName } : {}),
+      }));
+      const resumedRun = await tx.generationRun.updateMany({
+        where: {
+          id: run.id,
+          status: GenerationRunStatus.WAITING_APPROVAL,
+        },
+        data: {
+          status: GenerationRunStatus.QUEUED,
+          outputMessageId: null,
+          completedAt: null,
+          canceledAt: null,
+          errorCode: null,
+          errorMessage: null,
+          contextSnapshot: markPiApprovalContinuationCompleted(
+            run.contextSnapshot,
+            {
+              approvalId: approval.id,
+              completedAt: now,
+              artifacts: continuationArtifacts,
+            },
+          ),
+        },
+      });
+      if (resumedRun.count !== 1) {
+        throw new Error(
+          "Compute generation changed while resuming its approved Pi continuation.",
+        );
+      }
+      const resumedConversation = await tx.conversation.updateMany({
+        where: {
+          id: run.conversationId,
+          state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+        },
+        data: { state: "AI_QUEUED", lastMessageAt: now },
+      });
+      if (resumedConversation.count !== 1) {
+        throw new Error(
+          "Compute approval conversation changed while resuming Pi.",
+        );
+      }
+      if (run.episodeId) {
+        await tx.conversationEpisode.updateMany({
+          where: {
+            id: run.episodeId,
+            status: ConversationEpisodeStatus.WAITING_APPROVAL,
+          },
+          data: { status: ConversationEpisodeStatus.ACTIVE },
+        });
+      }
+      await tx.outboxEvent.upsert({
+        where: {
+          idempotencyKey:
+            `generation.approval-continuation:${run.id}:${approval.id}`,
+        },
+        create: {
+          conversationId: run.conversationId,
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          eventType: "generation.requested",
+          payload: {
+            runId: run.id,
+            conversationId: run.conversationId,
+            messageId: run.inputMessageId,
+            approvalId: approval.id,
+            approvalContinuation: true,
+          },
+          idempotencyKey:
+            `generation.approval-continuation:${run.id}:${approval.id}`,
+        },
+        update: {},
+      });
       return null;
     }
 
@@ -207,7 +267,6 @@ export async function finalizeComputeApprovalConversation(input: {
         episodeId: run.episodeId,
         senderType: MessageSenderType.REPRESENTATIVE,
         senderDisplayName: approval.representative.displayName,
-        delegationTaskId: approval.delegationTaskId,
         contentType: MessageContentType.TOOL_RESULT,
         text,
         content: {
@@ -256,7 +315,7 @@ export async function finalizeComputeApprovalConversation(input: {
         status: GenerationRunStatus.COMPLETED,
         outputMessageId: message.id,
         completedAt: now,
-        ...(input.outcome === "completed" && !delegationTaskOwnsBilling
+        ...(input.outcome === "completed"
           ? {
               contextSnapshot: markComputeGenerationDeliveryBillingPending(
                 run.contextSnapshot,
@@ -308,18 +367,16 @@ export async function finalizeComputeApprovalConversation(input: {
         );
       }
     }
-    if (!delegationTaskOwnsBilling) {
-      if (input.outcome !== "completed") {
-        await releaseConversationEntitlementByGenerationRunId(
-          {
-            generationRunId: run.id,
-            reason: `compute_${input.outcome}`,
-          },
-          tx as unknown as ServiceEntitlementClient,
-        );
-      }
+    if (input.outcome !== "completed") {
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: `compute_${input.outcome}`,
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
     }
-    if (walletReservation && !delegationTaskOwnsBilling) {
+    if (walletReservation) {
       if (input.outcome !== "completed") {
         await releaseConversationWalletUsage(
           {
@@ -342,154 +399,13 @@ export async function finalizeComputeApprovalConversation(input: {
       outputMessageId: message.id,
       approvalId: approval.id,
     });
-    const finalization = approval.delegationTaskId
-      ? await finalizeComputeDelegationTaskInTransaction(tx, {
-          taskId: approval.delegationTaskId,
-          ...(approval.delegationTaskStepId
-            ? { stepId: approval.delegationTaskStepId }
-            : {}),
-          generationRunId: run.id,
-          outcome: mapComputeOutcomeToTaskOutcome(input.outcome),
-          ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
-          ...(input.failureReason ? { failureReason: input.failureReason } : {}),
-        })
-      : null;
-    const composerResume =
-      input.outcome === "completed"
-      && approval.delegationTaskId
-      && !finalization?.hasMoreSteps
-        ? await findPendingV3ComposerResumeInTransaction(
-            tx,
-            approval.delegationTaskId,
-          )
-        : null;
-    if (composerResume) {
-      await tx.message.update({
-        where: { id: message.id },
-        data: {
-          deliveryStatus: MessageDeliveryStatus.CANCELED,
-          failureCode: "v3_composer_resume",
-          failureReason:
-            "The verified tool result is being composed into the final governed response.",
-        },
-      });
-      await tx.outboxEvent.updateMany({
-        where: {
-          aggregateType: "generation_run",
-          aggregateId: run.id,
-          eventType: "generation.requested",
-          status: { in: ["PENDING", "FAILED"] },
-        },
-        data: {
-          status: "PROCESSED",
-          processedAt: now,
-          lastError: "superseded_by_v3_composer_resume",
-        },
-      });
-      const currentContext = run.contextSnapshot
-        && typeof run.contextSnapshot === "object"
-        && !Array.isArray(run.contextSnapshot)
-          ? run.contextSnapshot as Prisma.JsonObject
-          : {};
-      await tx.generationRun.update({
-        where: { id: run.id },
-        data: {
-          status: GenerationRunStatus.QUEUED,
-          outputMessageId: null,
-          completedAt: null,
-          errorCode: null,
-          errorMessage: null,
-          contextSnapshot: {
-            ...currentContext,
-            source: "v3_governed_composer_resume",
-            delegationTaskId: approval.delegationTaskId,
-            planId: composerResume.planId,
-          },
-        },
-      });
-      await tx.outboxEvent.create({
-        data: {
-          conversationId: run.conversationId,
-          aggregateType: "generation_run",
-          aggregateId: run.id,
-          eventType: "generation.requested",
-          payload: {
-            runId: run.id,
-            conversationId: run.conversationId,
-            messageId: run.inputMessageId,
-            delegationTaskId: approval.delegationTaskId,
-            planId: composerResume.planId,
-            composerResume: true,
-          },
-          idempotencyKey:
-            `generation.v3-composer.requested:${run.id}:${composerResume.planId}`,
-        },
-      });
-      await tx.conversation.update({
-        where: { id: run.conversationId },
-        data: { state: "AI_QUEUED", lastMessageAt: now },
-      });
-      if (run.episodeId) {
-        await tx.conversationEpisode.update({
-          where: { id: run.episodeId },
-          data: { status: ConversationEpisodeStatus.ACTIVE },
-        });
-      }
-      return { message: null };
-    }
-    const deliveredMessage = finalization?.hasMoreSteps
-      ? await tx.message.update({
-          where: { id: message.id },
-          data: {
-            text:
-              "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。",
-          },
-        })
-      : message;
     return {
-      message: deliveredMessage,
+      message,
     };
   });
   if (!result) return null;
   if (!result.message) return null;
   return result.message;
-}
-
-async function findPendingV3ComposerResumeInTransaction(
-  tx: Prisma.TransactionClient,
-  delegationTaskId: string,
-) {
-  const plan = await tx.conversationTurnPlan.findFirst({
-    where: {
-      delegationTaskId,
-      protocolVersion: 3,
-      shadowMode: false,
-      status: { in: ["VALIDATED", "EXECUTING"] },
-      actions: {
-        some: {
-          capabilityKey: "response.compose",
-          status: { in: ["PLANNED", "READY"] },
-        },
-      },
-    },
-    orderBy: { revision: "desc" },
-    select: { id: true },
-  });
-  return plan ? { planId: plan.id } : null;
-}
-
-function mapComputeOutcomeToTaskOutcome(
-  outcome: ComputeApprovalConversationOutcome,
-) {
-  return outcome === "completed"
-    ? "completed" as const
-    : outcome === "rejected"
-      ? "rejected" as const
-      : outcome === "expired"
-        ? "expired" as const
-        : outcome === "policy_denied"
-          ? "blocked" as const
-          : "failed" as const;
 }
 
 async function enqueueComputeApprovalDeliveryInTransaction(

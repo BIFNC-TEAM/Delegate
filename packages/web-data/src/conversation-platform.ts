@@ -10,9 +10,6 @@ import {
   ConversationAssignmentStatus,
   ConversationEpisodeStatus,
   ConversationParticipantKind,
-  DelegationTaskNextActor,
-  DelegationTaskStatus,
-  DelegationTaskStepStatus,
   EventType,
   GenerationRunStatus,
   HandoffStatus,
@@ -54,6 +51,7 @@ import {
   type AgentUsageChargeSnapshot,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
+import { markPiApprovalContinuationPending } from "./pi-approval-continuation";
 import { prisma } from "./prisma";
 import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
@@ -142,6 +140,7 @@ export type GenerationModelRuntimeState =
 export type GenerationRuntimeOutcome =
   | {
       mode: "model";
+      verifiedToolEvidence?: boolean;
     }
   | {
       mode: "fallback";
@@ -153,8 +152,22 @@ export type GenerationRuntimeOutcome =
         | "policy_fallback";
     };
 
+export type GenerationAgentTrace = {
+  runtime: string;
+  traceId: string;
+  status: string;
+  firstModelEventMs?: number;
+  firstTextMs?: number;
+  totalDurationMs: number;
+  modelCalls: number;
+  toolCalls: number;
+  events: Array<Record<string, unknown>>;
+  spans: Array<Record<string, unknown>>;
+};
+
 export type PublicWebAnswerSourceDisclosure =
   | "general_model"
+  | "authorized_knowledge_or_memory"
   | "unverified_tool_fallback"
   | "same_conversation";
 
@@ -167,12 +180,17 @@ export type PublicWebAnswerSourceDisclosure =
 export function resolvePublicWebAnswerSourceDisclosure(input: {
   modelGenerated: boolean;
   hasAuthorizedCitation: boolean;
+  hasVerifiedToolEvidence?: boolean;
   sameConversationRecall?: boolean;
   unverifiedToolFallback?: boolean;
 }): PublicWebAnswerSourceDisclosure | null {
   if (input.sameConversationRecall) return "same_conversation";
   if (input.unverifiedToolFallback) return "unverified_tool_fallback";
-  if (!input.modelGenerated || input.hasAuthorizedCitation) {
+  if (input.hasAuthorizedCitation) return "authorized_knowledge_or_memory";
+  if (
+    !input.modelGenerated
+    || input.hasVerifiedToolEvidence
+  ) {
     return null;
   }
   return "general_model";
@@ -193,6 +211,9 @@ function mergeGenerationRuntimeOutcome(
       ? {
           version: 1,
           mode: "model",
+          ...(outcome.verifiedToolEvidence
+            ? { verifiedToolEvidence: true }
+            : {}),
         }
       : {
           version: 1,
@@ -207,10 +228,11 @@ function mergeGenerationRuntimeOutcome(
   };
 }
 
-function mergeGenerationCompletionContext(
+export function mergeGenerationCompletionContext(
   snapshot: Prisma.JsonValue | null,
   input: {
     runtimeOutcome?: GenerationRuntimeOutcome;
+    agentTrace?: GenerationAgentTrace;
     turnTrace?: ConversationTurnTrace;
     deliveryBillingPending?: boolean;
   },
@@ -222,6 +244,9 @@ function mergeGenerationCompletionContext(
       : {};
   return {
     ...withRuntime,
+    ...(input.agentTrace
+      ? { agentTrace: input.agentTrace as unknown as Prisma.InputJsonObject }
+      : {}),
     ...(input.turnTrace
       ? { turnTrace: input.turnTrace as unknown as Prisma.InputJsonObject }
       : {}),
@@ -235,6 +260,14 @@ function mergeGenerationCompletionContext(
       : {}),
   };
 }
+
+export type GenerationTurnExecutionStage =
+  | "planning"
+  | "authorizing"
+  | "generating"
+  | "validating"
+  | "saving"
+  | "delivering";
 
 function mergeGenerationTurnExecutionProgress(
   snapshot: Prisma.JsonValue | null,
@@ -319,14 +352,12 @@ async function releasePendingGenerationDeliveryBillingInTransaction(
     where: { id: input.generationRunId },
     select: {
       id: true,
-      delegationTaskId: true,
       contextSnapshot: true,
       runtimePolicySnapshot: true,
     },
   });
   if (
     !run
-    || run.delegationTaskId
     || !hasPendingGenerationDeliveryBilling(run.contextSnapshot)
   ) {
     return false;
@@ -386,7 +417,6 @@ async function settlePendingGenerationDeliveryBillingInTransaction(
     select: {
       id: true,
       conversationId: true,
-      delegationTaskId: true,
       contextSnapshot: true,
       runtimePolicySnapshot: true,
       provider: true,
@@ -395,7 +425,6 @@ async function settlePendingGenerationDeliveryBillingInTransaction(
   });
   if (
     !run
-    || run.delegationTaskId
     || !hasPendingGenerationDeliveryBilling(run.contextSnapshot)
   ) {
     return false;
@@ -535,7 +564,7 @@ export type ConversationInboxSnapshot = {
 export type ConversationPendingItem = {
   id: string;
   conversationId?: string;
-  kind?: "handoff" | "delegation_task";
+  kind?: "handoff";
   contactName: string;
   reason: string;
   summary: string;
@@ -560,51 +589,8 @@ export type ConversationLeadItem = {
 
 export type ConversationGenerationRuntimeOutcome = {
   mode: "model" | "fallback";
+  verifiedToolEvidence?: boolean;
   fallbackReason?: "model_unavailable" | "provider_failed" | "policy_fallback";
-};
-
-export type PublicConversationTaskProgress = {
-  id: string;
-  title: string;
-  status: string;
-  nextActionBy: string;
-  updatedAt: string;
-  steps: Array<{
-    id: string;
-    sequence: number;
-    title: string;
-    status: string;
-    startedAt?: string;
-    completedAt?: string;
-    failedAt?: string;
-    updatedAt: string;
-  }>;
-};
-
-export type GenerationTurnExecutionStage =
-  | "planning"
-  | "authorizing"
-  | "generating"
-  | "validating"
-  | "saving"
-  | "delivering";
-
-export type PublicTurnExecutionProgress = {
-  id: string;
-  objective: string;
-  status: "running" | "completed" | "failed";
-  stage: GenerationTurnExecutionStage | "completed" | "failed";
-  startedAt: string;
-  updatedAt: string;
-  goals: Array<{ id: string; description: string }>;
-  deliverables: Array<{ id: string; kind: string; format?: string }>;
-  steps: Array<{
-    id: string;
-    sequence: number;
-    stage: GenerationTurnExecutionStage;
-    status: "queued" | "running" | "completed" | "failed" | "skipped";
-    detail?: string;
-  }>;
 };
 
 export type ConversationDetailSnapshot = {
@@ -831,42 +817,6 @@ export class ServiceCreditRequiredError extends Error {
   }
 }
 
-export class ActiveDelegationTaskControlError extends Error {
-  readonly code = "ACTIVE_DELEGATION_TASK";
-  readonly statusCode = 409;
-
-  constructor() {
-    super(
-      "Wait for the active delegation task to finish, or cancel or reconcile it when those controls become available, before assigning a human operator.",
-    );
-    this.name = "ActiveDelegationTaskControlError";
-  }
-}
-
-export class DelegationMessageEditConflictError extends Error {
-  readonly code = "DELEGATION_MESSAGE_EDIT_CONFLICT";
-  readonly statusCode = 409;
-
-  constructor() {
-    super(
-      "Messages already used by a delegation task cannot be edited. Cancel the task and submit a new message instead.",
-    );
-    this.name = "DelegationMessageEditConflictError";
-  }
-}
-
-export class DelegationMessageRedactionConflictError extends Error {
-  readonly code = "DELEGATION_MESSAGE_REDACTION_CONFLICT";
-  readonly statusCode = 409;
-
-  constructor() {
-    super(
-      "Messages used by an active delegation task cannot be redacted. Cancel or reconcile the task first.",
-    );
-    this.name = "DelegationMessageRedactionConflictError";
-  }
-}
-
 export class ConversationAiDeliveryControlError extends Error {
   readonly code = "CONVERSATION_HUMAN_ACTIVE";
   readonly statusCode = 409;
@@ -1062,14 +1012,6 @@ function markGenerationWalletSettled(
   } as Prisma.InputJsonObject;
 }
 
-function delegationTaskOwnsGenerationBilling(input: {
-  delegationTaskId?: string | null;
-  delegationTaskStep?: { kind: string } | null;
-}): boolean {
-  if (!input.delegationTaskId) return false;
-  return input.delegationTaskStep?.kind !== "CLARIFICATION";
-}
-
 export async function listConversationInboxSnapshot(
   representativeSlug: string,
   operatorId = "local-owner",
@@ -1098,7 +1040,7 @@ export async function listConversationInboxSnapshot(
     });
     if (!representative) return null;
 
-    const [conversations, handoffs, delegationTasks, leads] = await Promise.all([
+    const [conversations, handoffs, leads] = await Promise.all([
       prisma.conversation.findMany({
       where: { representativeId: representative.id },
       include: {
@@ -1140,27 +1082,6 @@ export async function listConversationInboxSnapshot(
         },
         include: { contact: true },
         orderBy: [{ recommendedPriority: "desc" }, { createdAt: "asc" }],
-        take: 100,
-      }),
-      prisma.delegationTask.findMany({
-        where: {
-          representativeId: representative.id,
-          status: {
-            in: [
-              "DRAFT",
-              "CLARIFYING",
-              "READY",
-              "AWAITING_APPROVAL",
-              "QUEUED",
-              "RUNNING",
-              "WAITING_FOR_USER",
-              "WAITING_FOR_OWNER",
-              "FAILED",
-            ],
-          },
-        },
-        include: { contact: true },
-        orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
         take: 100,
       }),
       prisma.lead.findMany({
@@ -1209,21 +1130,6 @@ export async function listConversationInboxSnapshot(
       };
     });
     const pending: ConversationPendingItem[] = [
-      ...delegationTasks.map((task) => ({
-        id: task.id,
-        ...(task.originConversationId ? { conversationId: task.originConversationId } : {}),
-        kind: "delegation_task" as const,
-        contactName: task.contact?.displayName || task.contact?.username || `Task ${task.id.slice(-5)}`,
-        reason: task.nextActionBy === "OWNER"
-          ? "owner_action"
-          : task.nextActionBy === "AUDIENCE"
-            ? "user_input"
-            : "delegated_execution",
-        summary: task.title,
-        priority: task.priority,
-        status: task.status.toLowerCase(),
-        createdAt: task.createdAt.toISOString(),
-      })),
       ...handoffs.map((item) => ({
         id: item.id,
         ...(item.conversationId ? { conversationId: item.conversationId } : {}),
@@ -1339,14 +1245,6 @@ export async function getConversationDetailSnapshot(
           orderBy: { createdAt: "desc" },
           take: 20,
         },
-        delegationTasks: {
-          include: {
-            steps: { orderBy: { sequence: "asc" }, take: 1 },
-            _count: { select: { outputs: true, approvalRequests: true } },
-          },
-          orderBy: { updatedAt: "desc" },
-          take: 20,
-        },
         internalNotes: {
           orderBy: { createdAt: "desc" },
           take: 50,
@@ -1448,18 +1346,7 @@ export async function getConversationDetailSnapshot(
           createdAt: run.createdAt.toISOString(),
         };
       }),
-      tasks: conversation.delegationTasks.map((task) => ({
-        id: task.id,
-        title: task.title,
-        kind: task.kind.toLowerCase(),
-        status: task.status.toLowerCase(),
-        nextActionBy: task.nextActionBy.toLowerCase(),
-        ...(task.blockingReason ? { blockingReason: task.blockingReason } : {}),
-        ...(task.steps[0] ? { stepStatus: task.steps[0].status.toLowerCase() } : {}),
-        outputCount: task._count.outputs,
-        approvalCount: task._count.approvalRequests,
-        updatedAt: task.updatedAt.toISOString(),
-      })),
+      tasks: [],
       notes: conversation.internalNotes.map((note) => ({
         id: note.id,
         authorName: note.authorName,
@@ -1530,6 +1417,96 @@ export async function getOwnerConversationAttachmentDownload(input: {
       || stored.contentType
       || "application/octet-stream",
   };
+}
+
+export async function loadGenerationInputAttachments(input: {
+  generationRunId: string;
+  attachmentIds?: string[];
+}) {
+  const requested = new Set((input.attachmentIds ?? []).map((value) => value.trim()).filter(Boolean));
+  const run = await prisma.generationRun.findUnique({
+    where: { id: input.generationRunId },
+    select: {
+      inputMessage: {
+        select: {
+          attachments: {
+            orderBy: { createdAt: "asc" },
+            select: {
+              id: true,
+              fileName: true,
+              mimeType: true,
+              sizeBytes: true,
+              objectKey: true,
+              checksum: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!run) throw new Error("GenerationRun input attachments are unavailable.");
+  const selected = run.inputMessage.attachments.filter((attachment) =>
+    requested.size === 0
+    || requested.has(attachment.id)
+    || requested.has(attachment.fileName)
+    || requested.has(`/workspace/inputs/${sanitizeDownloadFileName(attachment.fileName)}`)
+    || requested.has(buildSandboxAttachmentPath(attachment.id, attachment.fileName)));
+  const loaded = await Promise.all(selected.map(async (attachment) => {
+    if (!attachment.objectKey) {
+      throw new Error(`Attachment ${attachment.id} has no trusted stored object.`);
+    }
+    const stored = await readArtifactObject(attachment.objectKey);
+    if (typeof attachment.sizeBytes === "number" && stored.buffer.byteLength !== attachment.sizeBytes) {
+      throw new Error(`Attachment ${attachment.id} size verification failed.`);
+    }
+    const checksum = createHash("sha256").update(stored.buffer).digest("hex");
+    if (attachment.checksum && checksum !== attachment.checksum) {
+      throw new Error(`Attachment ${attachment.id} checksum verification failed.`);
+    }
+    return {
+      id: attachment.id,
+      fileName: sanitizeDownloadFileName(attachment.fileName),
+      sandboxFileName: buildSandboxAttachmentFileName(
+        attachment.id,
+        attachment.fileName,
+      ),
+      sandboxPath: buildSandboxAttachmentPath(
+        attachment.id,
+        attachment.fileName,
+      ),
+      mimeType: attachment.mimeType || stored.contentType || "application/octet-stream",
+      sizeBytes: stored.buffer.byteLength,
+      checksum,
+      base64: stored.buffer.toString("base64"),
+    };
+  }));
+  if (loaded.reduce((sum, attachment) => sum + attachment.sizeBytes, 0) > 20 * 1024 * 1024) {
+    throw new Error("GenerationRun input attachments exceed the 20 MB sandbox transfer limit.");
+  }
+  return loaded;
+}
+
+export function buildSandboxAttachmentFileName(
+  attachmentId: string,
+  displayFileName: string,
+) {
+  const safeId = attachmentId
+    .normalize("NFKC")
+    .replace(/[^A-Za-z0-9_-]/gu, "-")
+    .replace(/-+/gu, "-")
+    .replace(/^-|-$/gu, "")
+    .slice(-64) || "file";
+  const displayBaseName = displayFileName.trim().split(/[\\/]/u).pop() || "attachment";
+  const extension = displayBaseName.match(/\.([A-Za-z0-9]{1,16})$/u)?.[1]
+    ?.toLocaleLowerCase();
+  return `attachment-${safeId}${extension ? `.${extension}` : ".bin"}`;
+}
+
+export function buildSandboxAttachmentPath(
+  attachmentId: string,
+  displayFileName: string,
+) {
+  return `/workspace/inputs/${buildSandboxAttachmentFileName(attachmentId, displayFileName)}`;
 }
 
 function sanitizeDownloadFileName(value: string) {
@@ -2582,6 +2559,8 @@ export async function completeInlineGenerationRun(input: {
   outputTokens?: number;
   costCents?: number;
   runtimeOutcome?: GenerationRuntimeOutcome;
+  /** Operational Pi lifecycle/timing evidence. It contains no hidden reasoning or raw tool payloads. */
+  agentTrace?: GenerationAgentTrace;
   turnTrace?: ConversationTurnTrace;
   completeOutbox?: boolean;
   countUsage: boolean;
@@ -2694,7 +2673,6 @@ export async function completeInlineGenerationRun(input: {
             representativeId: true,
           },
         },
-        delegationTaskStep: { select: { kind: true } },
       },
     });
     if (!run) throw new Error("Generation run not found.");
@@ -2707,12 +2685,9 @@ export async function completeInlineGenerationRun(input: {
     if (run.status === GenerationRunStatus.CANCELED) {
       throw new Error("Generation run was canceled.");
     }
-    const delegationTaskOwnsBilling =
-      delegationTaskOwnsGenerationBilling(run);
     const deferUsageFinalization =
       input.completeOutbox === false
-      && input.countUsage
-      && !delegationTaskOwnsBilling;
+      && input.countUsage;
     if (
       run.conversation.state === "HUMAN_ACTIVE"
       || run.conversation.state === "NEEDS_HUMAN"
@@ -2729,7 +2704,7 @@ export async function completeInlineGenerationRun(input: {
         run.runtimePolicySnapshot,
       );
       let releasedSnapshot: Prisma.InputJsonObject | null = null;
-      if (walletReservation && !delegationTaskOwnsBilling) {
+      if (walletReservation) {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -2855,7 +2830,7 @@ export async function completeInlineGenerationRun(input: {
       const walletReservation = readGenerationWalletReservation(
         run.runtimePolicySnapshot,
       );
-      if (walletReservation && !delegationTaskOwnsBilling) {
+      if (walletReservation) {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -2940,7 +2915,6 @@ export async function completeInlineGenerationRun(input: {
     }
     if (
       !deferUsageFinalization
-      && !delegationTaskOwnsBilling
       && input.entitlementReservation
     ) {
       const reservation = input.entitlementReservation;
@@ -2969,7 +2943,7 @@ export async function completeInlineGenerationRun(input: {
           "Conversation entitlement reservation belongs to a different audience identity.",
         );
       }
-    } else if (!delegationTaskOwnsBilling && !input.countUsage) {
+    } else if (!input.countUsage) {
       await releaseConversationEntitlementByGenerationRunId(
         {
           generationRunId: run.id,
@@ -3028,7 +3002,6 @@ export async function completeInlineGenerationRun(input: {
         senderDisplayName: input.evidenceIndependentSystemFailure
           ? "Delegate"
           : input.senderDisplayName,
-        delegationTaskId: run.delegationTaskId,
         contentType: input.evidenceIndependentSystemFailure
           ? MessageContentType.SYSTEM
           : MessageContentType.TEXT,
@@ -3104,12 +3077,13 @@ export async function completeInlineGenerationRun(input: {
         ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
         ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
         ...(input.costCents !== undefined ? { costCents: input.costCents } : {}),
-        ...(input.runtimeOutcome || resolvedTurnTrace || deferUsageFinalization
+        ...(input.runtimeOutcome || input.agentTrace || resolvedTurnTrace || deferUsageFinalization
           ? {
               contextSnapshot: mergeGenerationCompletionContext(
                 run.contextSnapshot,
                 {
                   ...(input.runtimeOutcome ? { runtimeOutcome: input.runtimeOutcome } : {}),
+                  ...(input.agentTrace ? { agentTrace: input.agentTrace } : {}),
                   ...(resolvedTurnTrace ? { turnTrace: resolvedTurnTrace } : {}),
                   ...(deferUsageFinalization
                     ? { deliveryBillingPending: true }
@@ -3188,7 +3162,6 @@ export async function completeInlineGenerationRun(input: {
         ...(handoffRequested ? { collectorState: Prisma.JsonNull } : {}),
         ...(!input.countUsage
           || walletReservation
-          || delegationTaskOwnsBilling
           || deferUsageFinalization
           ? {}
           : { freeRepliesUsed: { increment: 1 } }),
@@ -3236,7 +3209,6 @@ export async function completeInlineGenerationRun(input: {
     }
     if (
       walletReservation
-      && !delegationTaskOwnsBilling
       && !deferUsageFinalization
     ) {
       if (!input.countUsage) {
@@ -3437,7 +3409,6 @@ export async function waitGenerationRunForComputeApproval(input: {
         episodeId: run.episodeId,
         senderType: MessageSenderType.REPRESENTATIVE,
         senderDisplayName: input.senderDisplayName,
-        delegationTaskId: run.delegationTaskId,
         contentType: MessageContentType.TEXT,
         text: replyText,
         content: { kind: "compute_approval_pending", approvalId: input.approvalId },
@@ -3456,22 +3427,21 @@ export async function waitGenerationRunForComputeApproval(input: {
         completedAt: null,
         errorCode: null,
         errorMessage: null,
-        ...(input.turnTrace
-          ? {
-              contextSnapshot: mergeGenerationCompletionContext(
+        contextSnapshot: markPiApprovalContinuationPending(
+          input.turnTrace
+            ? mergeGenerationCompletionContext(
                 run.contextSnapshot,
                 { turnTrace: input.turnTrace },
-              ),
-            }
-          : {}),
+              )
+            : run.contextSnapshot,
+          input.approvalId,
+        ),
       },
     });
     await tx.approvalRequest.update({
       where: { id: input.approvalId },
       data: {
         generationRunId: run.id,
-        delegationTaskId: run.delegationTaskId,
-        delegationTaskStepId: run.delegationTaskStepId,
       },
     });
     await tx.message.update({
@@ -3502,8 +3472,6 @@ export type ClaimedGenerationWorkItem = {
    */
   leaseAttempt: number;
   runId: string;
-  delegationTaskId?: string;
-  delegationTaskStepId?: string;
   contextSnapshot?: unknown;
   representativeVersionId: string | null;
   representativeSlug: string;
@@ -3532,18 +3500,6 @@ export type ClaimedGenerationWorkItem = {
   deliveryOnly?: boolean;
   outputMessageId?: string;
   outputText?: string;
-  deliveryPlanActionId?: string;
-  delegationTerminalRecovery?: {
-    taskStatus: string;
-    stepStatus: string;
-    attachments: Array<{
-      fileName: string;
-      mimeType?: string;
-      sizeBytes?: number;
-      artifactId: string;
-      url: string;
-    }>;
-  };
   /** Billing policy pinned when the inbound generation run was accepted. */
   accessMode?: RepresentativeAccessMode;
   /** `null` means the pinned FREE policy has no reply ceiling. */
@@ -3566,8 +3522,6 @@ const GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR =
   "generation_memory_delivery_source_revoked";
 const GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR =
   "turn_plan_superseded_before_delivery";
-const DELEGATION_EXTERNAL_EFFECT_LEASE_LOST_ERROR =
-  "delegation_external_effect_lease_lost";
 
 export type GenerationWorkLease = {
   outboxId: string;
@@ -3577,10 +3531,6 @@ export type GenerationWorkLease = {
 export type GenerationMessageDeliveryAdmission = {
   attemptNumber: number;
   leaseToken: string;
-  planId?: string;
-  planRevision?: number;
-  executionEpoch?: number;
-  planActionId?: string;
 };
 
 export class GenerationWorkLeaseLostError extends Error {
@@ -3721,6 +3671,56 @@ export async function updateGenerationTurnExecutionProgress(input: {
               : {}),
           },
         ),
+      },
+      select: { id: true, contextSnapshot: true },
+    });
+  });
+}
+
+export async function updateGenerationPiStream(input: {
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+  sequence: number;
+  text: string;
+}) {
+  if (!Number.isSafeInteger(input.sequence) || input.sequence < 1) {
+    throw new Error("Pi stream sequence must be a positive integer.");
+  }
+  const text = input.text.slice(-32_000);
+  return runConversationWriteTransaction(async (tx) => {
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: { contextSnapshot: true },
+    });
+    if (!run) {
+      throw new GenerationWorkLeaseLostError(input.outboxId, input.leaseAttempt);
+    }
+    const snapshot = isJsonRecord(run.contextSnapshot)
+      ? run.contextSnapshot
+      : {};
+    const previous = isJsonRecord(snapshot.piStream)
+      ? snapshot.piStream
+      : null;
+    const previousSequence = typeof previous?.sequence === "number"
+      ? previous.sequence
+      : 0;
+    if (previousSequence >= input.sequence) {
+      return { id: input.runId, contextSnapshot: snapshot };
+    }
+    return tx.generationRun.update({
+      where: { id: input.runId },
+      data: {
+        contextSnapshot: {
+          ...snapshot,
+          piStream: {
+            version: 1,
+            sequence: input.sequence,
+            text,
+            updatedAt: new Date().toISOString(),
+          },
+        },
       },
       select: { id: true, contextSnapshot: true },
     });
@@ -3924,7 +3924,6 @@ export async function claimNextGenerationWorkItem(
       id: string;
       aggregateId: string;
       conversationId: string | null;
-      delegationTaskId: string | null;
       status: string;
       attemptCount: number;
     }>>`
@@ -3933,8 +3932,7 @@ export async function claimNextGenerationWorkItem(
         outbox."aggregateId",
         run."conversationId" AS "conversationId",
         outbox."status",
-        outbox."attemptCount",
-        run."delegationTaskId" AS "delegationTaskId"
+        outbox."attemptCount"
       FROM "OutboxEvent" AS outbox
       LEFT JOIN "GenerationRun" AS run
         ON run."id" = outbox."aggregateId"
@@ -3970,14 +3968,6 @@ export async function claimNextGenerationWorkItem(
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtext(${selectedCandidate.aggregateId}))
     `;
-    if (selectedCandidate.delegationTaskId) {
-      await tx.$executeRaw`
-        SELECT pg_advisory_xact_lock(
-          hashtext(${selectedCandidate.delegationTaskId})
-        )
-      `;
-    }
-
     const lockedCandidates = await tx.$queryRaw<Array<{
       id: string;
       aggregateId: string;
@@ -4003,8 +3993,6 @@ export async function claimNextGenerationWorkItem(
         AND outbox."availableAt" <= NOW()
         AND run."conversationId"
           IS NOT DISTINCT FROM ${selectedCandidate.conversationId}
-        AND run."delegationTaskId"
-          IS NOT DISTINCT FROM ${selectedCandidate.delegationTaskId}
         AND (
           (
             outbox."status" IN ('PENDING', 'FAILED')
@@ -4108,7 +4096,7 @@ export async function claimNextGenerationWorkItem(
         tx,
         candidate.aggregateId,
         candidate.id,
-        { recoverLatestTerminalDelegationResult: true },
+        {},
       );
       return null;
     }
@@ -4167,34 +4155,6 @@ export async function claimNextGenerationWorkItem(
           },
         },
         outputMessage: true,
-        delegationTask: {
-          select: { status: true },
-        },
-        delegationTaskStep: {
-          select: {
-            kind: true,
-            status: true,
-            externalEffects: {
-              where: { status: "EXECUTING" },
-              select: { id: true },
-              take: 1,
-            },
-            outputs: {
-              where: { artifactId: { not: null } },
-              select: {
-                artifact: {
-                  select: {
-                    id: true,
-                    kind: true,
-                    mimeType: true,
-                    sizeBytes: true,
-                  },
-                },
-              },
-              take: 20,
-            },
-          },
-        },
         episode: {
           select: {
             representativeVersionId: true,
@@ -4268,7 +4228,6 @@ export async function claimNextGenerationWorkItem(
       );
       if (
         walletReservation
-        && !delegationTaskOwnsGenerationBilling(run)
       ) {
         await releaseConversationWalletUsage(
           {
@@ -4287,119 +4246,6 @@ export async function claimNextGenerationWorkItem(
       });
       return null;
     }
-    let delegationTerminalRecovery:
-      | ClaimedGenerationWorkItem["delegationTerminalRecovery"]
-      | undefined;
-    if (
-      candidate.status === "PROCESSING"
-      && run.status !== GenerationRunStatus.COMPLETED
-      && run.delegationTaskStep?.externalEffects.length
-    ) {
-      await terminalizeExpiredGenerationLease(
-        tx,
-        run.id,
-        outbox.id,
-        {
-          errorCode: DELEGATION_EXTERNAL_EFFECT_LEASE_LOST_ERROR,
-          errorMessage:
-            "The worker lease expired while an external effect may have reached the remote system.",
-        },
-      );
-      return null;
-    }
-    const previousDelegationRunId =
-      isJsonRecord(run.contextSnapshot)
-      && run.contextSnapshot["source"] === "delegation_plan_step"
-      && typeof run.contextSnapshot["previousGenerationRunId"] === "string"
-        ? run.contextSnapshot["previousGenerationRunId"]
-        : null;
-    if (previousDelegationRunId) {
-      const previousRun = await tx.generationRun.findUnique({
-        where: { id: previousDelegationRunId },
-        select: {
-          status: true,
-          outputMessage: {
-            select: { deliveryStatus: true },
-          },
-        },
-      });
-      if (
-        previousRun?.status !== GenerationRunStatus.COMPLETED
-        || previousRun.outputMessage?.deliveryStatus
-          !== MessageDeliveryStatus.SENT
-      ) {
-        await tx.outboxEvent.update({
-          where: { id: outbox.id },
-          data: {
-            status: "PENDING",
-            attemptCount: { decrement: 1 },
-            availableAt: new Date(Date.now() + telegramWorkerOwnershipRetryMs),
-            lastError: "delegation_previous_generation_not_completed",
-          },
-        });
-        return null;
-      }
-    }
-    if (
-      run.status !== GenerationRunStatus.COMPLETED
-      &&
-      run.delegationTaskId
-      && run.delegationTaskStep
-      && isTerminalDelegationTaskStepStatus(
-        run.delegationTaskStep.status,
-      )
-    ) {
-      const latestStepRun = await tx.generationRun.findFirst({
-        where: {
-          delegationTaskId: run.delegationTaskId,
-          delegationTaskStepId: run.delegationTaskStepId,
-        },
-        orderBy: { createdAt: "desc" },
-        select: { id: true },
-      });
-      if (latestStepRun?.id === run.id) {
-        delegationTerminalRecovery = {
-          taskStatus: run.delegationTask?.status ?? "FAILED",
-          stepStatus: run.delegationTaskStep.status,
-          attachments: run.delegationTaskStep.outputs.flatMap((output) => {
-            const artifact = output.artifact;
-            if (!artifact) return [];
-            return [{
-              fileName: buildDelegationRecoveryArtifactFileName({
-                artifactId: artifact.id,
-                kind: artifact.kind,
-                mimeType: artifact.mimeType,
-              }),
-              mimeType: artifact.mimeType,
-              sizeBytes: artifact.sizeBytes,
-              artifactId: artifact.id,
-              url: `/reps/${encodeURIComponent(run.conversation.representative.slug)}/chat/artifacts/${encodeURIComponent(artifact.id)}/download`,
-            }];
-          }),
-        };
-      } else {
-        const supersededAt = new Date();
-        await tx.generationRun.update({
-          where: { id: run.id },
-          data: {
-            status: GenerationRunStatus.CANCELED,
-            errorCode: "delegation_step_already_finalized",
-            errorMessage:
-              "Generation was superseded after its delegation step advanced.",
-            canceledAt: supersededAt,
-          },
-        });
-        await tx.outboxEvent.update({
-          where: { id: outbox.id },
-          data: {
-            status: "PROCESSED",
-            processedAt: supersededAt,
-            lastError: null,
-          },
-        });
-        return null;
-      }
-    }
     if (
       run.status !== GenerationRunStatus.COMPLETED
       && (
@@ -4416,7 +4262,6 @@ export async function claimNextGenerationWorkItem(
       const failedAt = new Date();
       const failureReason =
         "The generation run has no valid representative version pin or differs from its conversation episode.";
-      await abortDelegatedTaskForGenerationClaimFailure(tx, run, failureReason);
       await releaseConversationEntitlementByGenerationRunId(
         {
           generationRunId: run.id,
@@ -4454,7 +4299,6 @@ export async function claimNextGenerationWorkItem(
       );
       if (
         walletReservation
-        && !delegationTaskOwnsGenerationBilling(run)
       ) {
         await releaseConversationWalletUsage(
           {
@@ -4560,11 +4404,6 @@ export async function claimNextGenerationWorkItem(
             : !matrixBindingSafe
             ? "Generation canceled because the Matrix room is no longer a verified private conversation."
             : "Generation canceled because it belongs to an earlier Matrix channel activation.";
-        await abortDelegatedTaskForGenerationClaimFailure(
-          tx,
-          run,
-          failureReason,
-        );
         if (run.status !== GenerationRunStatus.COMPLETED) {
           await releaseConversationEntitlementByGenerationRunId(
             {
@@ -4616,7 +4455,6 @@ export async function claimNextGenerationWorkItem(
           );
           if (
             walletReservation
-            && !delegationTaskOwnsGenerationBilling(run)
           ) {
             await releaseConversationWalletUsage(
               {
@@ -4889,11 +4727,6 @@ export async function claimNextGenerationWorkItem(
           : availability.code === "matrix_identity_reassigned"
             ? "Generation canceled because this Matrix room belongs to a previously assigned representative identity."
           : `Generation canceled because ${availability.code}.`;
-      await abortDelegatedTaskForGenerationClaimFailure(
-        tx,
-        run,
-        failureReason,
-      );
       await releaseConversationEntitlementByGenerationRunId(
         {
           generationRunId: run.id,
@@ -4906,7 +4739,6 @@ export async function claimNextGenerationWorkItem(
       );
       if (
         walletReservation
-        && !delegationTaskOwnsGenerationBilling(run)
       ) {
         await releaseConversationWalletUsage(
           {
@@ -4972,28 +4804,6 @@ export async function claimNextGenerationWorkItem(
       channel === "telegram"
         ? activeBinding?.representativeBinding?.connectionId || null
         : null;
-    const completedDeliveryPlan =
-      run.status === GenerationRunStatus.COMPLETED && run.completedAt
-        ? await tx.conversationTurnPlan.findFirst({
-            where: {
-              generationRunId: run.id,
-              protocolVersion: 3,
-              shadowMode: false,
-              status: "COMPLETED",
-              completedAt: { lte: run.completedAt },
-            },
-            orderBy: [{ completedAt: "desc" }, { revision: "desc" }],
-            select: {
-              actions: {
-                where: { capabilityKey: "response.compose" },
-                orderBy: { sequence: "desc" },
-                take: 1,
-                select: { id: true },
-              },
-            },
-          })
-        : null;
-
     if (run.status !== GenerationRunStatus.COMPLETED) {
       await tx.generationRun.update({
         where: { id: run.id },
@@ -5013,8 +4823,6 @@ export async function claimNextGenerationWorkItem(
       outboxId: outbox.id,
       leaseAttempt: outbox.attemptCount,
       runId: run.id,
-      ...(run.delegationTaskId ? { delegationTaskId: run.delegationTaskId } : {}),
-      ...(run.delegationTaskStepId ? { delegationTaskStepId: run.delegationTaskStepId } : {}),
       ...(run.contextSnapshot !== null ? { contextSnapshot: run.contextSnapshot } : {}),
       representativeVersionId: run.representativeVersionId,
       representativeSlug: run.conversation.representative.slug,
@@ -5066,16 +4874,7 @@ export async function claimNextGenerationWorkItem(
             deliveryOnly: true,
             outputMessageId: run.outputMessage.id,
             outputText: run.outputMessage.text!,
-            ...(completedDeliveryPlan?.actions[0]?.id
-              ? {
-                  deliveryPlanActionId:
-                    completedDeliveryPlan.actions[0].id,
-                }
-              : {}),
           }
-        : {}),
-      ...(delegationTerminalRecovery
-        ? { delegationTerminalRecovery }
         : {}),
       ...(accessPolicy
         ? {
@@ -5093,48 +4892,6 @@ export async function claimNextGenerationWorkItem(
         deepHelpUnlocked: Boolean(run.conversation.deepHelpUnlockedAt),
       },
     };
-  });
-}
-
-function buildDelegationRecoveryArtifactFileName(input: {
-  artifactId: string;
-  kind: string;
-  mimeType: string;
-}) {
-  const extension = input.mimeType.includes("json")
-    ? "json"
-    : input.mimeType.includes("csv")
-      ? "csv"
-      : input.mimeType.includes("png")
-        ? "png"
-        : input.mimeType.includes("jpeg")
-          ? "jpg"
-          : input.mimeType.includes("pdf")
-            ? "pdf"
-            : "txt";
-  return `${input.kind.toLowerCase()}-${input.artifactId}.${extension}`;
-}
-
-async function abortDelegatedTaskForGenerationClaimFailure(
-  tx: Prisma.TransactionClient,
-  run: {
-    id: string;
-    delegationTaskId?: string | null;
-    delegationTaskStepId?: string | null;
-  },
-  failureReason: string,
-) {
-  if (!run.delegationTaskId) return null;
-  const {
-    abortDelegationTaskForGenerationFailureInTransaction,
-  } = await import("./delegation-tasks");
-  return abortDelegationTaskForGenerationFailureInTransaction(tx, {
-    taskId: run.delegationTaskId,
-    generationRunId: run.id,
-    ...(run.delegationTaskStepId
-      ? { stepId: run.delegationTaskStepId }
-      : {}),
-    failureReason,
   });
 }
 
@@ -5169,7 +4926,6 @@ async function terminalizeExpiredGenerationLease(
   options: {
     errorCode?: string;
     errorMessage?: string;
-    recoverLatestTerminalDelegationResult?: boolean;
   } = {},
 ) {
   const now = new Date();
@@ -5187,8 +4943,6 @@ async function terminalizeExpiredGenerationLease(
       outputMessageId: true,
       conversationId: true,
       episodeId: true,
-      delegationTaskId: true,
-      delegationTaskStepId: true,
       runtimePolicySnapshot: true,
       contextSnapshot: true,
     },
@@ -5284,83 +5038,10 @@ async function terminalizeExpiredGenerationLease(
     });
     return;
   }
-  if (run.delegationTaskId && run.delegationTaskStepId) {
-    const step = await tx.delegationTaskStep.findUnique({
-      where: { id: run.delegationTaskStepId },
-      select: { status: true },
-    });
-    if (
-      step
-      && isTerminalDelegationTaskStepStatus(step.status)
-    ) {
-      if (options.recoverLatestTerminalDelegationResult) {
-        const latestStepRun = await tx.generationRun.findFirst({
-          where: {
-            delegationTaskId: run.delegationTaskId,
-            delegationTaskStepId: run.delegationTaskStepId,
-          },
-          orderBy: { createdAt: "desc" },
-          select: { id: true },
-        });
-        if (latestStepRun?.id === run.id) {
-          await tx.outboxEvent.update({
-            where: { id: outboxId },
-            data: {
-              status: "PROCESSED",
-              processedAt: now,
-              lastError: null,
-            },
-          });
-          await tx.outboxEvent.create({
-            data: {
-              conversationId: run.conversationId,
-              aggregateType: "generation_run",
-              aggregateId: run.id,
-              eventType: "generation.requested",
-              payload: {
-                runId: run.id,
-                conversationId: run.conversationId,
-                messageId: run.inputMessageId,
-                recoveryOfOutboxId: outboxId,
-              },
-              status: "PENDING",
-              attemptCount: 0,
-              idempotencyKey:
-                `generation.requested:${run.id}:recovery:${outboxId}`,
-            },
-          });
-          return;
-        }
-      }
-      await tx.generationRun.update({
-        where: { id: run.id },
-        data: {
-          status: GenerationRunStatus.CANCELED,
-          errorCode: "delegation_step_already_finalized",
-          errorMessage:
-            "Generation was superseded after its delegation step advanced.",
-          canceledAt: now,
-        },
-      });
-      await tx.outboxEvent.update({
-        where: { id: outboxId },
-        data: {
-          status: "PROCESSED",
-          processedAt: now,
-          lastError: null,
-        },
-      });
-      return;
-    }
-  }
-
-  const executionReference =
-    run.delegationTaskId
-      ? await tx.toolExecution.findUnique({
-          where: { generationOutboxId: outboxId },
-          select: { id: true },
-        })
-      : null;
+  const executionReference = await tx.toolExecution.findUnique({
+    where: { generationOutboxId: outboxId },
+    select: { id: true },
+  });
   if (executionReference) {
     await tx.$executeRaw`
       SELECT "id"
@@ -5377,8 +5058,6 @@ async function terminalizeExpiredGenerationLease(
             id: true,
             sessionId: true,
             status: true,
-            delegationTaskId: true,
-            delegationTaskStepId: true,
             session: {
               select: {
                 generationRunId: true,
@@ -5389,9 +5068,6 @@ async function terminalizeExpiredGenerationLease(
       : null;
   const executionMatchesGeneration = Boolean(
     inFlightExecution
-    && inFlightExecution.delegationTaskId === run.delegationTaskId
-    && inFlightExecution.delegationTaskStepId
-      === run.delegationTaskStepId
     && inFlightExecution.session?.generationRunId === run.id,
   );
   if (
@@ -5485,93 +5161,9 @@ async function terminalizeExpiredGenerationLease(
     },
   });
 
-  let delegatedExecutionRequiresReconciliation =
+  const executionRequiresReconciliation =
     fencedInFlightExecution.count === 1;
-  if (run.delegationTaskId) {
-    const uncertainEffects =
-      await tx.delegationTaskExternalEffect.updateMany({
-        where: {
-          delegationTaskId: run.delegationTaskId,
-          ...(run.delegationTaskStepId
-            ? { delegationTaskStepId: run.delegationTaskStepId }
-            : {}),
-          status: "EXECUTING",
-        },
-        data: {
-          status: "RECONCILIATION_REQUIRED",
-          failureReason: errorCode,
-        },
-      });
-    if (
-      uncertainEffects.count > 0
-      || delegatedExecutionRequiresReconciliation
-    ) {
-      delegatedExecutionRequiresReconciliation = true;
-      await tx.delegationTask.updateMany({
-        where: {
-          id: run.delegationTaskId,
-          status: {
-            notIn: [
-              DelegationTaskStatus.COMPLETED,
-              DelegationTaskStatus.FAILED,
-              DelegationTaskStatus.CANCELED,
-              DelegationTaskStatus.EXPIRED,
-            ],
-          },
-        },
-        data: {
-          status: DelegationTaskStatus.WAITING_FOR_OWNER,
-          nextActionBy: DelegationTaskNextActor.OWNER,
-          blockingReason:
-            uncertainEffects.count > 0
-              ? "Worker lease expired during an external effect. Reconcile the remote outcome before continuing."
-              : "Worker lease expired while compute execution was still in flight. Review the unknown result before continuing.",
-        },
-      });
-    } else {
-      await tx.delegationTask.updateMany({
-        where: {
-          id: run.delegationTaskId,
-          status: {
-            notIn: [
-              DelegationTaskStatus.COMPLETED,
-              DelegationTaskStatus.FAILED,
-              DelegationTaskStatus.CANCELED,
-              DelegationTaskStatus.EXPIRED,
-            ],
-          },
-        },
-        data: {
-          status: DelegationTaskStatus.FAILED,
-          nextActionBy: DelegationTaskNextActor.OWNER,
-          blockingReason:
-            "The worker lease expired before the delegated task could finish.",
-          failedAt: now,
-        },
-      });
-      if (run.delegationTaskStepId) {
-        await tx.delegationTaskStep.updateMany({
-          where: {
-            id: run.delegationTaskStepId,
-            status: {
-              notIn: [
-                DelegationTaskStepStatus.COMPLETED,
-                DelegationTaskStepStatus.FAILED,
-                DelegationTaskStepStatus.CANCELED,
-                DelegationTaskStepStatus.SKIPPED,
-              ],
-            },
-          },
-          data: {
-            status: DelegationTaskStepStatus.FAILED,
-            failedAt: now,
-          },
-        });
-      }
-    }
-  }
-
-  if (!delegatedExecutionRequiresReconciliation) {
+  if (!executionRequiresReconciliation) {
     await releaseConversationEntitlementByGenerationRunId(
       {
         generationRunId: run.id,
@@ -5583,7 +5175,7 @@ async function terminalizeExpiredGenerationLease(
   const walletReservation = readGenerationWalletReservation(
     run.runtimePolicySnapshot,
   );
-  if (walletReservation && !delegatedExecutionRequiresReconciliation) {
+  if (walletReservation && !executionRequiresReconciliation) {
     await releaseConversationWalletUsage(
       {
         usageChargeId: walletReservation.usageChargeId,
@@ -5659,7 +5251,7 @@ export async function loadConversationOperationalContext(input: {
   audienceIdentityId?: string;
 }) {
   const now = new Date();
-  const [conversation, latestTask, pendingApproval, activeHandoff, entitlementAccounts] =
+  const [conversation, pendingApproval, activeHandoff, entitlementAccounts] =
     await Promise.all([
       prisma.conversation.findFirst({
         where: {
@@ -5667,18 +5259,6 @@ export async function loadConversationOperationalContext(input: {
           representativeId: input.representativeId,
         },
         select: { state: true, collectorState: true },
-      }),
-      prisma.delegationTask.findFirst({
-        where: {
-          originConversationId: input.conversationId,
-          representativeId: input.representativeId,
-        },
-        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-        select: {
-          kind: true,
-          status: true,
-          nextActionBy: true,
-        },
       }),
       prisma.approvalRequest.findFirst({
         where: {
@@ -5742,15 +5322,6 @@ export async function loadConversationOperationalContext(input: {
           },
         }
       : {}),
-    ...(latestTask
-      ? {
-          latestTask: {
-            kind: latestTask.kind,
-            status: latestTask.status,
-            nextActionBy: latestTask.nextActionBy,
-          },
-        }
-      : {}),
     ...(pendingApproval
       ? {
           pendingApproval: {
@@ -5785,11 +5356,6 @@ export async function deferGenerationRunForHuman(input: {
     await fenceGenerationWorkLease(tx, input);
     const current = await tx.generationRun.findUnique({
       where: { id: input.runId },
-      include: {
-        delegationTaskStep: {
-          select: { kind: true },
-        },
-      },
     });
     if (!current) throw new Error("Generation run not found.");
     if (
@@ -5812,7 +5378,6 @@ export async function deferGenerationRunForHuman(input: {
     let releasedSnapshot: Prisma.InputJsonObject | null = null;
     if (
       walletReservation
-      && !delegationTaskOwnsGenerationBilling(current)
     ) {
       await releaseConversationWalletUsage(
         {
@@ -5887,8 +5452,6 @@ export async function markGenerationDeliveryComplete(input: {
         runtimePolicySnapshot: true,
         provider: true,
         costCents: true,
-        delegationTaskId: true,
-        delegationTaskStep: { select: { kind: true } },
         conversation: {
           select: { representativeId: true, contactId: true },
         },
@@ -6022,164 +5585,6 @@ export type GenerationMessageDeliveryFenceInput =
     deliveryAdmission: GenerationMessageDeliveryAdmission;
   };
 
-type FrozenGenerationDeliveryPlan = {
-  planId: string;
-  planRevision: number;
-  executionEpoch: number;
-  planActionId: string;
-  scopeKey: string;
-};
-
-async function resolveFrozenGenerationDeliveryPlanInTransaction(
-  tx: Prisma.TransactionClient,
-  input: {
-    runId: string;
-    planActionId?: string;
-  },
-): Promise<FrozenGenerationDeliveryPlan | null> {
-  if (!input.planActionId) return null;
-  const action = await tx.conversationPlanAction.findUnique({
-    where: { id: input.planActionId },
-    select: {
-      id: true,
-      turnPlan: {
-        select: {
-          id: true,
-          generationRunId: true,
-          protocolVersion: true,
-          revision: true,
-          executionEpoch: true,
-          scopeKey: true,
-          shadowMode: true,
-          status: true,
-        },
-      },
-    },
-  });
-  const plan = action?.turnPlan;
-  if (
-    !action
-    || !plan
-    || plan.protocolVersion !== 3
-    || plan.shadowMode
-    || plan.generationRunId !== input.runId
-    || !plan.scopeKey
-    || plan.executionEpoch < 1
-    || !["EXECUTING", "COMPLETED"].includes(plan.status)
-  ) {
-    throw new Error(
-      "Generation delivery action is not owned by a current executable TurnPlan V3 revision.",
-    );
-  }
-  await tx.$executeRaw`
-    SELECT pg_advisory_xact_lock(hashtext(${plan.scopeKey}))
-  `;
-  const fence = await tx.planExecutionFence.findUnique({
-    where: { scopeKey: plan.scopeKey },
-    select: {
-      activePlanId: true,
-      activeRevision: true,
-      executionEpoch: true,
-    },
-  });
-  if (
-    !fence
-    || fence.activePlanId !== plan.id
-    || fence.activeRevision !== plan.revision
-    || fence.executionEpoch !== plan.executionEpoch
-  ) {
-    throw new GenerationPlanDeliverySupersededError();
-  }
-  return {
-    planId: plan.id,
-    planRevision: plan.revision,
-    executionEpoch: plan.executionEpoch,
-    planActionId: action.id,
-    scopeKey: plan.scopeKey,
-  };
-}
-
-async function closeSupersededGenerationDeliveryBeforeCallInTransaction(
-  tx: Prisma.TransactionClient,
-  input: GenerationMessageDeliveryFenceInput,
-) {
-  const canceledAt = new Date();
-  const canceledAttempt = await tx.messageDeliveryAttempt.updateMany({
-    where: {
-      messageId: input.outputMessageId,
-      attemptNumber: input.deliveryAdmission.attemptNumber,
-      leaseToken: input.deliveryAdmission.leaseToken,
-      status: MessageDeliveryAttemptStatus.PROCESSING,
-      attemptPhase: {
-        in: [
-          MessageDeliveryAttemptPhase.CREATED,
-          MessageDeliveryAttemptPhase.CLAIMED,
-          MessageDeliveryAttemptPhase.CALL_PREPARED,
-        ],
-      },
-    },
-    data: {
-      status: MessageDeliveryAttemptStatus.CANCELED,
-      attemptPhase: MessageDeliveryAttemptPhase.CANCELED_BEFORE_START,
-      leaseToken: null,
-      leaseExpiresAt: null,
-      failureCode: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
-      failureReason:
-        "Delivery was canceled before provider execution because its TurnPlan revision was superseded.",
-      completedAt: canceledAt,
-    },
-  });
-  if (canceledAttempt.count === 0) return false;
-  const [canceledMessage, canceledOutbox] = await Promise.all([
-    tx.message.updateMany({
-      where: {
-        id: input.outputMessageId,
-        conversationId: input.conversationId,
-        deliveryStatus: {
-          in: [
-            MessageDeliveryStatus.QUEUED,
-            MessageDeliveryStatus.PROCESSING,
-            MessageDeliveryStatus.FAILED,
-          ],
-        },
-      },
-      data: {
-        deliveryStatus: MessageDeliveryStatus.CANCELED,
-        failureCode: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
-        failureReason:
-          "Delivery was canceled because its TurnPlan revision was superseded.",
-      },
-    }),
-    tx.outboxEvent.updateMany({
-      where: {
-        id: input.outboxId,
-        aggregateType: "generation_run",
-        aggregateId: input.runId,
-        eventType: "generation.requested",
-        status: "PROCESSING",
-        attemptCount: input.leaseAttempt,
-      },
-      data: {
-        status: "DEAD_LETTER",
-        processedAt: canceledAt,
-        lastError: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
-      },
-    }),
-  ]);
-  if (canceledMessage.count !== 1 || canceledOutbox.count !== 1) {
-    throw new GenerationWorkLeaseLostError(
-      input.outboxId,
-      input.leaseAttempt,
-    );
-  }
-  await releasePendingGenerationDeliveryBillingInTransaction(tx, {
-    generationRunId: input.runId,
-    reason: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
-    releasedAt: canceledAt,
-  });
-  return true;
-}
-
 async function admitGenerationMessageProviderCallInTransaction(
   tx: Prisma.TransactionClient,
   input: GenerationMessageDeliveryFenceInput,
@@ -6198,12 +5603,7 @@ async function admitGenerationMessageProviderCallInTransaction(
       leaseExpiresAt: true,
       deliveryOutboxId: true,
       deliveryLeaseAttempt: true,
-      planId: true,
-      planRevision: true,
-      executionEpoch: true,
-      planActionId: true,
       failureCode: true,
-      plan: { select: { scopeKey: true } },
     },
   });
   if (
@@ -6223,10 +5623,6 @@ async function admitGenerationMessageProviderCallInTransaction(
     || attempt.leaseExpiresAt.getTime() <= Date.now()
     || attempt.status !== MessageDeliveryAttemptStatus.PROCESSING
     || attempt.attemptPhase !== MessageDeliveryAttemptPhase.CALL_PREPARED
-    || attempt.planId !== (input.deliveryAdmission.planId ?? null)
-    || attempt.planRevision !== (input.deliveryAdmission.planRevision ?? null)
-    || attempt.executionEpoch !== (input.deliveryAdmission.executionEpoch ?? null)
-    || attempt.planActionId !== (input.deliveryAdmission.planActionId ?? null)
   ) {
     if (
       attempt?.status === MessageDeliveryAttemptStatus.CANCELED
@@ -6239,41 +5635,6 @@ async function admitGenerationMessageProviderCallInTransaction(
       input.outboxId,
       input.leaseAttempt,
     );
-  }
-
-  if (attempt.planId) {
-    if (!attempt.plan?.scopeKey) {
-      throw new GenerationWorkLeaseLostError(
-        input.outboxId,
-        input.leaseAttempt,
-      );
-    }
-    // The scope lock is deliberately acquired before the Generation Outbox
-    // row lock. Plan supersession holds the same lock while closing old
-    // delivery rights, so exactly one side can win the pre-call boundary.
-    await tx.$executeRaw`
-      SELECT pg_advisory_xact_lock(hashtext(${attempt.plan.scopeKey}))
-    `;
-    const fence = await tx.planExecutionFence.findUnique({
-      where: { scopeKey: attempt.plan.scopeKey },
-      select: {
-        activePlanId: true,
-        activeRevision: true,
-        executionEpoch: true,
-      },
-    });
-    if (
-      !fence
-      || fence.activePlanId !== attempt.planId
-      || fence.activeRevision !== attempt.planRevision
-      || fence.executionEpoch !== attempt.executionEpoch
-    ) {
-      await closeSupersededGenerationDeliveryBeforeCallInTransaction(
-        tx,
-        input,
-      );
-      return false;
-    }
   }
 
   await fenceGenerationWorkLease(tx, input);
@@ -6311,73 +5672,6 @@ export async function admitGenerationMessageProviderDelivery(
   return true;
 }
 
-async function reconcileGenerationDeliveryAfterCallAdmissionInTransaction(
-  tx: Prisma.TransactionClient,
-  input: GenerationMessageDeliveryFenceInput,
-) {
-  const reconciledAt = new Date();
-  const reconciled = await tx.messageDeliveryAttempt.updateMany({
-    where: {
-      messageId: input.outputMessageId,
-      attemptNumber: input.deliveryAdmission.attemptNumber,
-      leaseToken: input.deliveryAdmission.leaseToken,
-      status: MessageDeliveryAttemptStatus.PROCESSING,
-      attemptPhase: {
-        in: [
-          MessageDeliveryAttemptPhase.CALL_STARTED,
-          MessageDeliveryAttemptPhase.RESPONSE_RECEIVED,
-        ],
-      },
-    },
-    data: {
-      status: MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED,
-      attemptPhase: MessageDeliveryAttemptPhase.OUTCOME_UNKNOWN,
-      leaseExpiresAt: null,
-      failureCode: "turn_plan_delivery_reconciliation_required",
-      failureReason:
-        "The provider call was admitted before TurnPlan supersession; automatic resend is disabled.",
-    },
-  });
-  if (reconciled.count === 0) return false;
-  await Promise.all([
-    tx.message.updateMany({
-      where: {
-        id: input.outputMessageId,
-        conversationId: input.conversationId,
-        deliveryStatus: {
-          in: [
-            MessageDeliveryStatus.QUEUED,
-            MessageDeliveryStatus.PROCESSING,
-            MessageDeliveryStatus.FAILED,
-          ],
-        },
-      },
-      data: {
-        deliveryStatus: MessageDeliveryStatus.FAILED,
-        failureCode: "turn_plan_delivery_reconciliation_required",
-        failureReason:
-          "Provider outcome requires reconciliation after TurnPlan supersession; automatic resend is disabled.",
-      },
-    }),
-    tx.outboxEvent.updateMany({
-      where: {
-        id: input.outboxId,
-        aggregateType: "generation_run",
-        aggregateId: input.runId,
-        eventType: "generation.requested",
-        status: { in: ["PENDING", "PROCESSING", "FAILED"] },
-        attemptCount: input.leaseAttempt,
-      },
-      data: {
-        status: "DEAD_LETTER",
-        processedAt: reconciledAt,
-        lastError: "turn_plan_delivery_reconciliation_required",
-      },
-    }),
-  ]);
-  return true;
-}
-
 async function validateGenerationMessageProviderAdmissionInTransaction(
   tx: Prisma.TransactionClient,
   input: GenerationMessageDeliveryFenceInput,
@@ -6395,11 +5689,6 @@ async function validateGenerationMessageProviderAdmissionInTransaction(
       leaseToken: true,
       deliveryOutboxId: true,
       deliveryLeaseAttempt: true,
-      planId: true,
-      planRevision: true,
-      executionEpoch: true,
-      planActionId: true,
-      plan: { select: { scopeKey: true } },
     },
   });
   if (
@@ -6407,10 +5696,6 @@ async function validateGenerationMessageProviderAdmissionInTransaction(
     || attempt.leaseToken !== input.deliveryAdmission.leaseToken
     || attempt.deliveryOutboxId !== input.outboxId
     || attempt.deliveryLeaseAttempt !== input.leaseAttempt
-    || attempt.planId !== (input.deliveryAdmission.planId ?? null)
-    || attempt.planRevision !== (input.deliveryAdmission.planRevision ?? null)
-    || attempt.executionEpoch !== (input.deliveryAdmission.executionEpoch ?? null)
-    || attempt.planActionId !== (input.deliveryAdmission.planActionId ?? null)
   ) {
     throw new GenerationWorkLeaseLostError(
       input.outboxId,
@@ -6429,37 +5714,6 @@ async function validateGenerationMessageProviderAdmissionInTransaction(
       input.outboxId,
       input.leaseAttempt,
     );
-  }
-  if (attempt.planId) {
-    if (!attempt.plan?.scopeKey) {
-      throw new GenerationWorkLeaseLostError(
-        input.outboxId,
-        input.leaseAttempt,
-      );
-    }
-    await tx.$executeRaw`
-      SELECT pg_advisory_xact_lock(hashtext(${attempt.plan.scopeKey}))
-    `;
-    const fence = await tx.planExecutionFence.findUnique({
-      where: { scopeKey: attempt.plan.scopeKey },
-      select: {
-        activePlanId: true,
-        activeRevision: true,
-        executionEpoch: true,
-      },
-    });
-    if (
-      !fence
-      || fence.activePlanId !== attempt.planId
-      || fence.activeRevision !== attempt.planRevision
-      || fence.executionEpoch !== attempt.executionEpoch
-    ) {
-      await reconcileGenerationDeliveryAfterCallAdmissionInTransaction(
-        tx,
-        input,
-      );
-      return false;
-    }
   }
   await fenceGenerationWorkLease(tx, input);
   return true;
@@ -6508,11 +5762,6 @@ async function validateGenerationMessageDeliveryCompletionInTransaction(
       leaseToken: true,
       deliveryOutboxId: true,
       deliveryLeaseAttempt: true,
-      planId: true,
-      planRevision: true,
-      executionEpoch: true,
-      planActionId: true,
-      plan: { select: { scopeKey: true } },
     },
   });
   if (
@@ -6520,52 +5769,11 @@ async function validateGenerationMessageDeliveryCompletionInTransaction(
     || attempt.leaseToken !== input.deliveryAdmission.leaseToken
     || attempt.deliveryOutboxId !== input.outboxId
     || attempt.deliveryLeaseAttempt !== input.leaseAttempt
-    || attempt.planId !== (input.deliveryAdmission.planId ?? null)
-    || attempt.planRevision !== (input.deliveryAdmission.planRevision ?? null)
-    || attempt.executionEpoch !== (input.deliveryAdmission.executionEpoch ?? null)
-    || attempt.planActionId !== (input.deliveryAdmission.planActionId ?? null)
   ) {
     throw new GenerationWorkLeaseLostError(
       input.outboxId,
       input.leaseAttempt,
     );
-  }
-  if (attempt.planId) {
-    if (!attempt.plan?.scopeKey) {
-      throw new GenerationWorkLeaseLostError(
-        input.outboxId,
-        input.leaseAttempt,
-      );
-    }
-    await tx.$executeRaw`
-      SELECT pg_advisory_xact_lock(hashtext(${attempt.plan.scopeKey}))
-    `;
-    const fence = await tx.planExecutionFence.findUnique({
-      where: { scopeKey: attempt.plan.scopeKey },
-      select: {
-        activePlanId: true,
-        activeRevision: true,
-        executionEpoch: true,
-      },
-    });
-    if (
-      !fence
-      || fence.activePlanId !== attempt.planId
-      || fence.activeRevision !== attempt.planRevision
-      || fence.executionEpoch !== attempt.executionEpoch
-    ) {
-      if (
-        attempt.status === MessageDeliveryAttemptStatus.PROCESSING
-        && attempt.attemptPhase
-          === MessageDeliveryAttemptPhase.CALL_PREPARED
-      ) {
-        await closeSupersededGenerationDeliveryBeforeCallInTransaction(
-          tx,
-          input,
-        );
-      }
-      return false;
-    }
   }
   if (
     attempt.status === MessageDeliveryAttemptStatus.PROCESSING
@@ -6730,7 +5938,6 @@ export async function prepareGenerationMessageChannelDelivery(input: {
   outboxId: string;
   leaseAttempt: number;
   outputMessageId: string;
-  planActionId?: string;
 }) {
   const outcome = await runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`
@@ -6765,15 +5972,6 @@ export async function prepareGenerationMessageChannelDelivery(input: {
         input.leaseAttempt,
       );
     }
-    const frozenPlan = await resolveFrozenGenerationDeliveryPlanInTransaction(
-      tx,
-      {
-        runId: input.runId,
-        ...(input.planActionId
-          ? { planActionId: input.planActionId }
-          : {}),
-      },
-    );
     const memoryDeliveryAuthorized =
       await revalidateGenerationMessageMemoryDeliveryInTransaction(tx, input);
     if (!memoryDeliveryAuthorized) {
@@ -6826,14 +6024,6 @@ export async function prepareGenerationMessageChannelDelivery(input: {
       deliveryOutboxId: input.outboxId,
       deliveryLeaseAttempt: input.leaseAttempt,
       leaseToken: deliveryLeaseToken,
-      ...(frozenPlan
-        ? {
-            planId: frozenPlan.planId,
-            planRevision: frozenPlan.planRevision,
-            executionEpoch: frozenPlan.executionEpoch,
-            planActionId: frozenPlan.planActionId,
-          }
-        : {}),
       expectedStatuses: [
         MessageDeliveryAttemptStatus.QUEUED,
         MessageDeliveryAttemptStatus.FAILED,
@@ -6874,14 +6064,6 @@ export async function prepareGenerationMessageChannelDelivery(input: {
         deliveryAdmission: {
           attemptNumber: input.leaseAttempt,
           leaseToken: deliveryLeaseToken,
-          ...(frozenPlan
-            ? {
-                planId: frozenPlan.planId,
-                planRevision: frozenPlan.planRevision,
-                executionEpoch: frozenPlan.executionEpoch,
-                planActionId: frozenPlan.planActionId,
-              }
-            : {}),
         } satisfies GenerationMessageDeliveryAdmission,
       },
     };
@@ -6999,7 +6181,6 @@ export async function retryGenerationDelivery(input: {
 }
 
 export type ConversationMessageDeliveryKind =
-  | "delegation_task_status"
   | "system_notification"
   | "representative_result";
 
@@ -7023,10 +6204,6 @@ async function transitionMessageDeliveryAttemptInTransaction(
     failureCode?: string | null;
     failureReason?: string | null;
     completedAt?: Date | null;
-    planId?: string | null;
-    planActionId?: string | null;
-    planRevision?: number | null;
-    executionEpoch?: number | null;
     deliveryOutboxId?: string | null;
     deliveryLeaseAttempt?: number | null;
     leaseToken?: string | null;
@@ -7039,16 +6216,12 @@ async function transitionMessageDeliveryAttemptInTransaction(
       messageId: input.messageId,
       conversationId: input.conversationId,
       channelBindingId: input.channelBindingId ?? null,
-      planId: input.planId ?? null,
       attemptNumber: input.attemptNumber,
       status: MessageDeliveryAttemptStatus.QUEUED,
       attemptPhase: MessageDeliveryAttemptPhase.CREATED,
       transport: input.transport ?? null,
       sourceProvider: input.sourceProvider ?? null,
       connectionId: input.connectionId ?? null,
-      planActionId: input.planActionId ?? null,
-      planRevision: input.planRevision ?? null,
-      executionEpoch: input.executionEpoch ?? null,
       deliveryOutboxId: input.deliveryOutboxId ?? null,
       deliveryLeaseAttempt: input.deliveryLeaseAttempt ?? null,
       leaseToken: input.leaseToken ?? null,
@@ -7077,16 +6250,6 @@ async function transitionMessageDeliveryAttemptInTransaction(
         : {}),
       ...(input.connectionId !== undefined
         ? { connectionId: input.connectionId }
-        : {}),
-      ...(input.planActionId !== undefined
-        ? { planActionId: input.planActionId }
-        : {}),
-      ...(input.planId !== undefined ? { planId: input.planId } : {}),
-      ...(input.planRevision !== undefined
-        ? { planRevision: input.planRevision }
-        : {}),
-      ...(input.executionEpoch !== undefined
-        ? { executionEpoch: input.executionEpoch }
         : {}),
       ...(input.deliveryOutboxId !== undefined
         ? { deliveryOutboxId: input.deliveryOutboxId }
@@ -7168,10 +6331,6 @@ async function recordProviderAcceptanceInTransaction(
       ...(input.deliveryAdmission
         ? {
             leaseToken: input.deliveryAdmission.leaseToken,
-            planId: input.deliveryAdmission.planId ?? null,
-            planRevision: input.deliveryAdmission.planRevision ?? null,
-            executionEpoch: input.deliveryAdmission.executionEpoch ?? null,
-            planActionId: input.deliveryAdmission.planActionId ?? null,
           }
         : {}),
       ...(input.deliveryAdmission
@@ -7807,7 +6966,7 @@ export async function claimNextConversationMessageDeliveryWorkItem(
       deliveryKindValue === "system_notification"
       || deliveryKindValue === "representative_result"
         ? deliveryKindValue
-        : "delegation_task_status";
+        : "system_notification";
     const message = await tx.message.findUnique({
       where: { id: outbox.aggregateId },
       include: {
@@ -8901,11 +8060,6 @@ export async function failGenerationRun(input: {
         errorMessage: input.errorMessage,
         completedAt: now,
       },
-      include: {
-        delegationTaskStep: {
-          select: { kind: true },
-        },
-      },
     });
     if (run.conversationId !== input.conversationId) {
       throw new Error("Generation run does not belong to the conversation.");
@@ -8969,7 +8123,6 @@ export async function failGenerationRun(input: {
     if (
       walletReservation
       && terminalFailure
-      && !delegationTaskOwnsGenerationBilling(run)
     ) {
       await releaseConversationWalletUsage(
         {
@@ -8984,187 +8137,6 @@ export async function failGenerationRun(input: {
     }
     return run;
   });
-}
-
-function serializePublicTaskProgress(task: {
-  id: string;
-  title: string;
-  status: string;
-  nextActionBy: string;
-  updatedAt: Date;
-  steps: Array<{
-    id: string;
-    sequence: number;
-    title: string;
-    status: string;
-    startedAt: Date | null;
-    completedAt: Date | null;
-    failedAt: Date | null;
-    updatedAt: Date;
-  }>;
-}): PublicConversationTaskProgress {
-  return {
-    id: task.id,
-    title: task.title,
-    status: task.status.toLowerCase(),
-    nextActionBy: task.nextActionBy.toLowerCase(),
-    updatedAt: task.updatedAt.toISOString(),
-    steps: task.steps.map((step) => ({
-      id: step.id,
-      sequence: step.sequence,
-      title: step.title,
-      status: step.status.toLowerCase(),
-      ...(step.startedAt ? { startedAt: step.startedAt.toISOString() } : {}),
-      ...(step.completedAt ? { completedAt: step.completedAt.toISOString() } : {}),
-      ...(step.failedAt ? { failedAt: step.failedAt.toISOString() } : {}),
-      updatedAt: step.updatedAt.toISOString(),
-    })),
-  };
-}
-
-const publicTurnExecutionStages: GenerationTurnExecutionStage[] = [
-  "planning",
-  "authorizing",
-  "generating",
-  "validating",
-  "saving",
-  "delivering",
-];
-
-function serializePublicTurnExecutionProgress(input: {
-  runId: string;
-  runStatus: string;
-  runStartedAt: Date | null;
-  contextSnapshot: unknown;
-  plan: {
-    id: string;
-    status: string;
-    objective: string;
-    planSnapshot: unknown;
-    createdAt: Date;
-    updatedAt: Date;
-    actions: Array<{ status: string }>;
-  };
-}): PublicTurnExecutionProgress {
-  const persisted = readTurnExecutionProgress(input.contextSnapshot);
-  const actionStatus = input.plan.actions[0]?.status;
-  const failed = input.plan.status === "FAILED" || input.runStatus === "FAILED";
-  const completed = input.plan.status === "COMPLETED" && !failed;
-  const currentStage: GenerationTurnExecutionStage = persisted?.stage
-    ?? (actionStatus === "EXECUTING" ? "generating" : "planning");
-  const stage: PublicTurnExecutionProgress["stage"] = failed
-    ? "failed"
-    : completed
-      ? "completed"
-      : currentStage;
-  const activeStageIndex = publicTurnExecutionStages.indexOf(
-    completed ? "delivering" : currentStage,
-  );
-  const steps = publicTurnExecutionStages.map((candidate, index) => {
-    const status: PublicTurnExecutionProgress["steps"][number]["status"] =
-      completed
-        ? "completed"
-        : failed
-          ? index < activeStageIndex
-            ? "completed"
-            : index === activeStageIndex
-              ? "failed"
-              : "skipped"
-          : index < activeStageIndex
-            ? "completed"
-            : index === activeStageIndex
-              ? "running"
-              : "queued";
-    return {
-      id: `${input.plan.id}:${candidate}`,
-      sequence: index + 1,
-      stage: candidate,
-      status,
-      ...(candidate === "generating" && persisted?.part
-        ? {
-            detail: `${persisted.part}/${persisted.maxParts ?? persisted.part}`,
-          }
-        : {}),
-    };
-  });
-  const planSnapshot = isJsonRecord(input.plan.planSnapshot)
-    ? input.plan.planSnapshot
-    : {};
-  const goals = Array.isArray(planSnapshot.goals)
-    ? planSnapshot.goals.flatMap((goal) => {
-        if (!isJsonRecord(goal)) return [];
-        const id = typeof goal.id === "string" ? goal.id : "";
-        const description = typeof goal.description === "string"
-          ? goal.description.trim().slice(0, 240)
-          : "";
-        return id && description ? [{ id, description }] : [];
-      }).slice(0, 8)
-    : [];
-  const deliverables = Array.isArray(planSnapshot.deliverables)
-    ? planSnapshot.deliverables.flatMap((deliverable) => {
-        if (!isJsonRecord(deliverable)) return [];
-        const id = typeof deliverable.id === "string" ? deliverable.id : "";
-        const kind = typeof deliverable.kind === "string"
-          ? deliverable.kind
-          : "";
-        const format = typeof deliverable.format === "string"
-          ? deliverable.format
-          : undefined;
-        return id && kind
-          ? [{ id, kind, ...(format ? { format } : {}) }]
-          : [];
-      }).slice(0, 8)
-    : [];
-  return {
-    id: input.plan.id,
-    objective: input.plan.objective.trim().slice(0, 500),
-    status: failed ? "failed" : completed ? "completed" : "running",
-    stage,
-    startedAt: (input.runStartedAt ?? input.plan.createdAt).toISOString(),
-    updatedAt: persisted?.updatedAt
-      ?? input.plan.updatedAt.toISOString(),
-    goals,
-    deliverables,
-    steps,
-  };
-}
-
-function readTurnExecutionProgress(value: unknown): {
-  stage: GenerationTurnExecutionStage;
-  updatedAt: string;
-  part?: number;
-  maxParts?: number;
-} | null {
-  if (!isJsonRecord(value) || !isJsonRecord(value.turnExecutionProgress)) {
-    return null;
-  }
-  const progress = value.turnExecutionProgress;
-  if (
-    progress.version !== 1
-    || typeof progress.stage !== "string"
-    || !publicTurnExecutionStages.includes(
-      progress.stage as GenerationTurnExecutionStage,
-    )
-    || typeof progress.updatedAt !== "string"
-  ) {
-    return null;
-  }
-  const part = typeof progress.part === "number"
-    && Number.isSafeInteger(progress.part)
-    && progress.part > 0
-      ? progress.part
-      : undefined;
-  const maxParts = typeof progress.maxParts === "number"
-    && Number.isSafeInteger(progress.maxParts)
-    && progress.maxParts > 0
-      ? progress.maxParts
-      : undefined;
-  return {
-    stage: progress.stage as GenerationTurnExecutionStage,
-    updatedAt: progress.updatedAt,
-    ...(part ? { part } : {}),
-    ...(maxParts ? { maxParts } : {}),
-  };
 }
 
 export async function getPublicGenerationRunSnapshot(input: {
@@ -9184,6 +8156,20 @@ export async function getPublicGenerationRunSnapshot(input: {
       },
     },
     include: {
+      conversation: {
+        select: {
+          outboxEvents: {
+            where: {
+              aggregateType: "generation_run",
+              aggregateId: input.runId,
+              eventType: "generation.requested",
+            },
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { status: true, processedAt: true },
+          },
+        },
+      },
       outputMessage: {
         select: {
           id: true,
@@ -9204,98 +8190,25 @@ export async function getPublicGenerationRunSnapshot(input: {
           },
         },
       },
-      delegationTask: {
-        select: {
-          id: true,
-          title: true,
-          status: true,
-          nextActionBy: true,
-          updatedAt: true,
-          steps: {
-            orderBy: { sequence: "asc" },
-            select: {
-              id: true,
-              sequence: true,
-              title: true,
-              status: true,
-              startedAt: true,
-              completedAt: true,
-              failedAt: true,
-              updatedAt: true,
-            },
-          },
-          generationRuns: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            select: {
-              id: true,
-              status: true,
-              errorCode: true,
-              errorMessage: true,
-              contextSnapshot: true,
-              outputMessage: {
-                select: {
-                  id: true,
-                  text: true,
-                  content: true,
-                  deliveryStatus: true,
-                  failureCode: true,
-                  createdAt: true,
-                  citations: {
-                    select: {
-                      title: true,
-                      excerpt: true,
-                      memoryUseItem: { select: { id: true } },
-                    },
-                  },
-                  attachments: {
-                    select: {
-                      id: true,
-                      fileName: true,
-                      mimeType: true,
-                      sizeBytes: true,
-                      externalUrl: true,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      turnPlans: {
-        where: { shadowMode: false },
-        orderBy: { revision: "desc" },
-        take: 1,
-        select: {
-          id: true,
-          status: true,
-          objective: true,
-          planSnapshot: true,
-          createdAt: true,
-          updatedAt: true,
-          actions: {
-            orderBy: { sequence: "asc" },
-            select: { status: true },
-          },
-        },
-      },
     },
   });
   if (!run) return null;
 
-  const latestTaskRun = run.delegationTask?.generationRuns[0];
-  const presentationRun = latestTaskRun ?? run;
+  const presentationRun = run;
   const outputMessage = presentationRun.outputMessage;
   const memoryDeliveryBlocked =
     outputMessage?.failureCode === GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR;
 
+  const runtimeOutcome = readConversationGenerationRuntimeOutcome(
+    presentationRun.contextSnapshot,
+  );
   const sourceDisclosure = outputMessage && !memoryDeliveryBlocked
     ? resolvePublicWebAnswerSourceDisclosure({
-        modelGenerated:
-          readConversationGenerationRuntimeOutcome(presentationRun.contextSnapshot)?.mode
-          === "model",
+        modelGenerated: runtimeOutcome?.mode === "model",
         hasAuthorizedCitation: outputMessage.citations.length > 0,
+        ...(runtimeOutcome?.verifiedToolEvidence
+          ? { hasVerifiedToolEvidence: true }
+          : {}),
         sameConversationRecall: isSameConversationRecallMessage(
           outputMessage.content,
         ),
@@ -9305,30 +8218,27 @@ export async function getPublicGenerationRunSnapshot(input: {
         ),
       })
     : null;
-  const activeTurnPlan = run.turnPlans?.[0];
-  const turnProgress = activeTurnPlan
-    ? serializePublicTurnExecutionProgress({
-        runId: run.id,
-        runStatus: run.status,
-        runStartedAt: run.startedAt,
-        contextSnapshot: run.contextSnapshot,
-        plan: activeTurnPlan,
-      })
-    : null;
+  const piStream = readGenerationPiStream(run.contextSnapshot);
+  const generationOutbox = run.conversation.outboxEvents[0];
+  const retryPending = presentationRun.status === GenerationRunStatus.FAILED
+    && Boolean(
+      generationOutbox
+      && generationOutbox.processedAt === null
+      && ["PENDING", "PROCESSING", "FAILED"].includes(generationOutbox.status),
+    );
 
   return {
     id: run.id,
-    status: memoryDeliveryBlocked ? "canceled" : presentationRun.status.toLowerCase(),
-    ...(!memoryDeliveryBlocked && presentationRun.errorCode
+    status: memoryDeliveryBlocked
+      ? "canceled"
+      : retryPending ? "processing" : presentationRun.status.toLowerCase(),
+    ...(!memoryDeliveryBlocked && !retryPending && presentationRun.errorCode
       ? { errorCode: presentationRun.errorCode }
       : {}),
-    ...(!memoryDeliveryBlocked && presentationRun.errorMessage
+    ...(!memoryDeliveryBlocked && !retryPending && presentationRun.errorMessage
       ? { errorMessage: presentationRun.errorMessage }
       : {}),
-    ...(run.delegationTask
-      ? { taskProgress: serializePublicTaskProgress(run.delegationTask) }
-      : {}),
-    ...(turnProgress ? { turnProgress } : {}),
+    ...(piStream ? { stream: piStream } : {}),
     ...(outputMessage && !memoryDeliveryBlocked
       ? {
           message: {
@@ -9361,6 +8271,28 @@ export async function getPublicGenerationRunSnapshot(input: {
           },
         }
       : {}),
+  };
+}
+
+function readGenerationPiStream(value: unknown): {
+  sequence: number;
+  text: string;
+  updatedAt: string;
+} | null {
+  if (!isJsonRecord(value) || !isJsonRecord(value.piStream)) return null;
+  const stream = value.piStream;
+  if (
+    stream.version !== 1
+    || typeof stream.sequence !== "number"
+    || !Number.isSafeInteger(stream.sequence)
+    || stream.sequence < 1
+    || typeof stream.text !== "string"
+    || typeof stream.updatedAt !== "string"
+  ) return null;
+  return {
+    sequence: stream.sequence,
+    text: stream.text.slice(-32_000),
+    updatedAt: stream.updatedAt,
   };
 }
 
@@ -9431,54 +8363,9 @@ export async function getPublicConversationHistory(input: {
         take: 1,
       },
       episodes: { orderBy: { sequence: "desc" }, take: 1 },
-      delegationTasks: {
-        // Resolve recency before lifecycle state. Filtering terminal tasks here
-        // resurrects an older unresolved task after a newer task completes.
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: 1,
-        select: {
-          id: true,
-          title: true,
-          status: true,
-          nextActionBy: true,
-          updatedAt: true,
-          steps: {
-            orderBy: { sequence: "asc" },
-            select: {
-              id: true,
-              sequence: true,
-              title: true,
-              status: true,
-              startedAt: true,
-              completedAt: true,
-              failedAt: true,
-              updatedAt: true,
-            },
-          },
-        },
-      },
       generationRuns: {
         orderBy: { createdAt: "desc" },
         take: 1,
-        include: {
-          turnPlans: {
-            where: { shadowMode: false },
-            orderBy: { revision: "desc" },
-            take: 1,
-            select: {
-              id: true,
-              status: true,
-              objective: true,
-              planSnapshot: true,
-              createdAt: true,
-              updatedAt: true,
-              actions: {
-                orderBy: { sequence: "asc" },
-                select: { status: true },
-              },
-            },
-          },
-        },
       },
     },
     orderBy: { lastMessageAt: "desc" },
@@ -9488,51 +8375,13 @@ export async function getPublicConversationHistory(input: {
       state: "new",
       humanActive: false,
       freeRepliesUsed: 0,
-      taskProgress: null,
-      turnProgress: null,
       messages: [],
     };
   }
-  const latestTask = conversation.delegationTasks[0];
-  const latestAudienceMessage = conversation.messages.find(
-    (message) => message.senderType === MessageSenderType.AUDIENCE,
-  );
-  const latestTaskIsCurrent = Boolean(
-    latestTask
-    && (
-      !latestAudienceMessage
-      || latestAudienceMessage.delegationTaskId === latestTask.id
-    ),
-  );
-  const latestTaskIsActive = Boolean(latestTask && ([
-    DelegationTaskStatus.DRAFT,
-    DelegationTaskStatus.CLARIFYING,
-    DelegationTaskStatus.READY,
-    DelegationTaskStatus.AWAITING_APPROVAL,
-    DelegationTaskStatus.QUEUED,
-    DelegationTaskStatus.RUNNING,
-    DelegationTaskStatus.WAITING_FOR_USER,
-    DelegationTaskStatus.WAITING_FOR_OWNER,
-  ] as DelegationTaskStatus[]).includes(latestTask.status));
-  const currentTask = latestTaskIsCurrent && latestTaskIsActive
-    ? latestTask
-    : null;
   return {
     state: conversation.state.toLowerCase(),
     humanActive: Boolean(conversation.assignments[0]),
     freeRepliesUsed: conversation.freeRepliesUsed,
-    taskProgress: currentTask
-      ? serializePublicTaskProgress(currentTask)
-      : null,
-    turnProgress: conversation.generationRuns?.[0]?.turnPlans?.[0]
-      ? serializePublicTurnExecutionProgress({
-          runId: conversation.generationRuns[0].id,
-          runStatus: conversation.generationRuns[0].status,
-          runStartedAt: conversation.generationRuns[0].startedAt,
-          contextSnapshot: conversation.generationRuns[0].contextSnapshot,
-          plan: conversation.generationRuns[0].turnPlans[0],
-        })
-      : null,
     messages: [...conversation.messages]
       .reverse()
       .filter((message) => !(
@@ -9544,13 +8393,16 @@ export async function getPublicConversationHistory(input: {
         (citation) => Boolean(citation.memoryUseItem),
       )?.memoryUseItem?.useRun.generationRunId;
       const generation = message.outputForGenerationRuns[0];
+      const runtimeOutcome = readConversationGenerationRuntimeOutcome(
+        generation?.contextSnapshot,
+      );
       const sourceDisclosure = message.senderType === MessageSenderType.REPRESENTATIVE
         ? resolvePublicWebAnswerSourceDisclosure({
-            modelGenerated:
-              readConversationGenerationRuntimeOutcome(
-                generation?.contextSnapshot,
-              )?.mode === "model",
+          modelGenerated: runtimeOutcome?.mode === "model",
           hasAuthorizedCitation: message.citations.length > 0,
+          ...(runtimeOutcome?.verifiedToolEvidence
+            ? { hasVerifiedToolEvidence: true }
+            : {}),
           sameConversationRecall: isSameConversationRecallMessage(
             message.content,
           ),
@@ -9606,6 +8458,14 @@ export function renderPublicConversationMessageText(message: {
 }) {
   const text = stripLegacyUnverifiedToolFallbackPrefix(message.text || "");
   const publicText = text
+    .replace(
+      /\n{1,2}(?:知识依据：[^\n]*(?:\n知识依据：[^\n]*)*)/gu,
+      "",
+    )
+    .replace(
+      /根据授权资料\s*[\[【][^\]】\n]{1,160}[\]】][，,]?\s*/gu,
+      "",
+    )
     .replace(
       /\n{1,2}(?:(?:实际|预计)?消耗|actual credits?|estimated credits?)\s*[：:]?\s*\d+\s*credits?\b/giu,
       "",
@@ -10526,17 +9386,7 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
                   reason: "matrix_redaction_delivery_in_flight",
                 };
               }
-              if (
-                !(error instanceof DelegationMessageRedactionConflictError)
-              ) {
-                throw error;
-              }
-              await markMatrixInboxProcessed(inboxId, tx);
-              return {
-                eventId,
-                status: "ignored",
-                reason: "matrix_redaction_delegation_active",
-              };
+              throw error;
             }
           } else {
             const content = event.content || {};
@@ -10671,15 +9521,7 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
                   tx,
                 );
               } catch (error) {
-                if (!(error instanceof DelegationMessageEditConflictError)) {
-                  throw error;
-                }
-                await markMatrixInboxProcessed(inboxId, tx);
-                return {
-                  eventId,
-                  status: "ignored",
-                  reason: "matrix_edit_delegation_active",
-                };
+                throw error;
               }
             } else if (msgtype === "m.text" && body) {
               await acceptInboundConversationMessage(
@@ -10873,7 +9715,7 @@ export async function editConversationMessage(input: {
         },
         inputForGenerationRuns: {
           orderBy: { createdAt: "desc" },
-          select: { id: true, delegationTaskId: true },
+          select: { id: true },
         },
       },
     });
@@ -10921,7 +9763,7 @@ export async function editConversationMessage(input: {
     const providerMemoryControl = Boolean(input.matrixGuard || telegramGuard);
     if (providerMemoryControl) {
       // Provider edits are privacy controls first and business-message edits
-      // second. Fence derived memory before any delegation/generation
+      // second. Fence derived memory before any generation
       // conflict can reject the body mutation. Matrix catches those conflicts
       // in its durable inbox transaction; Telegram does the same in the bot
       // transaction, so this safety mutation still commits.
@@ -10940,10 +9782,6 @@ export async function editConversationMessage(input: {
           : {}),
       };
     }
-    if (message.inputForGenerationRuns.some((run) => run.delegationTaskId)) {
-      throw new DelegationMessageEditConflictError();
-    }
-
     const runReference = message.inputForGenerationRuns[0];
     if (runReference) {
       await tx.$executeRaw`
@@ -11021,12 +9859,6 @@ export async function editConversationMessage(input: {
           episodeId: message.episodeId,
           inputMessageId: message.id,
           representativeVersionId: run.representativeVersionId,
-          ...(run.delegationTaskId
-            ? { delegationTaskId: run.delegationTaskId }
-            : {}),
-          ...(run.delegationTaskStepId
-            ? { delegationTaskStepId: run.delegationTaskStepId }
-            : {}),
           status: GenerationRunStatus.QUEUED,
           idempotencyKey: `reply:${message.conversationId}:${message.id}:revision:${revision.version}`,
           ...(run.runtimePolicySnapshot !== null
@@ -11212,7 +10044,7 @@ export async function redactConversationMessage(input: {
 
     const providerMemoryControl = Boolean(input.matrixGuard);
     if (providerMemoryControl) {
-      // A provider redaction must stop Recall even when an active delegation
+      // A provider redaction must stop Recall even when active generation
       // or an in-flight delivery prevents the rest of the conversation
       // mutation. The Matrix inbox catches those conflicts inside this same
       // transaction, allowing the memory fence to commit independently of
@@ -11236,10 +10068,6 @@ export async function redactConversationMessage(input: {
         select: {
           id: true,
           status: true,
-          delegationTaskId: true,
-          delegationTask: {
-            select: { status: true },
-          },
           outputMessageId: true,
           outputMessage: {
             select: {
@@ -11251,17 +10079,6 @@ export async function redactConversationMessage(input: {
         },
       });
       if (!run) continue;
-      if (
-        run.delegationTaskId
-        && (
-          !run.delegationTask
-          || !["COMPLETED", "FAILED", "CANCELED", "EXPIRED"].includes(
-            run.delegationTask.status,
-          )
-        )
-      ) {
-        throw new DelegationMessageRedactionConflictError();
-      }
       const activeOutbox = await tx.outboxEvent.findFirst({
         where: {
           aggregateType: "generation_run",
@@ -11879,21 +10696,6 @@ export async function assignConversationOperator(input: {
       representativeId: conversation.representativeId,
     }, tx);
 
-    const taskRows = await tx.delegationTask.findMany({
-      where: {
-        originConversationId: conversation.id,
-        status: {
-          notIn: [
-            "COMPLETED",
-            "FAILED",
-            "CANCELED",
-            "EXPIRED",
-          ],
-        },
-      },
-      select: { id: true },
-      orderBy: { id: "asc" },
-    });
     const runRows = await tx.generationRun.findMany({
       where: {
         conversationId: conversation.id,
@@ -11924,7 +10726,6 @@ export async function assignConversationOperator(input: {
       },
       select: {
         id: true,
-        delegationTaskId: true,
         status: true,
         outputMessage: {
           select: { deliveryStatus: true },
@@ -11932,9 +10733,6 @@ export async function assignConversationOperator(input: {
       },
       orderBy: { id: "asc" },
     });
-    if (taskRows.length > 0) {
-      throw new ActiveDelegationTaskControlError();
-    }
     const runIds = runRows.map((run) => run.id).sort();
     for (const runId of runIds) {
       await tx.$executeRaw`
@@ -11974,7 +10772,6 @@ export async function assignConversationOperator(input: {
             && run.outputMessage?.deliveryStatus
               === MessageDeliveryStatus.PROCESSING
           )
-          || Boolean(run.delegationTaskId)
         )
       )
     ) {
@@ -12049,7 +10846,6 @@ export async function assignConversationOperator(input: {
       let releasedSnapshot: Prisma.InputJsonObject | null = null;
       if (
         walletReservation
-        && !run.delegationTaskId
         && run.status !== GenerationRunStatus.WAITING_HUMAN
       ) {
         await releaseConversationWalletUsage(
@@ -12357,6 +11153,19 @@ export async function controlPublicAudienceHandoff(input: {
       await tx.conversationEpisode.update({
         where: { id: episode.id },
         data: { status: ConversationEpisodeStatus.ACTIVE },
+      });
+      await tx.generationRun.updateMany({
+        where: {
+          conversationId: conversation.id,
+          status: GenerationRunStatus.WAITING_HUMAN,
+        },
+        data: {
+          status: GenerationRunStatus.CANCELED,
+          canceledAt: now,
+          completedAt: null,
+          errorCode: "audience_canceled_handoff_request",
+          errorMessage: "The audience canceled the queued human handoff request.",
+        },
       });
       const systemMessage = await recordPublicAudienceHandoffControlInTransaction(tx, {
         conversationId: conversation.id,
@@ -12874,12 +11683,6 @@ function buildRepresentativeSnapshot(representative: {
   computeNetworkMode: string;
   computeNetworkAllowlist: string[];
   computeFilesystemMode: string;
-  delegationEnabled: boolean;
-  delegationNaturalLanguageEnabled: boolean;
-  delegationExplicitComputeEnabled: boolean;
-  delegationMaxSteps: number;
-  delegationMaxEstimatedTokens: number;
-  delegationKnowledgeScope: string;
   knowledgePack: { identitySummary: string; faq: Prisma.JsonValue; materials: Prisma.JsonValue; policies: Prisma.JsonValue } | null;
   knowledgeAssetLinks: Array<{
     assetId: string;
@@ -12920,6 +11723,9 @@ function buildRepresentativeSnapshot(representative: {
         executesCode: boolean;
         registryTrustEligible: boolean;
         signatureStatus: string;
+        instructions: string | null;
+        instructionsSha256: string | null;
+        resources: Prisma.JsonValue | null;
       }>;
     } | null;
   }>;
@@ -12961,6 +11767,19 @@ function buildRepresentativeSnapshot(representative: {
       return [];
     }
 
+    const verifiedInstructions = release.instructions
+      && release.instructionsSha256
+      && createHash("sha256").update(release.instructions).digest("hex")
+        === release.instructionsSha256
+      ? {
+          instructions: release.instructions,
+          instructionsSha256: release.instructionsSha256,
+          resources: Array.isArray(release.resources)
+            ? release.resources.filter((resource): resource is string =>
+                typeof resource === "string" && Boolean(resource.trim()))
+            : [],
+        }
+      : {};
     return [{
       linkId: link.id,
       snapshot: {
@@ -12978,7 +11797,8 @@ function buildRepresentativeSnapshot(representative: {
         capabilityTags: Array.isArray(release.capabilityTags)
           ? release.capabilityTags.filter((tag): tag is string => typeof tag === "string")
           : [],
-        executesCode: false,
+        executesCode: release.executesCode,
+        ...verifiedInstructions,
         enabled: true,
         installStatus: "installed",
       },
@@ -13030,14 +11850,6 @@ function buildRepresentativeSnapshot(representative: {
       networkAllowlist: representative.computeNetworkAllowlist,
       filesystemMode: representative.computeFilesystemMode.toLowerCase(),
       capabilityModes,
-    },
-    delegation: {
-      enabled: representative.delegationEnabled,
-      naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
-      explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
-      maxSteps: representative.delegationMaxSteps,
-      maxEstimatedTokens: representative.delegationMaxEstimatedTokens,
-      knowledgeScope: representative.delegationKnowledgeScope.toLowerCase(),
     },
     knowledge: representative.knowledgePack
       ? {
@@ -14191,7 +13003,14 @@ export function readConversationGenerationRuntimeOutcome(
   ) {
     return undefined;
   }
-  if (outcome.mode === "model") return { mode: "model" };
+  if (outcome.mode === "model") {
+    return {
+      mode: "model",
+      ...(outcome.verifiedToolEvidence === true
+        ? { verifiedToolEvidence: true }
+        : {}),
+    };
+  }
 
   const fallbackReason =
     outcome.fallbackReason === "model_unavailable"
@@ -14264,18 +13083,6 @@ function readDeliveredMaterialsFromTurnTrace(value: unknown): Array<{
     });
   });
   return [...new Map(materials.map((material) => [material.id, material])).values()];
-}
-
-function isTerminalDelegationTaskStepStatus(
-  status: DelegationTaskStepStatus,
-): boolean {
-  return (
-    status === DelegationTaskStepStatus.COMPLETED
-    || status === DelegationTaskStepStatus.FAILED
-    || status === DelegationTaskStepStatus.BLOCKED
-    || status === DelegationTaskStepStatus.CANCELED
-    || status === DelegationTaskStepStatus.SKIPPED
-  );
 }
 
 function isNeedsHumanDeliveryAuthorized(

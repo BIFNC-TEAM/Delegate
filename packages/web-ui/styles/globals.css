@@ -4993,6 +4993,47 @@ button.skill-row:hover {
   white-space: pre-wrap;
 }
 
+.representative-chat-rich-text {
+  display: grid;
+  gap: 8px;
+}
+
+.representative-chat-rich-text p,
+.representative-chat-rich-text ul,
+.representative-chat-rich-text ol {
+  margin: 0;
+  color: inherit;
+  font-size: 0.94rem;
+  line-height: 1.68;
+  overflow-wrap: anywhere;
+}
+
+.representative-chat-rich-text p.is-heading {
+  font-weight: 700;
+}
+
+.representative-chat-rich-text ul,
+.representative-chat-rich-text ol {
+  display: grid;
+  gap: 4px;
+  padding-inline-start: 1.35rem;
+}
+
+.representative-chat-rich-text hr {
+  width: 100%;
+  margin: 2px 0;
+  border: 0;
+  border-top: 1px solid rgba(107, 114, 128, 0.2);
+}
+
+.representative-chat-rich-text code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(17, 24, 39, 0.06);
+  font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
+  font-size: 0.88em;
+}
+
 .representative-chat-message-user .representative-message-bubble {
   border-color: #0d9488;
   border-radius: 14px 5px 14px 14px;

@@ -1026,75 +1026,7 @@ export function consumeConversationEntitlementByGenerationRunId(
   });
 }
 
-/**
- * Finalizes the single active plan reservation owned by a delegated task.
- * Transfer keeps at most one run active; multiple active reservations are an
- * invariant violation and must never be charged independently.
- */
-export function finalizeConversationEntitlementForGenerationRuns(
-  input: {
-    generationRunIds: string[];
-    outcome: "consume" | "release";
-    reason?: string;
-  },
-  client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
-): Promise<ServiceEntitlementSnapshot | null> {
-  const generationRunIds = Array.from(
-    new Set(
-      input.generationRunIds.map((generationRunId) =>
-        requiredText(generationRunId, "generationRunId"),
-      ),
-    ),
-  );
-  const reason = optionalText(input.reason);
-  return runAtomically(client, async (tx) => {
-    const active: Array<{
-      generationRunId: string;
-      attempt: ConversationEntitlementAttempt;
-    }> = [];
-    for (const generationRunId of generationRunIds) {
-      const history = await loadConversationEntitlementHistory(
-        generationRunId,
-        tx,
-      );
-      for (const attempt of history) {
-        if (!attempt.consume && !attempt.release) {
-          active.push({ generationRunId, attempt });
-        }
-      }
-    }
-    if (active.length === 0) return null;
-    if (active.length > 1) {
-      throw new ServiceEntitlementError(
-        "INVARIANT_VIOLATION",
-        "Delegation task contains multiple active conversation entitlement reservations.",
-      );
-    }
-    const owner = active[0]!;
-    const reservation = await recoverConversationReservation(
-      owner.attempt,
-      owner.generationRunId,
-      tx,
-    );
-    assertPublicServiceEntitlementProductCode(reservation.productCode);
-    return input.outcome === "consume"
-      ? consumeConversationReservationInTransaction(reservation, tx)
-      : releaseConversationReservationInTransaction(
-          reservation,
-          tx,
-          reason
-            ? `Released after delegation task termination: ${reason}.`
-            : "Released after delegation task termination.",
-        );
-  });
-}
-
-/**
- * Fulfils a previously-created ServicePaymentOrder. The caller must provide
- * evidence from a signature-verified provider webhook. Every immutable payment
- * fact is compared with the order before the order can be claimed and units
- * granted.
- */
+/** Fulfils a payment order after verified provider evidence is supplied. */
 export async function fulfillServicePaymentOrder(
   input: ServicePaymentEvidenceInput,
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,

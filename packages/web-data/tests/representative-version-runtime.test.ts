@@ -16,8 +16,10 @@ import {
   resolveGovernedContextEnabled,
   resolvePublicGovernedMemoryDisclosure,
   resolvePublicRepresentativeAvailability,
+  resolveVerifiedSkillInstructions,
   type RepresentativeSetupSnapshot,
 } from "../src/representative-setup";
+import { createHash } from "node:crypto";
 
 function currentDraft(): RepresentativeSetupSnapshot {
   return {
@@ -68,14 +70,6 @@ function currentDraft(): RepresentativeSetupSnapshot {
         mcp: "ask",
       },
     },
-    delegation: {
-      enabled: true,
-      naturalLanguageEnabled: true,
-      explicitComputeEnabled: true,
-      maxSteps: 5,
-      maxEstimatedTokens: 0,
-      knowledgeScope: "user_input_only",
-    },
   };
 }
 
@@ -115,14 +109,6 @@ function publishedSnapshot(skillPacks: unknown[] = []) {
         mcp: "ask",
       },
     },
-    delegation: {
-      enabled: true,
-      naturalLanguageEnabled: true,
-      explicitComputeEnabled: true,
-      maxSteps: 5,
-      maxEstimatedTokens: 0,
-      knowledgeScope: "user_input_only",
-    },
     knowledge: {
       identitySummary: "Published knowledge",
       faq: demoRepresentative.knowledgePack.faq,
@@ -134,6 +120,25 @@ function publishedSnapshot(skillPacks: unknown[] = []) {
 }
 
 describe("representative published runtime snapshot", () => {
+  it("loads immutable Skill instructions only when the stored digest matches", () => {
+    const instructions = "Read the declared CSV and verify every generated artifact.";
+    const instructionsSha256 = createHash("sha256").update(instructions).digest("hex");
+    expect(resolveVerifiedSkillInstructions({
+      instructions,
+      instructionsSha256,
+      resources: ["skill://builtin/spreadsheet-analysis/1.0.0"],
+    })).toEqual({
+      instructions,
+      instructionsSha256,
+      resources: ["skill://builtin/spreadsheet-analysis/1.0.0"],
+    });
+    expect(resolveVerifiedSkillInstructions({
+      instructions: `${instructions} tampered`,
+      instructionsSha256,
+      resources: ["skill://tampered"],
+    })).toEqual({});
+  });
+
   it("upgrades the retired multi-field handoff prompt without changing custom copy", () => {
     expect(normalizeRepresentativeHandoffPrompt(
       "阿江 的真人评估入口已经开启。请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。",
@@ -389,7 +394,7 @@ describe("representative published runtime snapshot", () => {
     expect(runtime.skillPacks).toEqual([]);
   });
 
-  it("drops executable or malformed skill declarations from an immutable version", () => {
+  it("drops executable escalation or malformed skill declarations from an immutable version", () => {
     const runtime = applyRepresentativeVersionSnapshot(
       currentDraft(),
       publishedSnapshot([
@@ -399,6 +404,42 @@ describe("representative published runtime snapshot", () => {
     );
 
     expect(runtime.skillPacks).toEqual([]);
+  });
+
+  it("allows a published executable Skill when the current pinned release is executable", () => {
+    const executable = {
+      ...demoRepresentative.skillPacks[0]!,
+      executesCode: true,
+      capabilityTags: [...demoRepresentative.skillPacks[0]!.capabilityTags],
+    };
+    const current = currentDraft();
+    current.skillPacks = [executable];
+    const runtime = applyRepresentativeVersionSnapshot(
+      current,
+      publishedSnapshot([executable]),
+    );
+
+    expect(runtime.skillPacks).toEqual([executable]);
+  });
+
+  it("keeps verified instructions on a trusted executable published Skill", () => {
+    const executable = demoRepresentative.skillPacks.find((skill) =>
+      skill.slug === "spreadsheet-analysis")!;
+    const current = currentDraft();
+    current.skillPacks = [{ ...executable }];
+    const runtime = applyRepresentativeVersionSnapshot(
+      current,
+      publishedSnapshot([{ ...executable }]),
+    );
+
+    expect(runtime.skillPacks).toEqual([
+      expect.objectContaining({
+        slug: "spreadsheet-analysis",
+        executesCode: true,
+        instructions: executable.instructions,
+        instructionsSha256: executable.instructionsSha256,
+      }),
+    ]);
   });
 
   it("filters a historical skill when the current workspace no longer authorizes it", () => {
@@ -541,70 +582,14 @@ describe("representative published runtime snapshot", () => {
   it("converts legacy published approval budgets into token limits", () => {
     const current = currentDraft();
     current.compute.autoApproveTokenLimit = 500;
-    current.delegation.maxEstimatedTokens = 0;
     const snapshot = publishedSnapshot();
     const legacyCompute = snapshot.compute as Record<string, unknown>;
     delete legacyCompute.autoApproveTokenLimit;
     legacyCompute.autoApproveBudgetCents = 2;
-    const legacyDelegation = snapshot.delegation as Record<string, unknown>;
-    delete legacyDelegation.maxEstimatedTokens;
-    legacyDelegation.maxCostCents = 3;
 
     const runtime = applyRepresentativeVersionSnapshot(current, snapshot);
 
     expect(runtime.compute.autoApproveTokenLimit).toBe(200);
-    expect(runtime.delegation.maxEstimatedTokens).toBe(300);
-  });
-
-  it("intersects delegation quotas and knowledge scope instead of expanding them", () => {
-    const current = currentDraft();
-    current.delegation = {
-      enabled: true,
-      naturalLanguageEnabled: false,
-      explicitComputeEnabled: true,
-      maxSteps: 2,
-      maxEstimatedTokens: 25,
-      knowledgeScope: "user_input_only",
-    };
-    const snapshot = publishedSnapshot();
-    snapshot.delegation = {
-      enabled: true,
-      naturalLanguageEnabled: true,
-      explicitComputeEnabled: true,
-      maxSteps: 5,
-      maxEstimatedTokens: 100,
-      knowledgeScope: "public_knowledge",
-    };
-
-    expect(applyRepresentativeVersionSnapshot(current, snapshot).delegation).toEqual({
-      enabled: true,
-      naturalLanguageEnabled: false,
-      explicitComputeEnabled: true,
-      maxSteps: 2,
-      maxEstimatedTokens: 25,
-      knowledgeScope: "user_input_only",
-    });
-
-    current.delegation.maxEstimatedTokens = 0;
-    expect(
-      applyRepresentativeVersionSnapshot(current, snapshot).delegation.maxEstimatedTokens,
-    ).toBe(100);
-    snapshot.delegation.maxEstimatedTokens = 0;
-    current.delegation.maxEstimatedTokens = 25;
-    expect(
-      applyRepresentativeVersionSnapshot(current, snapshot).delegation.maxEstimatedTokens,
-    ).toBe(25);
-  });
-
-  it("disables legacy delegation snapshots that do not pin a token ceiling", () => {
-    const snapshot = publishedSnapshot();
-    delete (snapshot.delegation as { maxEstimatedTokens?: number }).maxEstimatedTokens;
-
-    const runtime = applyRepresentativeVersionSnapshot(currentDraft(), snapshot);
-
-    expect(runtime.delegation.enabled).toBe(false);
-    expect(runtime.delegation.naturalLanguageEnabled).toBe(false);
-    expect(runtime.delegation.explicitComputeEnabled).toBe(false);
   });
 
   it("intersects published and current MCP grants and drops changed endpoints", () => {
@@ -1042,12 +1027,7 @@ describe("representative published runtime snapshot", () => {
     };
     const payload = buildComputePolicyAuditPayload({
       currentCompute: current.compute,
-      currentDelegation: current.delegation,
       nextCompute,
-      nextDelegation: {
-        ...current.delegation,
-        maxEstimatedTokens: 50,
-      },
       changedBy: "owner-1",
     });
 
@@ -1056,7 +1036,6 @@ describe("representative published runtime snapshot", () => {
       "compute.networkMode",
       "compute.networkAllowlist",
       "compute.capabilityModes.mcp",
-      "delegation.maxEstimatedTokens",
     ]);
     expect(payload?.values.networkAllowlistCount).toBe(1);
     expect(JSON.stringify(payload)).not.toContain("registry.example");
@@ -1065,9 +1044,7 @@ describe("representative published runtime snapshot", () => {
     expect(
       buildComputePolicyAuditPayload({
         currentCompute: current.compute,
-        currentDelegation: current.delegation,
         nextCompute: current.compute,
-        nextDelegation: current.delegation,
         changedBy: "owner-1",
       }),
     ).toBeNull();
@@ -1080,7 +1057,6 @@ describe("representative published runtime snapshot", () => {
     expect(publishingSource).toContain("install.status !== WorkspaceSkillInstallStatus.UPDATE_AVAILABLE");
     expect(setupSource).toContain("install.status !== WorkspaceSkillInstallStatus.UPDATE_AVAILABLE");
     expect(publishingSource).toContain("mcpBindings: representative.mcpBindings.flatMap");
-    expect(publishingSource).toContain("maxEstimatedTokens: representative.delegationMaxEstimatedTokens");
     expect(setupSource).toContain("type: EventType.COMPUTE_POLICY_CHANGED");
     expect(setupSource).toContain("if (computePolicyAuditPayload)");
   });

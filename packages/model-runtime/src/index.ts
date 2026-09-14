@@ -9,12 +9,6 @@ import { assembleRepresentativeReplyPrompt } from "./context";
 import { resolveModelRuntimeEnv, resolveProviderAttemptOrder } from "./config";
 import { generateOpenAIResponse } from "./openai";
 import {
-  buildNaturalLanguageComputePrompt,
-  inferDeterministicNaturalLanguageComputePlan,
-  isNaturalLanguageComputePlanGrounded,
-  parseNaturalLanguageComputePlan,
-} from "./compute-planner";
-import {
   buildSandboxTaskCompilerPrompt,
   compileSandboxTaskProposal,
   parseSandboxTaskCompilerProposal,
@@ -22,7 +16,6 @@ import {
 } from "./sandbox-task-compiler";
 import type {
   ModelProvider,
-  NaturalLanguageComputePlannerResult,
   RepresentativeReplyInput,
   RepresentativeReplyResult,
 } from "./types";
@@ -32,13 +25,9 @@ export * from "./context";
 export * from "./citations";
 export * from "./pricing";
 export * from "./types";
-export * from "./turn-planner";
-export * from "./turn-planner-v3";
-export * from "./turn-composer-v3";
-export * from "./turn-source-requirements-v3";
-export * from "./pending-clarification";
 export * from "./managed-document";
 export * from "./sandbox-task-compiler";
+export * from "./pi";
 
 export async function compileNaturalLanguageSandboxTask(params: {
   instruction: string;
@@ -91,57 +80,6 @@ export async function compileNaturalLanguageSandboxTask(params: {
     reason: "Sandbox task compiler failed strict generation or validation.",
     state: "ready",
   };
-}
-
-export async function planNaturalLanguageComputeRequest(params: {
-  userText: string;
-  maxSteps?: number;
-}): Promise<NaturalLanguageComputePlannerResult> {
-  const deterministic = inferDeterministicNaturalLanguageComputePlan(params.userText);
-  const env = resolveModelRuntimeEnv();
-  if (env.state !== "ready") {
-    return deterministic
-      ? { ok: true, plan: deterministic, source: "deterministic" }
-      : { ok: false, reason: `Model runtime unavailable: ${env.state}.`, state: env.state };
-  }
-
-  const attemptOrder = resolveProviderAttemptOrder(env);
-  if (!attemptOrder.length) {
-    return deterministic
-      ? { ok: true, plan: deterministic, source: "deterministic" }
-      : { ok: false, reason: "Model runtime has no credentialed providers available.", state: "missing_credentials" };
-  }
-
-  const prompt = buildNaturalLanguageComputePrompt(params.userText, params.maxSteps);
-  const failures: string[] = [];
-  for (const provider of attemptOrder) {
-    try {
-      const response = await generateProviderResponse(provider, env, prompt);
-      const plan = parseNaturalLanguageComputePlan(response.replyText);
-      const preferredPlan = plan?.kind === "clarification" && deterministic?.kind === "execution"
-        ? deterministic
-        : plan;
-      const groundedPlan = preferredPlan && isNaturalLanguageComputePlanGrounded(preferredPlan, params.userText)
-        ? preferredPlan
-        : null;
-      if (!groundedPlan && deterministic) {
-        return { ok: true, plan: deterministic, source: "deterministic" };
-      }
-      return {
-        ok: true,
-        plan: groundedPlan,
-        source: "model",
-        provider,
-        model: resolveProviderModel(provider, env),
-      };
-    } catch (error) {
-      failures.push(`${provider}: ${error instanceof Error ? error.message : "Compute planning failed."}`);
-    }
-  }
-
-  return deterministic
-    ? { ok: true, plan: deterministic, source: "deterministic" }
-    : { ok: false, reason: failures.join(" | "), state: "ready" };
 }
 
 export async function generateRepresentativeReply(

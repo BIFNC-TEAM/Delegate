@@ -446,6 +446,7 @@ describe("governed memory recall fence", () => {
         internalSource: expect.objectContaining({
           sourceKind: "PUBLIC_KNOWLEDGE",
           contentHash: immutableHash,
+          publicTitle: "Original title",
         }),
       }),
     ]);

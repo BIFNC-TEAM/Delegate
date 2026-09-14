@@ -1750,21 +1750,6 @@ describe("memory extraction production wiring", () => {
     expect(source).toContain('reasonCode: "source_message_edited"');
     expect(source).toContain('reasonCode: "source_message_redacted"');
 
-    const editControl = source.slice(
-      source.indexOf("export async function editConversationMessage"),
-      source.indexOf("function normalizeTelegramMessageEditGuard"),
-    );
-    expect(editControl.indexOf("if (providerMemoryControl)"))
-      .toBeLessThan(editControl.indexOf("DelegationMessageEditConflictError"));
-
-    const redactionControl = source.slice(
-      source.indexOf("export async function redactConversationMessage"),
-      source.indexOf("export async function markConversationRead"),
-    );
-    expect(redactionControl.indexOf("if (providerMemoryControl)"))
-      .toBeLessThan(
-        redactionControl.indexOf("DelegationMessageRedactionConflictError"),
-      );
   });
 
   it("uses the automatic policy ledger without a human approval shortcut", () => {

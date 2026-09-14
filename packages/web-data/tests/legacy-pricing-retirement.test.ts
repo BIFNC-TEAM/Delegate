@@ -27,7 +27,7 @@ describe("legacy fixed-tier pricing retirement", () => {
       readWorkspaceFile("packages/model-runtime/src/context.ts"),
       readWorkspaceFile("apps/bot/src/representative-config.ts"),
       readWorkspaceFile("apps/bot/src/telegram-bot-runtime.ts"),
-      readWorkspaceFile("apps/conversation-worker/src/processor.ts"),
+      readWorkspaceFile("apps/conversation-worker/src/processor-pi.ts"),
     ].join("\n");
 
     expect(sources).not.toContain("pricingPlans");

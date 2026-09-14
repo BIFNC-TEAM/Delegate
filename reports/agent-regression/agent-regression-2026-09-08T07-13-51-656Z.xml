@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="2" failures="1" skipped="0" time="111.147883"><testcase classname="agent.regression" name="BOX-05" time="84.746760"></testcase><testcase classname="agent.regression" name="BOX-06" time="26.379265"><failure message="ASSERTION_FAILED: repaired script result is incorrect"/></testcase></testsuite>

@@ -6,7 +6,6 @@ const envSchema = z.object({
   DELEGATE_MODEL_ENABLED: z.string().optional(),
   DELEGATE_MODEL_PROVIDER: z.string().optional(),
   DELEGATE_MODEL_FALLBACK_PROVIDER: z.string().optional(),
-  DELEGATE_MODEL_PLANNER_PROVIDER: z.string().optional(),
   DELEGATE_MODEL_TIMEOUT_MS: z.string().optional(),
   DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS: z.string().optional(),
   DELEGATE_MODEL_MAX_INPUT_TOKENS: z.string().optional(),
@@ -43,7 +42,6 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
   const enabled = parseBoolean(parsed.DELEGATE_MODEL_ENABLED, true);
   const provider = normalizeOptionalString(parsed.DELEGATE_MODEL_PROVIDER) ?? "agicto";
   const fallbackProvider = normalizeOptionalString(parsed.DELEGATE_MODEL_FALLBACK_PROVIDER);
-  const plannerProvider = normalizeOptionalString(parsed.DELEGATE_MODEL_PLANNER_PROVIDER);
   const timeoutMs = parseInteger(parsed.DELEGATE_MODEL_TIMEOUT_MS, 12_000);
   const documentTimeoutMs = parseInteger(
     parsed.DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS,
@@ -97,10 +95,8 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
   );
   const resolvedProvider = normalizeProvider(provider);
   const resolvedFallbackProvider = normalizeProvider(fallbackProvider);
-  const resolvedPlannerProvider = normalizeProvider(plannerProvider);
   const providerSupported = typeof resolvedProvider !== "undefined";
   const fallbackSupported = !fallbackProvider || typeof resolvedFallbackProvider !== "undefined";
-  const plannerSupported = !plannerProvider || typeof resolvedPlannerProvider !== "undefined";
   const agictoReady = Boolean(agictoApiKey);
   const openaiReady = Boolean(openaiApiKey);
   const bailianReady = Boolean(bailianApiKey);
@@ -111,7 +107,6 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
       enabled,
       provider,
       ...(fallbackProvider ? { fallbackProvider } : {}),
-      ...(plannerProvider ? { plannerProvider } : {}),
       state: "disabled",
       timeoutMs,
       documentTimeoutMs,
@@ -146,12 +141,11 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
     };
   }
 
-  if (!providerSupported || !fallbackSupported || !plannerSupported) {
+  if (!providerSupported || !fallbackSupported) {
     return {
       enabled,
       provider,
       ...(fallbackProvider ? { fallbackProvider } : {}),
-      ...(plannerProvider ? { plannerProvider } : {}),
       state: "unsupported_provider",
       timeoutMs,
       documentTimeoutMs,
@@ -204,7 +198,6 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
       enabled,
       provider,
       ...(fallbackProvider ? { fallbackProvider } : {}),
-      ...(plannerProvider ? { plannerProvider } : {}),
       state: "missing_credentials",
       timeoutMs,
       documentTimeoutMs,
@@ -239,7 +232,6 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
     enabled,
     provider,
     ...(fallbackProvider ? { fallbackProvider } : {}),
-    ...(plannerProvider ? { plannerProvider } : {}),
     state: "ready",
     timeoutMs,
     documentTimeoutMs,
@@ -292,19 +284,6 @@ export function resolveProviderAttemptOrder(env: ModelRuntimeEnv): ModelProvider
       anthropicReady: Boolean(env.anthropic.apiKey),
     }),
   );
-}
-
-export function resolvePlannerProviderAttemptOrder(env: ModelRuntimeEnv): ModelProvider[] {
-  if (env.state !== "ready") return [];
-  if (!env.plannerProvider) return resolveProviderAttemptOrder(env);
-  const provider = normalizeProvider(env.plannerProvider);
-  if (!provider) return [];
-  return isProviderReady(provider, {
-    agictoReady: Boolean(env.agicto.apiKey),
-    openaiReady: Boolean(env.openai.apiKey),
-    bailianReady: Boolean(env.bailian.apiKey),
-    anthropicReady: Boolean(env.anthropic.apiKey),
-  }) ? [provider] : [];
 }
 
 function normalizeOptionalString(value: string | undefined): string | undefined {

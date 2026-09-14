@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-08T09-39-33-579Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "controlled-dependencies-real-model",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-08T09:39:33.579Z",
+  "totalDurationMs": 0.2927909999999656,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 0,
+    "BLOCKED": 1,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "AGENT_TEST_BASE_URL_MISSING": 1
+  },
+  "moduleTimings": [],
+  "uncalledModules": [
+    "request",
+    "context",
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "response",
+    "wait"
+  ],
+  "slowestCases": [],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "ARCH-03",
+      "title": "UI/API FLOW-01",
+      "status": "BLOCKED",
+      "applicable": true,
+      "attempt": 1,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "AGENT_TEST_BASE_URL_MISSING: actual product API smoke was not started",
+      "evidence": [
+        "No product request was reported as passed."
+      ],
+      "spans": []
+    }
+  ]
+}

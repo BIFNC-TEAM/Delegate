@@ -3,11 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import type {
-  PublicConversationTaskProgress,
-  PublicTurnExecutionProgress,
-  PublicWebAnswerSourceDisclosure,
-} from "@delegate/web-data";
+import type { PublicWebAnswerSourceDisclosure } from "@delegate/web-data";
 
 import {
   removeRejectedPublicChatOptimisticMessage,
@@ -17,6 +13,9 @@ import {
   restoreRejectedPublicChatDraft,
   type PublicChatResponse,
 } from "./public-chat";
+import {
+  parsePublicChatText,
+} from "./public-chat-format";
 import {
   PUBLIC_WALLET_UPDATED_EVENT,
   type PublicWalletUpdatedDetail,
@@ -62,8 +61,6 @@ type PublicChatUsage = PublicChatResponse["usage"] & {
 type PublicChatHistory = {
   state: string;
   humanActive: boolean;
-  taskProgress?: PublicConversationTaskProgress | null;
-  turnProgress?: PublicTurnExecutionProgress | null;
   messages: Array<ChatMessage & { senderType: string; createdAt: string }>;
   usage: PublicChatUsage;
 };
@@ -148,11 +145,7 @@ export function RepresentativeChatPanel(props: {
   const [input, setInput] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [taskProgress, setTaskProgress] =
-    useState<PublicConversationTaskProgress | null>(null);
-  const [turnProgress, setTurnProgress] =
-    useState<PublicTurnExecutionProgress | null>(null);
-  const [progressClockMs, setProgressClockMs] = useState(0);
+  const [streamingReply, setStreamingReply] = useState("");
   const [usage, setUsage] = useState<PublicChatUsage>({
     freeRepliesUsed: 0,
     freeRepliesRemaining: props.freeReplyLimit,
@@ -310,17 +303,6 @@ export function RepresentativeChatPanel(props: {
   }, [profileRailCompact, profileRailOpen]);
 
   useEffect(() => {
-    if (turnProgress?.status !== "running") {
-      setProgressClockMs(0);
-      return;
-    }
-    const updateClock = () => setProgressClockMs(Date.now());
-    updateClock();
-    const timer = window.setInterval(updateClock, 1_000);
-    return () => window.clearInterval(timer);
-  }, [turnProgress?.id, turnProgress?.status]);
-
-  useEffect(() => {
     let cancelled = false;
     fetch(`/reps/${props.representativeSlug}/chat`)
       .then(async (response) => {
@@ -361,8 +343,6 @@ export function RepresentativeChatPanel(props: {
         }
         setConversationState(payload.state);
         setHumanActive(payload.humanActive);
-        setTaskProgress(payload.taskProgress ?? null);
-        setTurnProgress(payload.turnProgress ?? null);
         setUsage(payload.usage);
       })
       .catch((historyError) => {
@@ -406,14 +386,13 @@ export function RepresentativeChatPanel(props: {
         }
         setConversationState(payload.state);
         setHumanActive(payload.humanActive);
-        setTaskProgress(payload.taskProgress ?? null);
-        setTurnProgress(payload.turnProgress ?? null);
         setUsage(payload.usage);
+        if (payload.humanActive || payload.state === "human_active") {
+          settleActiveRun();
+        }
         const activeClientMessageId = activeClientMessageIdRef.current;
         if (
           activeClientMessageId
-          && !isPublicTaskStreamActive(payload.taskProgress ?? undefined)
-          && !isPublicTurnStreamActive(payload.turnProgress ?? undefined)
           && payload.messages.some((message) =>
             message.generationInputClientMessageId === activeClientMessageId
             && ["sent", "completed"].includes(message.status || ""),
@@ -670,6 +649,7 @@ export function RepresentativeChatPanel(props: {
     setInput("");
     activeClientMessageIdRef.current = userMessage.id;
     setBusy(true);
+    setStreamingReply("");
     setError(null);
     try {
       const requestBody = buildPublicChatRequestBody({
@@ -853,6 +833,7 @@ export function RepresentativeChatPanel(props: {
       }
       setHumanActive(false);
       setConversationState(payload.conversationState || "active");
+      settleActiveRun();
       if (payload.message) {
         appendAssistant({
           id: payload.message.id,
@@ -888,6 +869,7 @@ export function RepresentativeChatPanel(props: {
     let settled = false;
     const finish = () => {
       settled = true;
+      setStreamingReply("");
       source.close();
       if (activeRunTimeoutRef.current !== null) {
         window.clearTimeout(activeRunTimeoutRef.current);
@@ -909,8 +891,7 @@ export function RepresentativeChatPanel(props: {
         const snapshot = JSON.parse((event as MessageEvent<string>).data) as {
           status: string;
           errorMessage?: string;
-          taskProgress?: PublicConversationTaskProgress;
-          turnProgress?: PublicTurnExecutionProgress;
+          stream?: { sequence: number; text: string; updatedAt: string };
           message?: {
             id: string;
             text: string;
@@ -922,14 +903,9 @@ export function RepresentativeChatPanel(props: {
             sourceDisclosure?: PublicWebAnswerSourceDisclosure;
           };
         };
-        setTaskProgress(snapshot.taskProgress ?? null);
-        setTurnProgress(snapshot.turnProgress ?? null);
-        const taskStillRunning = isPublicTaskStreamActive(
-          snapshot.taskProgress,
-        );
-        const turnStillRunning = isPublicTurnStreamActive(
-          snapshot.turnProgress,
-        );
+        if (typeof snapshot.stream?.text === "string") {
+          setStreamingReply(snapshot.stream.text);
+        }
         if (["completed", "waiting_approval"].includes(snapshot.status) && snapshot.message) {
           appendAssistant({
             id: snapshot.message.id,
@@ -946,10 +922,10 @@ export function RepresentativeChatPanel(props: {
               : {}),
           });
           setConversationState("active");
-          if (!taskStillRunning && !turnStillRunning) finish();
+          finish();
         } else if (["failed", "canceled"].includes(snapshot.status)) {
           setError(snapshot.errorMessage || t.errorGeneric);
-          if (!taskStillRunning && !turnStillRunning) finish();
+          finish();
         }
       } catch {
         // A malformed event is transient; EventSource can continue receiving
@@ -971,6 +947,7 @@ export function RepresentativeChatPanel(props: {
       activeRunTimeoutRef.current = null;
     }
     activeClientMessageIdRef.current = null;
+    setStreamingReply("");
     setBusy(false);
   }
 
@@ -1045,7 +1022,6 @@ export function RepresentativeChatPanel(props: {
     humanActive,
     hydrating,
     locale: props.locale,
-    ...(taskProgress?.status ? { taskStatus: taskProgress.status } : {}),
   });
   const composerDescription = computeAssist
     ? "representative-compute-assist"
@@ -1057,21 +1033,6 @@ export function RepresentativeChatPanel(props: {
       : responder.kind === "error"
         ? t.failedReplyDetail
         : null;
-  const progressStepCount = taskProgress?.steps.length
-    ?? turnProgress?.steps.length
-    ?? 0;
-  const progressStepIndex = taskProgress
-    ? getCurrentPublicProgressStepIndex(taskProgress.steps)
-    : turnProgress
-      ? getCurrentPublicProgressStepIndex(turnProgress.steps)
-      : -1;
-  const taskProgressStep = taskProgress && progressStepIndex >= 0
-    ? taskProgress.steps[progressStepIndex]
-    : undefined;
-  const turnProgressStep = turnProgress && progressStepIndex >= 0
-    ? turnProgress.steps[progressStepIndex]
-    : undefined;
-
   return (
     <section className="representative-conversation-shell" id="chat">
       <div className={`representative-chat-first-grid${profileRailOpen ? " is-profile-open" : " is-profile-collapsed"}${profileRailReady ? "" : " is-profile-pending"}`}>
@@ -1181,7 +1142,7 @@ export function RepresentativeChatPanel(props: {
                   </div>
                   <div className="representative-message-content">
                     <div className="representative-message-bubble">
-                      <p>{message.text}</p>
+                      <PublicChatText text={message.text} />
                   {message.role === "assistant"
                     && message.sourceDisclosure
                     && !hasInlineAnswerSourceDisclosure(message.text)
@@ -1189,6 +1150,8 @@ export function RepresentativeChatPanel(props: {
                     <small className="representative-answer-source-disclosure">
                       {message.sourceDisclosure === "same_conversation"
                         ? t.sameConversationSourceDisclosure
+                        : message.sourceDisclosure === "authorized_knowledge_or_memory"
+                          ? t.authorizedKnowledgeOrMemorySourceDisclosure
                         : message.sourceDisclosure === "unverified_tool_fallback"
                           ? t.unverifiedToolFallbackSourceDisclosure
                           : t.generalModelSourceDisclosure}
@@ -1245,7 +1208,11 @@ export function RepresentativeChatPanel(props: {
                   <b aria-label={t.aiAvatarBadgeLabel}>AI</b>
                 </div>
                 <div className="representative-message-content">
-                  <div className="representative-message-bubble"><p>{t.thinking(governedContextEnabled)}</p></div>
+                  <div className="representative-message-bubble" aria-live="polite">
+                    <PublicChatText
+                      text={streamingReply || t.thinking(governedContextEnabled)}
+                    />
+                  </div>
                 </div>
               </article>
             ) : null}
@@ -1268,77 +1235,6 @@ export function RepresentativeChatPanel(props: {
           ) : null}
 
           <form className="representative-chat-form representative-chat-composer" onSubmit={handleSubmit}>
-            {taskProgress || turnProgress ? (
-              <details
-                aria-live="polite"
-                className="representative-progress-dock"
-              >
-                <summary>
-                  <i
-                    aria-hidden="true"
-                    className={`is-${taskProgressStep?.status ?? turnProgressStep?.status ?? taskProgress?.status ?? turnProgress?.status}`}
-                  />
-                  <span className="representative-progress-dock-current">
-                    <strong>
-                      {taskProgress
-                        ? taskProgressStep?.title || taskProgress.title
-                        : turnProgressStep
-                          ? formatPublicTurnStage(turnProgressStep.stage, props.locale)
-                          : turnProgress?.objective || t.turnProgressPreparing}
-                    </strong>
-                    <small>
-                      {taskProgress
-                        ? `${formatPublicTaskStatus(taskProgressStep?.status ?? taskProgress.status, props.locale)} · ${t.taskNextActor}: ${formatPublicTaskActor(taskProgress.nextActionBy, props.locale)}`
-                        : turnProgress
-                          ? `${formatPublicTaskStatus(turnProgressStep?.status ?? turnProgress.status, props.locale)} · ${formatPublicTurnElapsed(
-                              turnProgress.startedAt,
-                              progressClockMs || Date.parse(turnProgress.updatedAt),
-                              props.locale,
-                            )}`
-                          : null}
-                    </small>
-                  </span>
-                  {progressStepCount > 0 ? (
-                    <span className="representative-progress-dock-count">
-                      {t.progressStep(Math.max(1, progressStepIndex + 1), progressStepCount)}
-                    </span>
-                  ) : null}
-                  <span aria-hidden="true" className="representative-progress-dock-chevron">⌄</span>
-                </summary>
-                <div className="representative-progress-dock-panel">
-                  <header>
-                    <span>{taskProgress ? t.taskProgressLabel : t.turnProgressLabel}</span>
-                    <strong>
-                      {taskProgress?.title || turnProgress?.objective || t.turnProgressPreparing}
-                    </strong>
-                  </header>
-                  <ol>
-                    {taskProgress
-                      ? taskProgress.steps.map((step) => (
-                          <li className={`is-${step.status}`} key={step.id}>
-                            <span aria-hidden="true">{step.sequence}</span>
-                            <div>
-                              <strong>{step.title}</strong>
-                              <small>{formatPublicTaskStatus(step.status, props.locale)}</small>
-                            </div>
-                          </li>
-                        ))
-                      : turnProgress?.steps.map((step) => (
-                          <li className={`is-${step.status}`} key={step.id}>
-                            <span aria-hidden="true">{step.sequence}</span>
-                            <div>
-                              <strong>{formatPublicTurnStage(step.stage, props.locale)}</strong>
-                              <small>
-                                {formatPublicTaskStatus(step.status, props.locale)}
-                                {step.detail ? ` · ${t.turnPart(step.detail)}` : ""}
-                              </small>
-                            </div>
-                          </li>
-                        ))}
-                  </ol>
-                </div>
-              </details>
-            ) : null}
             <header className="representative-chat-composer-header">
               <span className="representative-chat-composer-recipient">{responder.kind === "human"
                 ? t.humanComposerContext
@@ -1612,156 +1508,51 @@ function getVisitorMessageStatus(status: string | undefined, locale: "zh" | "en"
   return labels[status as keyof typeof labels] ?? null;
 }
 
-function isPublicTaskStreamActive(
-  task: PublicConversationTaskProgress | undefined,
-) {
-  return Boolean(task && [
-    "draft",
-    "ready",
-    "queued",
-    "running",
-  ].includes(task.status));
-}
-
-function isPublicTurnStreamActive(
-  progress: PublicTurnExecutionProgress | undefined,
-) {
-  return progress?.status === "running";
-}
-
-function getCurrentPublicProgressStepIndex(
-  steps: Array<{ status: string }>,
-) {
-  if (steps.length === 0) return -1;
-  const activeIndex = steps.findIndex((step) => [
-    "running",
-    "awaiting_approval",
-    "waiting_approval",
-    "waiting_input",
-    "waiting_for_user",
-    "waiting_for_owner",
-    "blocked",
-    "failed",
-  ].includes(step.status));
-  if (activeIndex >= 0) return activeIndex;
-  const pendingIndex = steps.findIndex(
-    (step) => !["completed", "skipped"].includes(step.status),
+function PublicChatText({ text }: { text: string }) {
+  return (
+    <div className="representative-chat-rich-text">
+      {parsePublicChatText(text).map((block, blockIndex) => {
+        if (block.kind === "separator") {
+          return <hr aria-hidden="true" key={`separator-${blockIndex}`} />;
+        }
+        if (block.kind === "unordered-list" || block.kind === "ordered-list") {
+          const List = block.kind === "ordered-list" ? "ol" : "ul";
+          return (
+            <List key={`${block.kind}-${blockIndex}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${blockIndex}-${itemIndex}`}>
+                  {renderPublicChatInline(item, `${blockIndex}-${itemIndex}`)}
+                </li>
+              ))}
+            </List>
+          );
+        }
+        return (
+          <p
+            className={block.kind === "heading" ? "is-heading" : undefined}
+            key={`${block.kind}-${blockIndex}`}
+          >
+            {renderPublicChatInline(block.text, String(blockIndex))}
+          </p>
+        );
+      })}
+    </div>
   );
-  return pendingIndex >= 0 ? pendingIndex : steps.length - 1;
 }
 
-function formatPublicTaskStatus(status: string, locale: "zh" | "en") {
-  const zh = locale === "zh";
-  const labels: Record<string, string> = zh
-    ? {
-        draft: "正在准备",
-        clarifying: "等待补充",
-        ready: "准备执行",
-        awaiting_approval: "等待审批",
-        queued: "排队中",
-        running: "执行中",
-        waiting_for_user: "等待你补充",
-        waiting_for_owner: "等待负责人处理",
-        completed: "已完成",
-        failed: "未完成",
-        canceled: "已取消",
-        expired: "已过期",
-        waiting_approval: "等待审批",
-        waiting_input: "等待输入",
-        blocked: "已阻止",
-        skipped: "已跳过",
+function renderPublicChatInline(value: string, keyPrefix: string): ReactNode[] {
+  return value
+    .split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/gu)
+    .filter(Boolean)
+    .map((part, index) => {
+      if (part.startsWith("**") && part.endsWith("**")) {
+        return <strong key={`${keyPrefix}-strong-${index}`}>{part.slice(2, -2)}</strong>;
       }
-    : {
-        draft: "Preparing",
-        clarifying: "Needs details",
-        ready: "Ready",
-        awaiting_approval: "Awaiting approval",
-        queued: "Queued",
-        running: "Running",
-        waiting_for_user: "Waiting for you",
-        waiting_for_owner: "Waiting for owner",
-        completed: "Completed",
-        failed: "Not completed",
-        canceled: "Canceled",
-        expired: "Expired",
-        waiting_approval: "Awaiting approval",
-        waiting_input: "Waiting for input",
-        blocked: "Blocked",
-        skipped: "Skipped",
-      };
-  return labels[status] ?? status;
-}
-
-function formatPublicTurnStage(
-  stage: PublicTurnExecutionProgress["stage"],
-  locale: "zh" | "en",
-) {
-  const labels = locale === "zh"
-    ? {
-        planning: "理解需求并验证计划",
-        authorizing: "检查权限与服务额度",
-        generating: "生成文档正文",
-        validating: "校验内容完整性",
-        saving: "保存结果文件",
-        delivering: "发送结果",
-        completed: "已完成",
-        failed: "未完成",
+      if (part.startsWith("`") && part.endsWith("`")) {
+        return <code key={`${keyPrefix}-code-${index}`}>{part.slice(1, -1)}</code>;
       }
-    : {
-        planning: "Understand and validate the plan",
-        authorizing: "Check permission and service access",
-        generating: "Generate document content",
-        validating: "Validate content completeness",
-        saving: "Save the result file",
-        delivering: "Deliver the result",
-        completed: "Completed",
-        failed: "Not completed",
-      };
-  return labels[stage];
-}
-
-function formatPublicTurnElapsed(
-  startedAt: string,
-  clockMs: number,
-  locale: "zh" | "en",
-) {
-  const startedMs = Date.parse(startedAt);
-  const seconds = Number.isFinite(startedMs) && Number.isFinite(clockMs)
-    ? Math.max(0, Math.floor((clockMs - startedMs) / 1_000))
-    : 0;
-  return locale === "zh" ? `已用时 ${seconds} 秒` : `${seconds}s elapsed`;
-}
-
-function formatPublicTurnDeliverable(
-  deliverable: PublicTurnExecutionProgress["deliverables"][number],
-  locale: "zh" | "en",
-) {
-  const kindLabels: Record<string, string> = locale === "zh"
-    ? {
-        artifact: "文件",
-        message: "消息",
-        public_material: "公开资料",
-        service_request: "服务请求",
-        external_result: "外部结果",
-      }
-    : {
-        artifact: "File",
-        message: "Message",
-        public_material: "Public material",
-        service_request: "Service request",
-        external_result: "External result",
-      };
-  const kind = kindLabels[deliverable.kind] ?? deliverable.kind;
-  return deliverable.format ? `${kind} · ${deliverable.format}` : kind;
-}
-
-function formatPublicTaskActor(actor: string, locale: "zh" | "en") {
-  const zh = locale === "zh";
-  if (actor === "audience") return zh ? "你" : "You";
-  if (actor === "owner") return zh ? "负责人" : "Owner";
-  if (actor === "operator") return zh ? "人工接待" : "Operator";
-  if (actor === "system") return zh ? "系统" : "System";
-  return zh ? "对外代理" : "Digital representative";
+      return part;
+    });
 }
 
 function resolveResponderPresentation(input: {
@@ -1770,7 +1561,6 @@ function resolveResponderPresentation(input: {
   humanActive: boolean;
   hydrating: boolean;
   locale: "zh" | "en";
-  taskStatus?: string;
 }) {
   const zh = input.locale === "zh";
   const state = input.conversationState.trim().toLowerCase();
@@ -1782,19 +1572,6 @@ function resolveResponderPresentation(input: {
   }
   if (["needs_human", "waiting_human"].includes(state)) {
     return { kind: "waiting", label: zh ? "等待真人接入" : "Waiting for a human" };
-  }
-  if (
-    ["clarifying", "waiting_for_user"].includes(
-      input.taskStatus?.trim().toLowerCase() || "",
-    )
-  ) {
-    return { kind: "ai", label: zh ? "等待你补充" : "Waiting for your input" };
-  }
-  if (input.taskStatus?.trim().toLowerCase() === "awaiting_approval") {
-    return { kind: "ai", label: zh ? "等待负责人审批" : "Waiting for owner approval" };
-  }
-  if (input.taskStatus?.trim().toLowerCase() === "waiting_for_owner") {
-    return { kind: "ai", label: zh ? "等待负责人处理" : "Waiting for the owner" };
   }
   if (state === "unavailable") {
     return { kind: "offline", label: zh ? "连接暂时中断" : "Connection interrupted" };
@@ -2032,14 +1809,10 @@ const zhCopy = {
   humanAvatarLabel: (name: string) => `${name} 的真人头像`,
   aiAvatarBadgeLabel: "AI 对外代理",
   generalModelSourceDisclosure: "来源说明：本回答未引用已授权知识或记忆。",
+  authorizedKnowledgeOrMemorySourceDisclosure: "来源说明：本回答引用了已授权知识或记忆。",
   unverifiedToolFallbackSourceDisclosure: "来源说明：外部工具本轮未执行，以下内容由通用模型根据已有知识概括；未核验相关项目或仓库的最新内容，也未引用已授权知识或记忆。",
   sameConversationSourceDisclosure: "来源说明：根据本次对话记录整理。",
   artifactsLabel: "任务结果", downloadArtifact: "下载",
-  taskProgressLabel: "任务运行进度", taskNextActor: "下一步",
-  turnProgressLabel: "执行计划", turnProgressPreparing: "正在理解并规划你的请求",
-  progressStep: (current: number, total: number) => `第 ${current}/${total} 步`,
-  turnPlanDetails: "查看规划内容", turnGoalsLabel: "目标",
-  turnDeliverablesLabel: "交付物", turnPart: (value: string) => `第 ${value} 段`,
   addAttachments: "添加附件", attach: "附件", selectedAttachments: "待发送附件",
   removeAttachment: (name: string) => `移除附件 ${name}`,
   tooManyAttachments: "每条消息最多添加 5 个附件。",
@@ -2116,14 +1889,10 @@ const enCopy = {
   humanAvatarLabel: (name: string) => `${name}'s human avatar`,
   aiAvatarBadgeLabel: "AI digital representative",
   generalModelSourceDisclosure: "Source note: This answer did not cite authorized knowledge or memory.",
+  authorizedKnowledgeOrMemorySourceDisclosure: "Source note: This answer cited authorized knowledge or memory.",
   unverifiedToolFallbackSourceDisclosure: "Source note: The external tool was not run. This answer is a general-model summary, was not checked against the latest project or repository content, and did not cite authorized knowledge or memory.",
   sameConversationSourceDisclosure: "Source note: Based on this conversation's record.",
   artifactsLabel: "Task results", downloadArtifact: "Download",
-  taskProgressLabel: "Task progress", taskNextActor: "Next",
-  turnProgressLabel: "Execution plan", turnProgressPreparing: "Understanding and planning your request",
-  progressStep: (current: number, total: number) => `Step ${current}/${total}`,
-  turnPlanDetails: "View plan", turnGoalsLabel: "Goals",
-  turnDeliverablesLabel: "Deliverables", turnPart: (value: string) => `Part ${value}`,
   addAttachments: "Add attachments", attach: "Attach", selectedAttachments: "Selected attachments",
   removeAttachment: (name: string) => `Remove attachment ${name}`,
   tooManyAttachments: "You can attach up to 5 files per message.",

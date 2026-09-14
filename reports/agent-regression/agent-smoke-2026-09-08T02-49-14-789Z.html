@@ -1,0 +1,63 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-smoke-2026-09-08T02-49-14-789Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-smoke-2026-09-08T02-49-14-789Z
+
+- Suite: smoke
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T02:49:14.789Z
+- Total: 72.7 ms
+- Cases: 15/15; PASS 0, FAIL 14, BLOCKED 1, SKIP 0, REVIEW 0
+- Strict pass rate: 0.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 14 | 14/0/0/0 | 0 | 2.8 | 0.2 | 0.1 | 0.7 | 0.7 | N/A |
+| model/generate | 14 | 0/14/0/0 | 13 | 60.7 | 4.3 | 1.5 | 37.1 | 37.1 | N/A |
+| request/agent_run | 14 | 0/14/0/0 | 0 | 65.5 | 4.7 | 1.8 | 38.4 | 38.4 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| skill/未调用 | — | — | — | — | — | — | — | — | N/A |
+| sandbox/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| response/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BASIC-01 | FAIL | N/A | 38.5 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer |
+| BASIC-02 | FAIL | N/A | 2.5 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; configured name missing |
+| KB-01 | FAIL | N/A | 2.1 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; knowledge was not retrieved; 8-day policy missing; current document citation missing |
+| KB-03 | FAIL | N/A | 1.8 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; knowledge miss was not checked |
+| WEB-01 | FAIL | N/A | 3.8 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; web/weather adapter was not called; weather facts missing; weather channel/provider missing |
+| SKILL-02 | FAIL | N/A | 1.8 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; spreadsheet Skill was not loaded; spreadsheet was not actually executed; city ranking values missing |
+| BOX-01 | FAIL | N/A | 2.0 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; sandbox was not executed; square-sum result missing |
+| BOX-02 | FAIL | N/A | 1.7 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; sandbox was not executed; readable CSV artifact missing; city totals missing |
+| MCP-01 | FAIL | N/A | 6.2 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; MCP order arguments incorrect; order state missing |
+| MCP-05 | FAIL | N/A | 2.0 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; ticket MCP arguments incorrect; expected one ticket effect, got 0; actual ticket id missing |
+| HUMAN-01 | FAIL | N/A | 1.4 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; handoff was not connected; transfer id missing |
+| HUMAN-03 | FAIL | N/A | 0.8 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; handoff was not queued |
+| FLOW-01 | FAIL | N/A | 0.7 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; metric policy was not retrieved; orders were not queried through MCP; analysis Skill was not loaded; analysis was not run in sandbox; FLOW CSV artifact missing; FLOW totals missing; metric source evidence missing |
+| CHAT-04 | FAIL | N/A | 0.7 | 1 | 0 | ASSERTION_FAILED: expected cancelled, got failed |
+| ARCH-03 | BLOCKED | N/A | N/A | 0 | 0 | AGENT_TEST_BASE_URL_MISSING: actual UI/API smoke was not started |
+
+## Slowest cases
+
+- BASIC-01: 38.5 ms (request/agent_run)
+- MCP-01: 6.2 ms (request/agent_run)
+- WEB-01: 3.8 ms (request/agent_run)
+- BASIC-02: 2.5 ms (request/agent_run)
+- KB-01: 2.1 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

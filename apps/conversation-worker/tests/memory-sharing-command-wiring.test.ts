@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const processor = readFileSync(
-  new URL("../src/processor.ts", import.meta.url),
+  new URL("../src/processor-pi.ts", import.meta.url),
   "utf8",
 );
 const conversationPlatform = readFileSync(
@@ -16,23 +16,22 @@ const conversationPlatform = readFileSync(
 
 describe("Matrix cross-channel memory command wiring", () => {
   it("issues and consumes a one-time challenge before model generation", () => {
-    const commandBlock = processor.slice(
-      processor.indexOf("const sharingCommand ="),
-      processor.indexOf("if (item.delegationTerminalRecovery)"),
-    );
+    const commandBlock = processor;
     expect(commandBlock).toContain("resolveDeterministicContactMemorySharingCommand");
     expect(commandBlock).toContain("createContactMemorySharingChallenge");
     expect(commandBlock).toContain("readContactMemorySharingChallengeToken");
     expect(commandBlock).toContain("grantContactMemorySharingConsent");
     expect(commandBlock).toContain("revokeContactMemorySharingConsent");
     expect(commandBlock).toContain("contactMemorySharingConsentContractVersion");
-    expect(commandBlock).toContain("sourceEventKey: `matrix:${item.inputMessageId}`");
-    expect(commandBlock).toContain('sharingCommand === "INVALID_CONFIRM"');
+    expect(commandBlock).toContain("sourceEventKey: `matrix:${input.item.inputMessageId}`");
+    expect(commandBlock).toContain('input.command === "INVALID_CONFIRM"');
     expect(commandBlock).toContain('sourceChannel: "MATRIX"');
     expect(commandBlock).toContain("completeInlineGenerationRun");
     expect(commandBlock).toContain("countUsage: false");
     expect(commandBlock).toContain("deliverGenerationOutput");
     expect(commandBlock).not.toContain("generateRepresentativeReply");
+    expect(commandBlock.indexOf("const sharingCommand ="))
+      .toBeLessThan(commandBlock.indexOf("return await processPiConversationTurn"));
   });
 
   it("carries only provider-verified source coordinates into the worker claim", () => {

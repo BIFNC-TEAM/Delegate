@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="1" failures="1" skipped="0" time="113.179861"><testcase classname="agent.regression" name="CHAT-02" time="113.179335"><failure message="PRODUCT_ATTACHMENT_FLOW_FAILED: product attachment response has no shenzhen-summary.csv"/></testcase></testsuite>

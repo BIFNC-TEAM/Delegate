@@ -4,8 +4,10 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { demoRepresentative } from "@delegate/domain";
-import { generateRepresentativeReply } from "@delegate/model-runtime";
-import { createConversationPlan, renderReplyPreview, resolveConversationSubagent } from "@delegate/runtime";
+import {
+  createPiModelBindingFromEnv,
+  delegatePiAgentRuntime,
+} from "@delegate/model-runtime";
 import {
   acceptInboundConversationMessage,
   AgentWalletReconciliationError,
@@ -278,36 +280,40 @@ export async function POST(
       freeRepliesUsed: 0,
       freeReplyLimit: representative.contract.freeReplyLimit,
     });
-    const plan = createConversationPlan({
-      text: body.message,
-      channel: "private_chat",
-      representative,
-      usage,
+    const modelBinding = createPiModelBindingFromEnv();
+    if (!modelBinding.ok) {
+      return privateJson({
+        error: modelBinding.reason,
+        code: "pi_model_unavailable",
+      }, 503);
+    }
+    const piResult = await delegatePiAgentRuntime.run({
+      runId: `demo-${principal.audienceId}-${Date.now()}`,
+      sessionId: principal.audienceId,
+      userText: body.message,
+      representative: {
+        id: representative.id,
+        name: representative.name,
+        role: representative.tagline,
+        instructions: `语气：${representative.tone}`,
+        capabilities: ["普通问答"],
+      },
+      model: modelBinding.binding,
+      timeoutMs: 30_000,
+      maxSteps: 2,
     });
-    const subagent = resolveConversationSubagent(plan);
-    let replyText = renderReplyPreview(representative, plan);
-    let sourceDisclosure: "general_model" | undefined;
-    if (plan.disposition === "answer") {
-      const generated = await generateRepresentativeReply({
-        representative,
-        plan,
-        subagent,
-        userText: body.message,
-        recalled: [],
-        recentTurns: [],
-        collectorState: null,
-      });
-      if (generated.ok) {
-        replyText = generated.replyText;
-        sourceDisclosure = "general_model";
-      }
+    if (piResult.status === "failed" || piResult.status === "cancelled") {
+      return privateJson({
+        error: piResult.error ?? "Pi Agent did not complete the response.",
+        code: piResult.status === "cancelled" ? "pi_run_cancelled" : "pi_run_failed",
+      }, piResult.status === "cancelled" ? 499 : 502);
     }
     const response = NextResponse.json({
       status: "completed",
       reply: {
         role: "assistant",
-        text: replyText,
-        ...(sourceDisclosure ? { sourceDisclosure } : {}),
+        text: piResult.text,
+        sourceDisclosure: "general_model",
       },
       tier: resolvePublicChatTier(usage),
       usage,

@@ -1,4 +1,5 @@
 import type { Representative } from "./schema";
+import { builtinSpreadsheetAnalysisSkill } from "./builtin-skills";
 
 export const demoRepresentative: Representative = {
   id: "rep_lin_founder",
@@ -33,6 +34,7 @@ export const demoRepresentative: Representative = {
       enabled: true,
       installStatus: "installed",
     },
+    builtinSpreadsheetAnalysisSkill,
     {
       id: "pack_clawhub_qualify",
       slug: "lead-qualification-pro",

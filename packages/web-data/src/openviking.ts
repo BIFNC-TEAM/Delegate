@@ -1017,6 +1017,7 @@ export type RepresentativeRecallItem = OpenVikingRecallItem & {
     projectionItemId?: string;
     publicKnowledgeProjectionId?: string;
     publicResourceKey?: string;
+    publicTitle?: string;
     memoryUseItemId?: string;
   };
 };
@@ -2845,6 +2846,7 @@ function hydratePublicKnowledgeRecall(
         contentHash: grant.contentHash,
         publicKnowledgeProjectionId: grant.publicKnowledgeProjectionId,
         publicResourceKey: grant.resourceKey,
+        publicTitle: grant.title,
         memoryUseItemId,
       },
     },

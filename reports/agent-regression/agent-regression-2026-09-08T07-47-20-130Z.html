@@ -1,0 +1,52 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T07-47-20-130Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T07-47-20-130Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T07:47:20.130Z
+- Total: 202126.4 ms
+- Cases: 4/4; PASS 0, FAIL 4, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 0.00%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 4 | 4/0/0/0 | 0 | 3.6 | 0.9 | 0.8 | 1.4 | 1.4 | N/A |
+| model/generate | 18 | 14/4/0/0 | 0 | 201664.4 | 11203.6 | 5060.3 | 30010.5 | 30010.5 | N/A |
+| request/agent_run | 4 | 1/3/0/0 | 0 | 202072.7 | 50518.2 | 37959.9 | 79688.3 | 79688.3 | N/A |
+| response/stream | 3 | 0/3/0/0 | 0 | 145403.8 | 48467.9 | 35609.9 | 77942.5 | 77942.5 | N/A |
+| sandbox/execute | 5 | 2/3/0/0 | 0 | 378.0 | 75.6 | 89.4 | 102.9 | 102.9 | N/A |
+| skill/discover | 3 | 3/0/0/0 | 0 | 0.2 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| skill/load | 2 | 2/0/0/0 | 0 | 0.2 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| FLOW-04 | FAIL | 18803.8 | 54414.1 | 7 | 5 | ASSERTION_FAILED: expected completed, got failed; empty answer; attachment fallback analysis failed; fallback data source was not disclosed as attachment |
+| FLOW-05 | FAIL | 6108.4 | 37960.0 | 2 | 1 | ASSERTION_FAILED: expected completed, got failed; empty answer; report workflow capabilities were incomplete; report CSV artifact missing; Markdown report artifact missing; report and CSV facts are inconsistent |
+| FLOW-07 | FAIL | 1745.8 | 79688.8 | 8 | 7 | ASSERTION_FAILED: expected completed, got partial; CSV success plus chart failure path was not exercised; partial completion was not accurately disclosed |
+| FLOW-08 | FAIL | N/A | 30010.8 | 1 | 0 | ASSERTION_FAILED: expected completed, got failed; empty answer; conditional metric was not computed; high-threshold branch did not create exactly one ticket; conditional write result missing |
+
+## Slowest cases
+
+- FLOW-07: 79688.8 ms (request/agent_run)
+- FLOW-04: 54414.1 ms (request/agent_run)
+- FLOW-05: 37960.0 ms (request/agent_run)
+- FLOW-08: 30010.8 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

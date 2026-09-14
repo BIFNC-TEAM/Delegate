@@ -41,7 +41,6 @@ type TelegramMessageEditErrorCode =
   | "telegram_edit_target_not_found"
   | "telegram_edit_scope_invalid"
   | "telegram_edit_message_redacted"
-  | "telegram_edit_delegation_conflict"
   | "telegram_edit_processing_failed";
 
 export class TelegramMessageEditNotDurableError extends Error {

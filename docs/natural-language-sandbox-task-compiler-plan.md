@@ -195,7 +195,9 @@ USER FLOW COVERAGE
 
 1. Land parser, safety validator, and tests.
 2. Publish V3 `compute.task@1` only when representative natural-language delegation is enabled; keep `compute.exec@1` for explicit commands.
-3. Activate through existing `TURN_PLAN_V3_MODE=active_governed` and per-representative `delegation.naturalLanguageEnabled`.
+3. Historical activation used `TURN_PLAN_V3_MODE=active_governed`; the current
+   production path exposes sandbox execution only through the Pi capability
+   adapter and per-representative `delegation.naturalLanguageEnabled`.
 4. Keep `exec=ask` for the first canary representative.
 5. Run prompt evals and one Tencent synthetic task after explicit approval.
 6. Only then consider `exec=allow` for narrowly scoped representatives.

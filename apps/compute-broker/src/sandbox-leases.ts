@@ -664,10 +664,53 @@ async function createProviderForLease(providerKind: "docker" | "daytona" | "tenc
 export function createConfiguredProviderRegistry() {
   return new SandboxProviderRegistry({
     legacyProvider: computeBrokerConfig.sandboxProvider,
+    allowLocalDocker: computeBrokerConfig.nodeEnv !== "production",
     sandboxLifecycle: computeBrokerConfig.sandboxLifecycle,
     daytona: computeBrokerConfig.daytona,
     tencent: computeBrokerConfig.tencent,
   });
+}
+
+export async function writeSandboxLeaseInput(input: {
+  leaseId: string;
+  sessionId: string;
+  path: string;
+  content: Buffer;
+  timeoutMs?: number | undefined;
+  providerFactory?: SandboxProviderFactory | undefined;
+}) {
+  const lease = await prisma.sandboxLease.findFirst({
+    where: {
+      id: input.leaseId,
+      status: "RUNNING",
+      computeSessions: { some: { id: input.sessionId } },
+    },
+    include: {
+      sandboxIdentity: {
+        select: { representativeId: true, contactId: true },
+      },
+    },
+  });
+  if (!lease) {
+    throw new SandboxProviderError("RUNTIME_NOT_FOUND", false);
+  }
+  const providerKind = mapSandboxProviderFromDb(lease.provider);
+  const provider = input.providerFactory
+    ? await input.providerFactory(providerKind)
+    : await createProviderForLease(providerKind);
+  if (!provider.writeInput) throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
+  const result = await provider.writeInput({
+    lease: buildProviderLeaseFromRecord(lease),
+    sessionId: input.sessionId,
+    path: input.path,
+    content: input.content,
+    ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+  });
+  await prisma.sandboxLease.updateMany({
+    where: { id: lease.id, status: "RUNNING" },
+    data: { lastUsedAt: new Date() },
+  });
+  return { ...result, provider: providerKind };
 }
 
 function buildProviderLeaseFromRecord(lease: SandboxLeaseWithIdentity): SandboxProviderLease {

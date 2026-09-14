@@ -11,7 +11,6 @@ import {
   renderGroundedKnowledgeFallback,
   renderGroundedKnowledgeFallbackWithTrace,
   resolveModelRuntimeEnv,
-  resolvePlannerProviderAttemptOrder,
   resolveProviderAttemptOrder,
   type RepresentativeRecallItem,
 } from "../src/index";
@@ -805,20 +804,6 @@ describe("resolveModelRuntimeEnv", () => {
     });
     expect(env.openai.apiKey).toBeUndefined();
     expect(resolveProviderAttemptOrder(env)).toEqual(["agicto", "bailian"]);
-  });
-
-  it("pins structured planning to its dedicated provider without changing reply order", () => {
-    const env = resolveModelRuntimeEnv({
-      DELEGATE_MODEL_ENABLED: "true",
-      DELEGATE_MODEL_PROVIDER: "bailian",
-      DELEGATE_MODEL_FALLBACK_PROVIDER: "openai",
-      DELEGATE_MODEL_PLANNER_PROVIDER: "openai",
-      DELEGATE_BAILIAN_API_KEY: "dashscope-key",
-      OPENAI_API_KEY: "openai-key",
-    });
-
-    expect(resolveProviderAttemptOrder(env)).toEqual(["bailian", "openai"]);
-    expect(resolvePlannerProviderAttemptOrder(env)).toEqual(["openai"]);
   });
 
   it("calculates internal model cost from per-provider pricing", () => {

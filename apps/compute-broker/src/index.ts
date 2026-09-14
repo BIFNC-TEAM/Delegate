@@ -19,8 +19,6 @@ import {
   resolveApproval,
 } from "./executions";
 export { syncRepresentativeMcpToolDefinitions } from "./mcp-tool-definitions";
-export { enqueueActionExecutionAttempt } from "./action-execution-attempts";
-export { persistVerifiedActionResult } from "./verified-action-results";
 import { getNativeComputerUsePreflight } from "./native-browser";
 import { toPublicBrokerError } from "./public-error";
 import {
@@ -33,6 +31,7 @@ import { startSandboxLeaseCleanupLoop } from "./sandbox-leases";
 import { getSandboxMetricSnapshot } from "./sandbox-metrics";
 import { startSandboxProviderOperationQuarantineLoop } from "./sandbox-provider-operations";
 import { getSandboxReadinessSnapshot } from "./sandbox-readiness";
+import { uploadComputeSessionInput } from "./session-inputs";
 
 const server = createServer(async (request, response) => {
   try {
@@ -104,6 +103,18 @@ const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const result = await executeTool(sessionId, body);
       return sendJson(response, 200, result);
+    }
+
+    if (
+      method === "POST" &&
+      segments[0] === "internal" &&
+      segments[1] === "compute" &&
+      segments[2] === "sessions" &&
+      segments[3] &&
+      segments[4] === "inputs"
+    ) {
+      const result = await uploadComputeSessionInput(segments[3], await readJson(request));
+      return sendJson(response, 201, result);
     }
 
     if (
@@ -246,9 +257,13 @@ function isAuthorized(authorizationHeader: string | undefined): boolean {
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
 
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > 15 * 1024 * 1024) throw new Error("request_body_too_large");
+    chunks.push(buffer);
   }
 
   if (!chunks.length) {

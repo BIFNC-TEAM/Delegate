@@ -5,7 +5,6 @@ import {
   scheduleApprovalExpiration,
   shouldDispatchWorkflowViaTemporalOutbox,
 } from "@delegate/workflows";
-import { capabilityEffectV3Schema } from "@delegate/runtime";
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { SessionError } from "./session-error";
@@ -21,8 +20,6 @@ type ApprovalRequestContext = {
   contactId: string | null;
   conversationId: string | null;
   generationRunId: string | null;
-  delegationTaskId: string | null;
-  delegationTaskStepId: string | null;
   sessionId: string | null;
   toolExecutionId: string | null;
   subagentId: string | null;
@@ -38,8 +35,6 @@ type ApprovalRequestParams = {
   contactId?: string | null;
   conversationId?: string | null;
   generationRunId?: string | null;
-  delegationTaskId?: string | null;
-  delegationTaskStepId?: string | null;
   sessionId: string;
   executionId: string;
   subagentId: string;
@@ -65,16 +60,6 @@ export async function createApprovalRequestForExecution(
         return existingApproval;
       }
 
-      const execution = await tx.toolExecution.findUnique({
-        where: { id: params.executionId },
-        select: {
-          planAction: { select: { inputSnapshot: true } },
-        },
-      });
-      const maximumApprovedEffect = readPlanActionEffect(
-        execution?.planAction?.inputSnapshot,
-      );
-
       const scheduledAt = scheduleApprovalExpiration(
         new Date(),
         approvalTimeoutMinutes,
@@ -85,8 +70,6 @@ export async function createApprovalRequestForExecution(
           contactId: params.contactId ?? null,
           conversationId: params.conversationId ?? null,
           generationRunId: params.generationRunId ?? null,
-          delegationTaskId: params.delegationTaskId ?? null,
-          delegationTaskStepId: params.delegationTaskStepId ?? null,
           sessionId: params.sessionId,
           toolExecutionId: params.executionId,
           subagentId: params.subagentId,
@@ -97,9 +80,7 @@ export async function createApprovalRequestForExecution(
           expiresAt: scheduledAt,
           requestPayloadHash: params.requestPayloadHash ?? null,
           matchedPolicyRuleId: params.matchedPolicyRuleId ?? null,
-          maximumApprovedEffect: maximumApprovedEffect
-            ? maximumApprovedEffect as Prisma.InputJsonObject
-            : Prisma.JsonNull,
+          maximumApprovedEffect: Prisma.JsonNull,
         },
       });
 
@@ -115,12 +96,9 @@ export async function createApprovalRequestForExecution(
           representativeId: params.representativeId,
           contactId: params.contactId ?? null,
           conversationId: params.conversationId ?? null,
-          delegationTaskId: params.delegationTaskId ?? null,
           type: "APPROVAL_REQUESTED",
           payload: {
             approvalRequestId: approval.id,
-            delegationTaskId: params.delegationTaskId ?? null,
-            delegationTaskStepId: params.delegationTaskStepId ?? null,
             executionId: params.executionId,
             subagentId: params.subagentId,
             reason: params.reason,
@@ -152,7 +130,6 @@ export async function createApprovalRequestForExecution(
             representativeId: params.representativeId,
             contactId: params.contactId ?? null,
             conversationId: params.conversationId ?? null,
-            delegationTaskId: params.delegationTaskId ?? null,
             approvalRequestId: approval.id,
             subagentId: params.subagentId,
             kind: "APPROVAL_EXPIRATION",
@@ -233,14 +210,6 @@ export async function createApprovalRequestForExecution(
   }
 }
 
-function readPlanActionEffect(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const parsed = capabilityEffectV3Schema.safeParse(
-    (value as Record<string, unknown>)["effect"],
-  );
-  return parsed.success ? parsed.data : null;
-}
-
 function assertApprovalRequestContext(
   approval: ApprovalRequestContext,
   params: ApprovalRequestParams,
@@ -250,8 +219,6 @@ function assertApprovalRequestContext(
     approval.contactId === (params.contactId ?? null) &&
     approval.conversationId === (params.conversationId ?? null) &&
     approval.generationRunId === (params.generationRunId ?? null) &&
-    approval.delegationTaskId === (params.delegationTaskId ?? null) &&
-    approval.delegationTaskStepId === (params.delegationTaskStepId ?? null) &&
     approval.sessionId === params.sessionId &&
     approval.toolExecutionId === params.executionId &&
     approval.subagentId === params.subagentId &&

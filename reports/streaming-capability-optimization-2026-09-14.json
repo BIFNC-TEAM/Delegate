@@ -1,0 +1,67 @@
+{
+  "scope": "targeted public representative capability-response streaming",
+  "date": "2026-09-14",
+  "route": "/reps/founder-representative-2?lang=zh",
+  "model": "qwen-plus",
+  "before": {
+    "runId": "cmu0vlsxa05twpa0n40n8lwbv",
+    "prompt": "我能让你做些什么？",
+    "modelCalls": 3,
+    "toolCalls": 1,
+    "firstModelTextMs": 1253.549,
+    "agentTotalMs": 10921.737,
+    "workerWallMs": 11007,
+    "streamContainedSupersededDraft": true
+  },
+  "after": {
+    "runId": "cmu0wg0270077ul0nbtthi43f",
+    "prompt": "我能让你做些什么？",
+    "modelCalls": 1,
+    "toolCalls": 0,
+    "firstModelTextMs": 1199.484,
+    "agentTotalMs": 4169.104,
+    "workerWallMs": 4336,
+    "streamMatchesTerminalOutput": true
+  },
+  "change": {
+    "modelCalls": -2,
+    "modelCallsPercent": -66.67,
+    "agentTotalMs": -6752.633,
+    "agentTotalPercent": -61.83,
+    "workerWallMs": -6671,
+    "workerWallPercent": -60.61,
+    "firstModelTextMs": -54.065,
+    "firstModelTextPercent": -4.31
+  },
+  "browserEvidence": {
+    "runId": "cmu0wixf200bgul0nwbtsxt3f",
+    "prompt": "请简短介绍你能提供哪些帮助？",
+    "firstVisibleAnswerMs": 1851,
+    "terminalVisibleMs": 3901,
+    "visibleAnswerUpdates": 13,
+    "typicalUpdateIntervalMs": "150-200",
+    "streamMatchesTerminalOutput": true,
+    "screenshot": "reports/streaming-capability-after.png",
+    "timeline": [
+      { "atMs": 51, "kind": "waiting_copy", "characters": 23 },
+      { "atMs": 1851, "kind": "answer", "characters": 2 },
+      { "atMs": 2002, "kind": "answer", "characters": 6 },
+      { "atMs": 2201, "kind": "answer", "characters": 23 },
+      { "atMs": 2351, "kind": "answer", "characters": 32 },
+      { "atMs": 2501, "kind": "answer", "characters": 57 },
+      { "atMs": 2651, "kind": "answer", "characters": 67 },
+      { "atMs": 2801, "kind": "answer", "characters": 92 },
+      { "atMs": 3002, "kind": "answer", "characters": 102 },
+      { "atMs": 3151, "kind": "answer", "characters": 119 },
+      { "atMs": 3301, "kind": "answer", "characters": 126 },
+      { "atMs": 3451, "kind": "answer", "characters": 144 },
+      { "atMs": 3601, "kind": "answer", "characters": 158 },
+      { "atMs": 3901, "kind": "terminal_answer", "characters": 178 }
+    ]
+  },
+  "notes": [
+    "This is a targeted same-path comparison, not the deferred full 90-case performance comparison.",
+    "The initial fixed waiting message is excluded from first valid answer timing.",
+    "Knowledge retrieval remains mandatory for representative-domain and organization-specific factual questions."
+  ]
+}

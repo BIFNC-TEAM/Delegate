@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { inferDeterministicNaturalLanguageComputePlan } from "../../../packages/model-runtime/src/compute-planner";
+import { parsePublicChatText } from "../app/reps/[slug]/public-chat-format";
 
 const panelSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/representative-chat-panel.tsx"),
@@ -27,6 +27,33 @@ const anthropicSource = readFileSync(
 );
 
 describe("public chat reply resilience", () => {
+  it("renders safe structured chat text instead of exposing Markdown markers", () => {
+    const text = [
+      "**等温线**是气温相等各点的连线。",
+      "",
+      "---",
+      "",
+      "- 同一条线上气温相同",
+      "- 越密集表示温差越大",
+      "",
+      "<script>alert(1)</script>",
+    ].join("\n");
+
+    expect(parsePublicChatText(text)).toEqual([
+      { kind: "paragraph", text: "**等温线**是气温相等各点的连线。" },
+      { kind: "separator" },
+      {
+        kind: "unordered-list",
+        items: ["同一条线上气温相同", "越密集表示温差越大"],
+      },
+      { kind: "paragraph", text: "<script>alert(1)</script>" },
+    ]);
+    expect(panelSource).not.toContain("<p>{message.text}</p>");
+    expect(panelSource).toContain("<PublicChatText text={message.text} />");
+    expect(panelSource).toContain("renderPublicChatInline");
+    expect(panelSource).not.toContain("dangerouslySetInnerHTML");
+  });
+
   it("keeps the run stream alive beyond the model timeout and emits heartbeats", () => {
     expect(runEventsSource).toContain("RUN_STREAM_WINDOW_MS = 300_000");
     expect(runEventsSource).toContain(": keep-alive");
@@ -44,80 +71,34 @@ describe("public chat reply resilience", () => {
       "message.generationInputClientMessageId === activeClientMessageId",
     );
     expect(panelSource).toContain("settleActiveRun()");
+    expect(panelSource).not.toContain("isPublicTaskStreamActive");
+    expect(panelSource).not.toContain("isPublicTurnStreamActive");
+  });
+
+  it("uses the Pi GenerationRun terminal state as the stream authority", () => {
+    expect(runEventsSource).toContain(
+      "if (terminalStates.has(snapshot.status)) break;",
+    );
+    expect(runEventsSource).not.toContain("continuouslyStreamingTaskStates");
+    expect(runEventsSource).not.toContain("snapshot.taskProgress");
+    expect(runEventsSource).not.toContain("snapshot.turnProgress");
+  });
+
+  it("settles the Pi run subscription from persisted terminal snapshots", () => {
     expect(panelSource).toContain(
-      "!isPublicTaskStreamActive(payload.taskProgress ?? undefined)",
+      '["completed", "waiting_approval"].includes(snapshot.status)',
     );
     expect(panelSource).toContain(
-      "!isPublicTurnStreamActive(payload.turnProgress ?? undefined)",
+      '["failed", "canceled"].includes(snapshot.status)',
     );
+    expect(panelSource).toContain("setStreamingReply(snapshot.stream.text)");
   });
 
-  it("keeps live multi-step tasks visible instead of stopping at the first run result", () => {
-    expect(runEventsSource).toContain("continuouslyStreamingTaskStates");
-    expect(runEventsSource).toContain("snapshot.taskProgress");
-    expect(panelSource).toContain("representative-progress-dock");
-    expect(panelSource).toContain("taskProgress.steps.map");
-    expect(panelSource).toContain("setTaskProgress(payload.taskProgress ?? null)");
-  });
-
-  it("streams and renders persisted TurnPlan execution progress", () => {
-    expect(runEventsSource).toContain("snapshot.turnProgress?.status");
-    expect(panelSource).toContain("representative-progress-dock");
-    expect(panelSource).toContain("turnProgress?.steps.map");
-    expect(panelSource).toContain("setTurnProgress(payload.turnProgress ?? null)");
-    expect(panelSource).toContain("formatPublicTurnStage");
-    expect(panelSource).toContain("formatPublicTurnElapsed");
-  });
-
-  it("keeps one compact progress dock in the composer instead of task cards in the transcript", () => {
-    const transcriptEnd = panelSource.indexOf(
-      "{messages.length === 1 && messages[0]?.id === \"welcome\"",
-    );
-    const composerStart = panelSource.indexOf(
-      '<form className="representative-chat-form representative-chat-composer"',
-    );
-    const progressDock = panelSource.indexOf(
-      'className="representative-progress-dock"',
-    );
-
-    expect(transcriptEnd).toBeGreaterThan(0);
-    expect(composerStart).toBeGreaterThan(transcriptEnd);
-    expect(progressDock).toBeGreaterThan(composerStart);
-    expect(panelSource).not.toContain('className="representative-task-progress');
-    expect(panelSource).not.toContain("representative-turn-progress");
-    expect(panelSource).toContain("getCurrentPublicProgressStepIndex");
-    expect(panelSource).toContain("t.progressStep");
-  });
-
-  it("releases the composer when a task is waiting for audience clarification", () => {
-    const panelActiveStates = panelSource.slice(
-      panelSource.indexOf("function isPublicTaskStreamActive"),
-      panelSource.indexOf("function formatPublicTaskStatus"),
-    );
-    const streamActiveStates = runEventsSource.slice(
-      runEventsSource.indexOf("const continuouslyStreamingTaskStates"),
-      runEventsSource.indexOf("const RUN_STREAM_WINDOW_MS"),
-    );
-    expect(panelActiveStates).not.toContain('"clarifying"');
-    expect(streamActiveStates).not.toContain('"clarifying"');
-    expect(panelSource).toContain('{ taskStatus: taskProgress.status }');
-    expect(panelSource).toContain('"等待你补充"');
-    expect(panelSource).toContain('"等待负责人审批"');
-  });
-
-  it("turns a clarified generic file request into a governed write step", () => {
-    expect(inferDeterministicNaturalLanguageComputePlan([
-      "原始任务：请生成一个文本文件",
-      "待补充：请说明要生成或保存的具体内容；文件位置由系统自动管理。",
-      "用户补充：内容为：赤道是0°纬线，把地球分为南北两个半球。",
-    ].join("\n"))).toMatchObject({
-      kind: "execution",
-      steps: [{
-        capability: "write",
-        path: expect.stringMatching(/^outputs\/file-[a-f0-9]{8}\.txt$/),
-        content: "赤道是0°纬线，把地球分为南北两个半球。",
-      }],
-    });
+  it("does not retain the retired Planner or Delegation progress UI", () => {
+    expect(panelSource).not.toContain("representative-progress-dock");
+    expect(panelSource).not.toContain("taskProgress");
+    expect(panelSource).not.toContain("turnProgress");
+    expect(panelSource).not.toContain("formatPublicTurnStage");
   });
 
   it("removes abort listeners after each conversation heartbeat wait settles", () => {

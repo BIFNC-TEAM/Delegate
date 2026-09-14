@@ -1,0 +1,7 @@
+services:
+  compute-broker:
+    environment:
+      SANDBOX_PROVIDER: tencent
+      SANDBOX_ROUTING_MODE: manual_poc
+      SANDBOX_PROVIDER_ROUTING_JSON: >-
+        {"version":1,"default":"tencent","newIdentityEnabled":{"docker":false,"daytona":false,"tencent":true},"phase1AllowedRepresentativeIds":["rep_lin_founder"],"representatives":{}}

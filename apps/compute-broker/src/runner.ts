@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 import type {
@@ -157,6 +157,49 @@ export async function runRunnerExecution(
     default:
       throw new Error(`Unsupported compute runner type: ${input.runnerType}`);
   }
+}
+
+export async function writeRunnerInputFile(input: {
+  runnerType: ComputeRunnerType;
+  containerId: string;
+  fileName: string;
+  content: Buffer;
+  timeoutMs?: number;
+}) {
+  if (input.runnerType !== "docker") {
+    throw new Error("sandbox_input_transfer_not_supported_by_provider");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,179}$/u.test(input.fileName)) {
+    throw new Error("sandbox_input_file_name_invalid");
+  }
+  const startedAt = Date.now();
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("docker", [
+      "exec",
+      "-i",
+      input.containerId,
+      "sh",
+      "-c",
+      `mkdir -p /workspace/inputs && cat > /workspace/inputs/${input.fileName}`,
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    const stderr: Buffer[] = [];
+    child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("sandbox_input_transfer_timeout"));
+    }, input.timeoutMs ?? 30_000);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolve();
+      else reject(new Error(`sandbox_input_transfer_failed:${Buffer.concat(stderr).toString("utf8").slice(0, 500)}`));
+    });
+    child.stdin.end(input.content);
+  });
+  return { bytes: input.content.byteLength, durationMs: Date.now() - startedAt };
 }
 
 export async function releaseRunnerLease(input: {

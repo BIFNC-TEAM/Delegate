@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><testsuite name="agent-regression" tests="1" failures="1" skipped="0" time="240.217273"><testcase classname="agent.regression" name="PERF-04" time="240.216403"><failure message="PRODUCT_ATTACHMENT_FLOW_FAILED: The operation was aborted due to timeout"/></testcase></testsuite>

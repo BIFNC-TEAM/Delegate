@@ -8,7 +8,6 @@ import {
   Prisma,
 } from "@prisma/client";
 
-import { createConversationServiceRequestInTransaction } from "./delegation-tasks";
 import { prisma } from "./prisma";
 
 export type CompleteConversationIntakeInput = {
@@ -69,21 +68,6 @@ export async function completeConversationIntake(input: CompleteConversationInta
         skipped: "human_active" as const,
       };
     }
-
-    const serviceRequest = await createConversationServiceRequestInTransaction(tx, {
-      representativeId: input.representativeId,
-      contactId: input.contactId,
-      conversationId: input.conversationId,
-      ...(input.representativeVersionId !== undefined
-        ? { representativeVersionId: input.representativeVersionId }
-        : {}),
-      ...(input.episodeId !== undefined ? { episodeId: input.episodeId } : {}),
-      inputMessageId: input.inputMessageId,
-      intent: input.intent,
-      objective: input.objective,
-      desiredOutcome: input.desiredOutcome,
-      priority: input.priority,
-    });
 
     const intakeId = deterministicRecordId("intake", input.inputMessageId);
     const intake = await tx.intakeSubmission.upsert({
@@ -155,7 +139,6 @@ export async function completeConversationIntake(input: CompleteConversationInta
         representativeId: input.representativeId,
         contactId: input.contactId,
         conversationId: input.conversationId,
-        delegationTaskId: serviceRequest.task?.id ?? null,
         type: EventType.INTAKE_SUBMITTED,
         payload: {
           intakeSubmissionId: intake.id,
@@ -167,10 +150,10 @@ export async function completeConversationIntake(input: CompleteConversationInta
     });
 
     return {
-      serviceRequestId: serviceRequest.task?.id ?? null,
+      serviceRequestId: null,
       intakeSubmissionId: intake.id,
       leadId: lead.id,
-      skipped: serviceRequest.skipped,
+      skipped: null,
     };
   });
 }

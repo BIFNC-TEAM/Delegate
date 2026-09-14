@@ -1,0 +1,195 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-09T02-17-01-553Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "controlled-dependencies-real-model+isolated-product",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-09T02:17:01.553Z",
+  "totalDurationMs": 240217.27325,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "PRODUCT_ATTACHMENT_FLOW_FAILED": 1
+  },
+  "moduleTimings": [
+    {
+      "module": "context",
+      "operation": "product.attachment_disclosure",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 19.587000000000103,
+      "averageMs": 19.587000000000103,
+      "p50Ms": 19.587000000000103,
+      "p95Ms": 19.587000000000103,
+      "maximumMs": 19.587000000000103,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "request",
+      "operation": "product.attachment_accept",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 98.12933299999997,
+      "averageMs": 98.12933299999997,
+      "p50Ms": 98.12933299999997,
+      "p95Ms": 98.12933299999997,
+      "maximumMs": 98.12933299999997,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "request",
+      "operation": "product.attachment_session",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 87.56954099999996,
+      "averageMs": 87.56954099999996,
+      "p50Ms": 87.56954099999996,
+      "p95Ms": 87.56954099999996,
+      "maximumMs": 87.56954099999996,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    },
+    {
+      "module": "response",
+      "operation": "product.attachment_sse",
+      "calls": 1,
+      "logicalCalls": 1,
+      "succeeded": 0,
+      "failed": 1,
+      "timedOut": 0,
+      "cancelled": 0,
+      "retries": 0,
+      "totalMs": 240006.744875,
+      "averageMs": 240006.744875,
+      "p50Ms": 240006.744875,
+      "p95Ms": 240006.744875,
+      "maximumMs": 240006.744875,
+      "sampleSize": 1,
+      "p95Stable": false,
+      "baselineComparable": false
+    }
+  ],
+  "uncalledModules": [
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "wait"
+  ],
+  "slowestCases": [
+    {
+      "id": "PERF-04",
+      "durationMs": 240216.40275,
+      "dominantStage": "response/product.attachment_sse"
+    }
+  ],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "PERF-04",
+      "title": "Large file",
+      "status": "FAIL",
+      "applicable": true,
+      "attempt": 1,
+      "totalDurationMs": 240216.40275,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "PRODUCT_ATTACHMENT_FLOW_FAILED: The operation was aborted due to timeout",
+      "evidence": [
+        "No attachment result was accepted without upload, sandbox and download evidence."
+      ],
+      "spans": [
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "ccd57abd-de33-4c15-9c81-626d36421f42",
+          "module": "request",
+          "operation": "product.attachment_session",
+          "attempt": 1,
+          "startOffsetMs": 0.021084000000087144,
+          "durationMs": 87.56954099999996,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "02e7580f-b24e-458b-a515-8cf862913d0e",
+          "module": "context",
+          "operation": "product.attachment_disclosure",
+          "attempt": 1,
+          "startOffsetMs": 87.796875,
+          "durationMs": 19.587000000000103,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "4a4be4b3-bb34-4c4f-8a11-6e2033ba6a30",
+          "module": "request",
+          "operation": "product.attachment_accept",
+          "attempt": 1,
+          "startOffsetMs": 110.86229200000002,
+          "durationMs": 98.12933299999997,
+          "status": "ok"
+        },
+        {
+          "traceId": "product-perf-04",
+          "runId": "product-perf-04",
+          "caseId": "PERF-04",
+          "spanId": "94d27de4-3a33-4401-99be-4d517819db97",
+          "module": "response",
+          "operation": "product.attachment_sse",
+          "attempt": 1,
+          "startOffsetMs": 209.37354200000004,
+          "durationMs": 240006.744875,
+          "status": "error",
+          "error": "The operation was aborted due to timeout"
+        }
+      ]
+    }
+  ]
+}

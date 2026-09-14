@@ -15,7 +15,6 @@ export type ComputeRuntimeAuthorityContext = {
   contactId?: string | null;
   conversationId?: string | null;
   generationRunId?: string | null;
-  delegationTaskId?: string | null;
 };
 
 export async function loadComputeRuntimeAuthority(
@@ -63,7 +62,6 @@ export async function loadComputeRuntimeAuthority(
     const run = await prisma.generationRun.findFirst({
       where: {
         id: context.generationRunId,
-        delegationTaskId: context.delegationTaskId ?? null,
         conversation: {
           representativeId: context.representativeId,
           ...(context.conversationId ? { id: context.conversationId } : {}),
@@ -77,27 +75,6 @@ export async function loadComputeRuntimeAuthority(
       throw new SessionError(409, "generation_run_version_missing");
     }
     pinnedVersionIds.push(run.representativeVersionId);
-  }
-
-  if (context.delegationTaskId) {
-    hasPinnedRuntimeContext = true;
-    const task = await prisma.delegationTask.findFirst({
-      where: {
-        id: context.delegationTaskId,
-        representativeId: context.representativeId,
-        contactId: context.contactId ?? null,
-        originConversationId: context.conversationId ?? null,
-        ...(context.generationRunId
-          ? { generationRuns: { some: { id: context.generationRunId } } }
-          : {}),
-      },
-      select: { representativeVersionId: true },
-    });
-    if (!task) throw new SessionError(409, "delegation_task_context_mismatch");
-    if (!task.representativeVersionId) {
-      throw new SessionError(409, "delegation_task_version_missing");
-    }
-    pinnedVersionIds.push(task.representativeVersionId);
   }
 
   if (context.conversationId) {

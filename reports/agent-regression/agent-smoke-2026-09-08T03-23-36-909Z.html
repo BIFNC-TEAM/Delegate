@@ -1,0 +1,48 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-smoke-2026-09-08T03-23-36-909Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-smoke-2026-09-08T03-23-36-909Z
+
+- Suite: smoke
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T03:23:36.909Z
+- Total: 65417.3 ms
+- Cases: 2/2; PASS 2, FAIL 0, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 100.00%
+- Functional: PASS; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 2 | 2/0/0/0 | 0 | 1.0 | 0.5 | 0.4 | 0.6 | 0.6 | N/A |
+| knowledge/retrieve | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| mcp/orders-test.list_orders | 1 | 1/0/0/0 | 0 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | N/A |
+| model/generate | 13 | 13/0/0/0 | 0 | 65116.6 | 5009.0 | 4490.6 | 11483.2 | 11483.2 | N/A |
+| request/agent_run | 2 | 2/0/0/0 | 0 | 65414.0 | 32707.0 | 30012.2 | 35401.8 | 35401.8 | N/A |
+| response/stream | 2 | 2/0/0/0 | 0 | 63494.3 | 31747.1 | 29071.1 | 34423.2 | 34423.2 | N/A |
+| sandbox/execute | 4 | 2/2/0/0 | 0 | 275.9 | 69.0 | 58.2 | 81.2 | 81.2 | N/A |
+| skill/discover | 2 | 2/0/0/0 | 0 | 0.2 | 0.1 | 0.0 | 0.1 | 0.1 | N/A |
+| skill/load | 2 | 2/0/0/0 | 0 | 0.2 | 0.1 | 0.0 | 0.1 | 0.1 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BOX-02 | PASS | 978.6 | 35402.0 | 6 | 5 |  |
+| FLOW-01 | PASS | 941.1 | 30012.4 | 7 | 6 |  |
+
+## Slowest cases
+
+- BOX-02: 35402.0 ms (request/agent_run)
+- FLOW-01: 30012.4 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

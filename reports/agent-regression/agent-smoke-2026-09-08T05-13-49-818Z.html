@@ -1,0 +1,52 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-smoke-2026-09-08T05-13-49-818Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-smoke-2026-09-08T05-13-49-818Z
+
+- Suite: smoke
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model+isolated-product
+- Started: 2026-09-08T05:13:49.818Z
+- Total: 56029.7 ms
+- Cases: 2/2; PASS 2, FAIL 0, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 100.00%
+- Functional: PASS; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| artifact/product.artifact_download | 1 | 1/0/0/0 | 0 | 41.8 | 41.8 | 41.8 | 41.8 | 41.8 | N/A |
+| context/assemble | 2 | 2/0/0/0 | 0 | 1.5 | 0.8 | 0.6 | 1.0 | 1.0 | N/A |
+| context/product.memory_disclosure | 1 | 1/0/0/0 | 0 | 20.1 | 20.1 | 20.1 | 20.1 | 20.1 | N/A |
+| knowledge/retrieve | 2 | 2/0/0/0 | 0 | 28.1 | 14.1 | 0.2 | 27.9 | 27.9 | N/A |
+| mcp/orders-test.list_orders | 1 | 1/0/0/0 | 0 | 101.9 | 101.9 | 101.9 | 101.9 | 101.9 | N/A |
+| model/generate | 7 | 7/0/0/0 | 0 | 54375.8 | 7768.0 | 5980.5 | 19375.0 | 19375.0 | N/A |
+| orchestration/product.runtime_evidence | 1 | 1/0/0/0 | 0 | 58.2 | 58.2 | 58.2 | 58.2 | 58.2 | N/A |
+| request/agent_run | 2 | 2/0/0/0 | 0 | 55326.2 | 27663.1 | 4881.0 | 50445.2 | 50445.2 | N/A |
+| request/product.accept | 1 | 1/0/0/0 | 0 | 47.2 | 47.2 | 47.2 | 47.2 | 47.2 | N/A |
+| request/product.session | 1 | 1/0/0/0 | 0 | 50.0 | 50.0 | 50.0 | 50.0 | 50.0 | N/A |
+| response/product.sse | 1 | 1/0/0/0 | 0 | 50918.3 | 50918.3 | 50918.3 | 50918.3 | 50918.3 | N/A |
+| response/stream | 2 | 2/0/0/0 | 0 | 53114.7 | 26557.3 | 3782.2 | 49332.4 | 49332.4 | N/A |
+| sandbox/execute | 2 | 2/0/0/0 | 0 | 805.9 | 403.0 | 324.5 | 481.4 | 481.4 | N/A |
+| skill/discover | 1 | 1/0/0/0 | 0 | 1.4 | 1.4 | 1.4 | 1.4 | 1.4 | N/A |
+| skill/load | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| KB-03 | PASS | 1098.8 | 4881.5 | 2 | 1 |  |
+| ARCH-03 | PASS | 1112.8 | 51145.0 | 5 | 6 |  |
+
+## Slowest cases
+
+- ARCH-03: 51145.0 ms (response/product.sse)
+- KB-03: 4881.5 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

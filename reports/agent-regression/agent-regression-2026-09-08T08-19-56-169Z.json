@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "delegate-agent-regression.1",
+  "runId": "agent-regression-2026-09-08T08-19-56-169Z",
+  "suite": "regression",
+  "codeVersion": "working-tree",
+  "piVersion": "0.85.1",
+  "fixtureVersion": "agent-regression-fixtures.1",
+  "model": "agicto/qwen-plus",
+  "mode": "scripted-control",
+  "timezone": "Asia/Shanghai",
+  "startedAt": "2026-09-08T08:19:56.169Z",
+  "totalDurationMs": 0.04629099999999653,
+  "plannedCases": 1,
+  "startedCases": 1,
+  "uniqueCases": 1,
+  "attempts": 1,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "BLOCKED": 0,
+    "SKIP": 0,
+    "REVIEW": 0
+  },
+  "strictPassRate": 0,
+  "functionalConclusion": "FAIL",
+  "performanceConclusion": "NOT_DETERMINED",
+  "reasonDistribution": {
+    "NOT_IMPLEMENTED": 1
+  },
+  "moduleTimings": [],
+  "uncalledModules": [
+    "request",
+    "context",
+    "orchestration",
+    "model",
+    "knowledge",
+    "web",
+    "mcp",
+    "skill",
+    "sandbox",
+    "artifact",
+    "handoff",
+    "response",
+    "wait"
+  ],
+  "slowestCases": [],
+  "regressions": [],
+  "cases": [
+    {
+      "id": "ARCH-02",
+      "title": "Production entry build",
+      "status": "FAIL",
+      "applicable": true,
+      "attempt": 1,
+      "modelCalls": 0,
+      "toolCalls": 0,
+      "reason": "NOT_IMPLEMENTED: executable fixture/assertion is not yet wired for this regression case",
+      "spans": []
+    }
+  ]
+}

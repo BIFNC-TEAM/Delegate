@@ -12,7 +12,6 @@ import {
   consumeServiceEntitlement,
   consumeConversationEntitlement,
   consumeConversationEntitlementByGenerationRunId,
-  finalizeConversationEntitlementForGenerationRuns,
   fulfillServicePaymentOrder,
   grantServiceEntitlement,
   releaseConversationEntitlement,
@@ -724,122 +723,6 @@ describe("service entitlements", () => {
       "RESERVE",
       "CONSUME",
     ]);
-  });
-
-  it("transfers one plan reservation across task runs and consumes it once", async () => {
-    const client = new FakeServiceEntitlementClient();
-    await grantServiceEntitlement(
-      {
-        ...coordinates,
-        productCode: "plan:pass",
-        units: 1,
-        operationKey: "grant-task-transfer",
-      },
-      client,
-    );
-    const source = await reserveConversationEntitlement(
-      {
-        audienceIdentityId: coordinates.audienceIdentityId,
-        representativeId: coordinates.representativeId,
-        generationRunId: "task-run-1",
-      },
-      client,
-    );
-
-    const transferred =
-      await transferConversationEntitlementByGenerationRunId(
-        {
-          fromGenerationRunId: "task-run-1",
-          toGenerationRunId: "task-run-2",
-        },
-        client,
-      );
-    const replay =
-      await transferConversationEntitlementByGenerationRunId(
-        {
-          fromGenerationRunId: "task-run-1",
-          toGenerationRunId: "task-run-2",
-        },
-        client,
-      );
-    const consumed = await finalizeConversationEntitlementForGenerationRuns(
-      {
-        generationRunIds: ["task-run-1", "task-run-2"],
-        outcome: "consume",
-      },
-      client,
-    );
-    const terminalReplay =
-      await finalizeConversationEntitlementForGenerationRuns(
-        {
-          generationRunIds: ["task-run-1", "task-run-2"],
-          outcome: "consume",
-        },
-        client,
-      );
-
-    expect(transferred).toMatchObject({
-      accountId: source?.accountId,
-      generationRunId: "task-run-2",
-      productCode: "plan:pass",
-    });
-    expect(replay).toEqual(transferred);
-    expect(consumed).toMatchObject({
-      ledgerKind: "CONSUME",
-      remainingUnits: 0,
-      reservedUnits: 0,
-      status: "EXHAUSTED",
-    });
-    expect(terminalReplay).toBeNull();
-    expect(
-      client.ledgerEntries.map((entry) => [
-        entry.kind,
-        entry.generationRunId,
-      ]),
-    ).toEqual([
-      ["GRANT", null],
-      ["RESERVE", "task-run-1"],
-      ["RELEASE", "task-run-1"],
-      ["RESERVE", "task-run-2"],
-      ["CONSUME", "task-run-2"],
-    ]);
-  });
-
-  it("fails closed when a task owns multiple active plan reservations", async () => {
-    const client = new FakeServiceEntitlementClient();
-    await grantServiceEntitlement(
-      {
-        ...coordinates,
-        productCode: "plan:pass",
-        units: 2,
-        operationKey: "grant-duplicate-task-reservations",
-      },
-      client,
-    );
-    for (const generationRunId of ["duplicate-run-1", "duplicate-run-2"]) {
-      await reserveConversationEntitlement(
-        {
-          audienceIdentityId: coordinates.audienceIdentityId,
-          representativeId: coordinates.representativeId,
-          generationRunId,
-        },
-        client,
-      );
-    }
-
-    await expect(
-      finalizeConversationEntitlementForGenerationRuns(
-        {
-          generationRunIds: ["duplicate-run-1", "duplicate-run-2"],
-          outcome: "release",
-        },
-        client,
-      ),
-    ).rejects.toThrow("multiple active conversation entitlement reservations");
-    expect(client.accounts[0]).toMatchObject({
-      remainingUnits: 0,
-      reservedUnits: 2,
-    });
   });
 
   it("fails closed when consuming a conversation reservation released by run", async () => {

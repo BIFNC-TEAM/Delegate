@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createServiceRequest, prisma, tx } = vi.hoisted(() => {
+const { prisma, tx } = vi.hoisted(() => {
   const transactionClient = {
     $executeRaw: vi.fn(),
     conversation: {
@@ -18,7 +18,6 @@ const { createServiceRequest, prisma, tx } = vi.hoisted(() => {
   };
   return {
     tx: transactionClient,
-    createServiceRequest: vi.fn(),
     prisma: {
       $transaction: vi.fn(
         async (callback: (client: typeof transactionClient) => unknown) =>
@@ -29,10 +28,6 @@ const { createServiceRequest, prisma, tx } = vi.hoisted(() => {
 });
 
 vi.mock("../src/prisma", () => ({ prisma }));
-vi.mock("../src/delegation-tasks", () => ({
-  createConversationServiceRequestInTransaction: createServiceRequest,
-}));
-
 import { completeConversationIntake } from "../src/conversation-intake";
 
 const input = {
@@ -65,10 +60,6 @@ describe("complete conversation intake", () => {
       contact: { displayName: "Ada", username: null },
       episodes: [{ id: "episode-1", status: "ACTIVE" }],
     });
-    createServiceRequest.mockResolvedValue({
-      task: { id: "service-request-1" },
-      skipped: null,
-    });
     tx.intakeSubmission.upsert.mockResolvedValue({ id: "intake-1" });
     tx.lead.findFirst.mockResolvedValue(null);
     tx.lead.create.mockResolvedValue({ id: "lead-1" });
@@ -76,16 +67,12 @@ describe("complete conversation intake", () => {
 
   it("writes the request, intake, lead, contact stage, collector state, and audit atomically", async () => {
     await expect(completeConversationIntake(input)).resolves.toEqual({
-      serviceRequestId: "service-request-1",
+      serviceRequestId: null,
       intakeSubmissionId: "intake-1",
       leadId: "lead-1",
       skipped: null,
     });
 
-    expect(createServiceRequest).toHaveBeenCalledWith(tx, expect.objectContaining({
-      inputMessageId: "message-1",
-      objective: "希望梳理退款问题",
-    }));
     expect(tx.intakeSubmission.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         requestType: "service_request",
@@ -108,7 +95,6 @@ describe("complete conversation intake", () => {
     });
     expect(tx.eventAudit.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
-        delegationTaskId: "service-request-1",
         type: "INTAKE_SUBMITTED",
       }),
     }));
@@ -137,7 +123,6 @@ describe("complete conversation intake", () => {
         where: { id: "conversation-1" },
         data: { collectorState: expect.anything() },
       });
-      expect(createServiceRequest).not.toHaveBeenCalled();
       expect(tx.intakeSubmission.upsert).not.toHaveBeenCalled();
     },
   );

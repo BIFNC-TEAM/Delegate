@@ -1,0 +1,51 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T08-09-18-829Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T08-09-18-829Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T08:09:18.829Z
+- Total: 101.3 ms
+- Cases: 4/4; PASS 4, FAIL 0, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 100.00%
+- Functional: PASS; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| artifact/register | 2 | 0/2/0/0 | 1 | 0.2 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| context/assemble | 4 | 4/0/0/0 | 0 | 0.9 | 0.2 | 0.1 | 0.6 | 0.6 | N/A |
+| knowledge/retrieve | 7 | 7/0/0/0 | 0 | 0.1 | 0.0 | 0.0 | 0.1 | 0.1 | N/A |
+| model/generate | 11 | 10/1/0/0 | 0 | 39.4 | 3.6 | 4.0 | 5.0 | 5.0 | N/A |
+| request/agent_run | 4 | 1/3/0/0 | 0 | 99.8 | 25.0 | 6.3 | 68.2 | 68.2 | N/A |
+| response/stream | 1 | 1/0/0/0 | 0 | 3.3 | 3.3 | 3.3 | 3.3 | 3.3 | N/A |
+| sandbox/execute | 1 | 1/0/0/0 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | N/A |
+| wait/retry_backoff | 1 | 1/0/0/0 | 0 | 50.5 | 50.5 | 50.5 | 50.5 | 50.5 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| web/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| skill/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| ERROR-01 | PASS | N/A | 3.8 | 1 | 0 |  |
+| ERROR-04 | PASS | N/A | 21.7 | 5 | 5 |  |
+| ERROR-06 | PASS | N/A | 68.3 | 3 | 2 |  |
+| ERROR-07 | PASS | N/A | 6.3 | 2 | 2 |  |
+
+## Slowest cases
+
+- ERROR-06: 68.3 ms (request/agent_run)
+- ERROR-04: 21.7 ms (request/agent_run)
+- ERROR-07: 6.3 ms (request/agent_run)
+- ERROR-01: 3.8 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

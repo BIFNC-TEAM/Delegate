@@ -266,7 +266,7 @@ describe("compute approval wallet finalization", () => {
     expect(mocks.tx.conversation.update).not.toHaveBeenCalled();
   });
 
-  it("leaves a delegated reservation and free allowance untouched while the next approved step is queued", async () => {
+  it("ignores retired delegation coordinates and completes the generation-owned result", async () => {
     mocks.tx.approvalRequest.findUnique.mockResolvedValue({
       ...approvalWithPaidRun,
       delegationTaskId: "task-1",
@@ -283,15 +283,7 @@ describe("compute approval wallet finalization", () => {
       outcome: "completed",
     });
 
-    expect(mocks.finalizeComputeDelegationTaskInTransaction).toHaveBeenCalledWith(
-      mocks.tx,
-      expect.objectContaining({
-        taskId: "task-1",
-        stepId: "step-1",
-        generationRunId: "run-1",
-        outcome: "completed",
-      }),
-    );
+    expect(mocks.finalizeComputeDelegationTaskInTransaction).not.toHaveBeenCalled();
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.tx.conversation.updateMany).toHaveBeenCalledWith({
@@ -304,16 +296,10 @@ describe("compute approval wallet finalization", () => {
         lastMessageAt: expect.any(Date),
       },
     });
-    expect(mocks.tx.message.update).toHaveBeenCalledWith({
-      where: { id: "result-message" },
-      data: {
-        text:
-          "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。",
-      },
-    });
+    expect(mocks.tx.message.update).not.toHaveBeenCalled();
   });
 
-  it("requeues a final governed V3 approval result for evidence-bound composition", async () => {
+  it("does not revive the retired V3 composer for legacy coordinates", async () => {
     mocks.tx.approvalRequest.findUnique.mockResolvedValue({
       ...approvalWithPaidRun,
       delegationTaskId: "task-1",
@@ -335,37 +321,11 @@ describe("compute approval wallet finalization", () => {
     await expect(finalizeComputeApprovalConversation({
       approvalId: "approval-1",
       outcome: "completed",
-    })).resolves.toBeNull();
+    })).resolves.toMatchObject({ id: "result-message" });
 
-    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
-      where: { id: "run-1" },
-      data: expect.objectContaining({
-        status: "QUEUED",
-        outputMessageId: null,
-        completedAt: null,
-        contextSnapshot: expect.objectContaining({
-          source: "v3_governed_composer_resume",
-          delegationTaskId: "task-1",
-          planId: "plan-1",
-        }),
-      }),
-    });
-    expect(mocks.tx.outboxEvent.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        aggregateType: "generation_run",
-        aggregateId: "run-1",
-        eventType: "generation.requested",
-        idempotencyKey:
-          "generation.v3-composer.requested:run-1:plan-1",
-      }),
-    });
-    expect(mocks.tx.message.update).toHaveBeenCalledWith({
-      where: { id: "result-message" },
-      data: expect.objectContaining({
-        deliveryStatus: "CANCELED",
-        failureCode: "v3_composer_resume",
-      }),
-    });
+    expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
+    expect(mocks.tx.outboxEvent.create).not.toHaveBeenCalled();
+    expect(mocks.tx.message.update).not.toHaveBeenCalled();
   });
 
   it.each(["HUMAN_ACTIVE", "NEEDS_HUMAN"] as const)(
@@ -414,7 +374,7 @@ describe("compute approval wallet finalization", () => {
     },
   );
 
-  it("defers a delegated result without finalizing its task-owned reservation", async () => {
+  it("defers a legacy-coordinate result using generation-owned billing", async () => {
     mocks.tx.approvalRequest.findUnique.mockResolvedValue({
       ...approvalWithPaidRun,
       delegationTaskId: "task-1",
@@ -440,13 +400,14 @@ describe("compute approval wallet finalization", () => {
         id: "run-1",
         status: "WAITING_APPROVAL",
       },
-      data: {
+      data: expect.objectContaining({
         status: "WAITING_HUMAN",
         completedAt: null,
         canceledAt: null,
-      },
+        runtimePolicySnapshot: expect.objectContaining({ billingMode: "service_credit_released" }),
+      }),
     });
-    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalled();
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.tx.message.upsert).not.toHaveBeenCalled();
     expect(mocks.finalizeComputeDelegationTaskInTransaction).not.toHaveBeenCalled();
@@ -539,7 +500,7 @@ describe("compute approval wallet finalization", () => {
     expect(mocks.tx.outboxEvent.upsert).not.toHaveBeenCalled();
   });
 
-  it("re-enters task finalization when a completed run has not closed its task", async () => {
+  it("does not re-enter retired task finalization for an idempotent completed run", async () => {
     mocks.tx.approvalRequest.findUnique.mockResolvedValue({
       ...approvalWithPaidRun,
       delegationTaskId: "task-1",
@@ -569,17 +530,7 @@ describe("compute approval wallet finalization", () => {
       outcome: "completed",
     });
 
-    expect(
-      mocks.finalizeComputeDelegationTaskInTransaction,
-    ).toHaveBeenCalledWith(
-      mocks.tx,
-      expect.objectContaining({
-        taskId: "task-1",
-        stepId: "step-1",
-        generationRunId: "run-1",
-        outcome: "completed",
-      }),
-    );
+    expect(mocks.finalizeComputeDelegationTaskInTransaction).not.toHaveBeenCalled();
     expect(mocks.tx.outboxEvent.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {

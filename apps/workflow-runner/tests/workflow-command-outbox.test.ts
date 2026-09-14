@@ -162,7 +162,7 @@ describe("workflow command outbox", () => {
     expect(mockPrisma.workflowRun.update).not.toHaveBeenCalled();
   });
 
-  it("dispatches a durable delegation SIGNAL command", async () => {
+  it("rejects a retired delegation SIGNAL command", async () => {
     const signal = {
       signalId: "approval:approval-1:approved",
       kind: "approval_resolved" as const,
@@ -182,7 +182,7 @@ describe("workflow command outbox", () => {
       attemptCount: 1,
       workflowRun: {
         id: "workflow-signal-1",
-        kind: WorkflowKind.DELEGATION_EXECUTION,
+        kind: "DELEGATION_EXECUTION" as WorkflowKind,
         engine: WorkflowEngine.TEMPORAL,
         status: WorkflowStatus.RUNNING,
         enginePhase: WorkflowEnginePhase.WAITING_SIGNAL,
@@ -201,7 +201,6 @@ describe("workflow command outbox", () => {
     const temporalDispatcher = {
       startWorkflowExecution: vi.fn(),
       cancelWorkflowExecution: vi.fn(),
-      signalDelegationExecution: vi.fn().mockResolvedValue(undefined),
     };
 
     const summary = await runWorkflowTick({
@@ -210,16 +209,7 @@ describe("workflow command outbox", () => {
       temporalDispatcher,
     });
 
-    expect(summary).toMatchObject({ processed: 1, dispatched: 1, failed: 0 });
-    expect(temporalDispatcher.signalDelegationExecution).toHaveBeenCalledWith({
-      workflowId: "delegate:delegation_execution:task-1",
-      runId: "temporal-run-signal-1",
-      signal,
-    });
-    expect(mockPrisma.workflowCommandOutbox.update).toHaveBeenCalledWith({
-      where: { id: "cmd-signal-1" },
-      data: { processedAt: expect.any(Date), lastError: null },
-    });
+    expect(summary).toMatchObject({ processed: 1, dispatched: 0, failed: 1 });
   });
 
   it("treats already-started START commands as a recoverable success path", async () => {
@@ -457,79 +447,6 @@ describe("workflow command outbox", () => {
         dispatchAttemptCount: {
           increment: 1,
         },
-      }),
-    });
-  });
-
-  it("dispatches a delegation task to its stable long-lived Temporal workflow", async () => {
-    const scheduledAt = new Date("2026-08-17T08:00:00.000Z");
-    const observedAt = new Date("2026-08-17T08:00:01.000Z");
-    mockPrisma.workflowCommandOutbox.findMany.mockResolvedValue([{
-      id: "cmd-delegation-1",
-      attemptCount: 0,
-    }]);
-    mockPrisma.workflowCommandOutbox.updateMany.mockResolvedValue({ count: 1 });
-    mockPrisma.workflowCommandOutbox.findUnique.mockResolvedValue({
-      id: "cmd-delegation-1",
-      workflowRunId: "workflow-delegation-1",
-      commandType: WorkflowCommandType.START,
-      attemptCount: 1,
-      workflowRun: {
-        id: "workflow-delegation-1",
-        kind: WorkflowKind.DELEGATION_EXECUTION,
-        engine: WorkflowEngine.TEMPORAL,
-        status: WorkflowStatus.QUEUED,
-        enginePhase: WorkflowEnginePhase.DISPATCH_PENDING,
-        queueName: "delegate-public-runtime",
-        externalWorkflowId: "delegate:delegation_execution:task-1",
-        externalRunId: null,
-        scheduledAt,
-        startedAt: null,
-        nextWakeAt: null,
-        lastObservedAt: null,
-        cancelRequestedAt: null,
-        delegationTaskId: "task-1",
-        turnPlanId: "plan-1",
-      },
-    });
-    mockPrisma.workflowRun.updateMany.mockResolvedValue({ count: 1 });
-    mockPrisma.workflowCommandOutbox.update.mockResolvedValue({
-      id: "cmd-delegation-1",
-    });
-    const temporalDispatcher = {
-      startWorkflowExecution: vi.fn().mockResolvedValue({
-        outcome: "started",
-        runId: "temporal-delegation-1",
-        observedAt,
-      }),
-      cancelWorkflowExecution: vi.fn(),
-    };
-
-    await runWorkflowTick({
-      engine: WorkflowEngine.TEMPORAL,
-      temporalDispatcher,
-    });
-
-    expect(temporalDispatcher.startWorkflowExecution).toHaveBeenCalledWith({
-      workflowRunId: "workflow-delegation-1",
-      workflowKind: WorkflowKind.DELEGATION_EXECUTION,
-      workflowId: "delegate:delegation_execution:task-1",
-      taskQueue: "delegate-public-runtime",
-      scheduledAt,
-      delegationTaskId: "task-1",
-      turnPlanId: "plan-1",
-    });
-    expect(mockPrisma.workflowRun.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "workflow-delegation-1",
-        status: {
-          in: [WorkflowStatus.QUEUED, WorkflowStatus.RUNNING],
-        },
-      },
-      data: expect.objectContaining({
-        status: WorkflowStatus.RUNNING,
-        enginePhase: WorkflowEnginePhase.ACTIVITY_RUNNING,
-        nextWakeAt: null,
       }),
     });
   });

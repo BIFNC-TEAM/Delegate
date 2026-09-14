@@ -1,0 +1,18 @@
+{
+  "name": "@delegate/agent-regression",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@delegate/model-runtime": "workspace:*",
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@prisma/client": "^6.19.2"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.0"
+  }
+}

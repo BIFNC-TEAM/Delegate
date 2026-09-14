@@ -40,7 +40,6 @@ import {
   type RepresentativeApprovalInsightsSnapshot,
 } from "./compute-insights";
 import { buildRepresentativeGovernedActionSnapshot } from "./governed-actions";
-import { buildDelegationApprovalPolicyExplanation } from "./delegation-task-product";
 import { assertComputeApprovalDomain } from "./compute-approval-domain";
 import {
   McpBindingOperationError,
@@ -104,14 +103,6 @@ const approvalInclude = Prisma.validator<Prisma.ApprovalRequestDefaultArgs>()({
             displayName: true,
           },
         },
-      },
-    },
-    delegationTask: {
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        nextActionBy: true,
       },
     },
     workspaceSkillRelease: {
@@ -2607,21 +2598,13 @@ function serializeRepresentativeApproval(
       ...(approval.requestPayloadHash ? { requestFingerprint: approval.requestPayloadHash } : {}),
       explanation: approval.workspaceSkillRelease
         ? "A workspace skill update must satisfy provenance, permission-diff, and owner update-policy checks before adoption."
-        : buildDelegationApprovalPolicyExplanation(approval.reason, approval.matchedPolicyRuleId),
+        : approval.matchedPolicyRuleId
+          ? `Deterministic policy rule “${approval.matchedPolicyRuleId}” returned ASK. ${approval.reason}`
+          : `The effective policy profile returned ASK using its default or managed overlay. ${approval.reason}`,
     },
     customerAccount,
     approver,
     staleWorkflow,
-    ...(approval.delegationTask
-      ? {
-          task: {
-            id: approval.delegationTask.id,
-            title: approval.delegationTask.title,
-            status: approval.delegationTask.status.toLowerCase(),
-            nextActionBy: approval.delegationTask.nextActionBy.toLowerCase(),
-          },
-        }
-      : {}),
     ...(approval.subagentId ? { subagentId: approval.subagentId } : {}),
     ...(approval.workspaceSkillRelease
       ? {

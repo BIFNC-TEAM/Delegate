@@ -11,7 +11,7 @@ const migration = read(
 const runtimeSources = [
   "apps/compute-broker/src/billing.ts",
   "apps/compute-broker/src/executions.ts",
-  "apps/conversation-worker/src/processor.ts",
+  "apps/conversation-worker/src/processor-pi.ts",
   "packages/compute-protocol/src/index.ts",
   "packages/web-data/src/compute-conversation-results.ts",
   "packages/web-data/src/conversation-platform.ts",

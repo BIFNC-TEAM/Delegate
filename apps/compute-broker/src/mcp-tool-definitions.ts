@@ -1,7 +1,6 @@
 import {
   assertSupportedCapabilitySchema,
-  CAPABILITY_CANONICALIZATION_VERSION_V3,
-  derivePlannerCapabilitySchema,
+  deriveCapabilitySchema,
   stableSha256,
 } from "@delegate/runtime";
 import { Prisma } from "@prisma/client";
@@ -9,6 +8,8 @@ import { Prisma } from "@prisma/client";
 import { listRemoteMcpTools } from "./mcp";
 import { prisma } from "./prisma";
 import { SessionError } from "./session-error";
+
+const MCP_CAPABILITY_CANONICALIZATION_VERSION = "delegate-capability-v1";
 
 export function assertLiveMcpToolSchemaPin(input: {
   toolName: string;
@@ -76,7 +77,7 @@ export async function syncRepresentativeMcpToolDefinitions(bindingId: string) {
   });
   const observedAt = new Date();
   const definitions = selected.map((tool) => {
-    const plannerInputSchema = derivePlannerCapabilitySchema(tool.inputSchema, {
+    const plannerInputSchema = deriveCapabilitySchema(tool.inputSchema, {
       closeObjects: true,
     });
     assertSupportedCapabilitySchema(
@@ -85,7 +86,7 @@ export async function syncRepresentativeMcpToolDefinitions(bindingId: string) {
       true,
     );
     if (tool.outputSchema) {
-      const plannerOutputSchema = derivePlannerCapabilitySchema(tool.outputSchema, {
+      const plannerOutputSchema = deriveCapabilitySchema(tool.outputSchema, {
         closeObjects: false,
         dropUnsupportedOutputKeywords: true,
       });
@@ -142,7 +143,7 @@ export async function syncRepresentativeMcpToolDefinitions(bindingId: string) {
             : Prisma.JsonNull,
           toolSchemaHash: stripHash(toolSchemaHash),
           bindingDefinitionHash: stripHash(bindingDefinitionHash),
-          canonicalizationVersion: CAPABILITY_CANONICALIZATION_VERSION_V3,
+          canonicalizationVersion: MCP_CAPABILITY_CANONICALIZATION_VERSION,
           observedAnnotations: tool.annotations
             ? tool.annotations as Prisma.InputJsonObject
             : Prisma.JsonNull,

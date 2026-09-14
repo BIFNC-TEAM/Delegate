@@ -37,7 +37,6 @@ type ComputePolicyMode = "allow" | "ask" | "deny";
 type ComputeNetworkMode = "no_network" | "allowlist" | "full";
 type ComputeFilesystemMode = "workspace_only" | "read_only_workspace" | "ephemeral_full";
 type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mcp";
-type DelegationKnowledgeScope = "user_input_only" | "public_knowledge";
 type RepresentativeSetupSnapshot = {
   id: string;
   slug: string;
@@ -73,14 +72,6 @@ type RepresentativeSetupSnapshot = {
     networkAllowlist: string[];
     filesystemMode: ComputeFilesystemMode;
     capabilityModes: Record<ComputeCapability, ComputePolicyMode>;
-  };
-  delegation: {
-    enabled: boolean;
-    naturalLanguageEnabled: boolean;
-    explicitComputeEnabled: boolean;
-    maxSteps: number;
-    maxEstimatedTokens: number;
-    knowledgeScope: DelegationKnowledgeScope;
   };
 };
 
@@ -826,9 +817,9 @@ export function DashboardRepresentativeSetup({
             meta={
               <div className="chip-row">
                 <span
-                  className={draft.compute.enabled && draft.delegation.enabled ? "chip chip-safe" : "chip chip-danger"}
+                  className={draft.compute.enabled ? "chip chip-safe" : "chip chip-danger"}
                 >
-                  {draft.compute.enabled && draft.delegation.enabled ? "delegation enabled" : "delegation disabled"}
+                  {draft.compute.enabled ? "Pi compute enabled" : "Pi compute disabled"}
                 </span>
                 <span className="chip">
                   {localizedComputePolicyModeLabels[draft.compute.defaultPolicyMode]}
@@ -861,55 +852,7 @@ export function DashboardRepresentativeSetup({
                     />
                     <span>{t.enableCompute}</span>
                   </label>
-                  <label className="toggle-row">
-                    <input
-                      checked={draft.delegation.enabled}
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          delegation: { ...value.delegation, enabled: event.target.checked },
-                        }))
-                      }
-                      type="checkbox"
-                    />
-                    <span>{t.enableDelegation}</span>
-                  </label>
-                  <label className="toggle-row">
-                    <input
-                      checked={draft.delegation.naturalLanguageEnabled}
-                      disabled={!draft.delegation.enabled}
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          delegation: {
-                            ...value.delegation,
-                            naturalLanguageEnabled: event.target.checked,
-                          },
-                        }))
-                      }
-                      type="checkbox"
-                    />
-                    <span>{t.enableNaturalLanguageDelegation}</span>
-                  </label>
-                  <label className="toggle-row">
-                    <input
-                      checked={draft.delegation.explicitComputeEnabled}
-                      disabled={!draft.delegation.enabled}
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          delegation: {
-                            ...value.delegation,
-                            explicitComputeEnabled: event.target.checked,
-                          },
-                        }))
-                      }
-                      type="checkbox"
-                    />
-                    <span>{t.enableExplicitCompute}</span>
-                  </label>
                 </div>
-                <small className="field-hint">{t.delegationToggleHint}</small>
               </div>
 
               <label className="field-stack">
@@ -966,66 +909,6 @@ export function DashboardRepresentativeSetup({
                 </div>
                 <small className="field-hint">{t.capabilityPolicyHint}</small>
               </div>
-
-              <label className="field-stack">
-                <span>{t.delegationKnowledgeScope}</span>
-                <select
-                  className="text-input"
-                  onChange={(event) =>
-                    updateDraft((value) => ({
-                      ...value,
-                      delegation: {
-                        ...value.delegation,
-                        knowledgeScope: event.target.value as DelegationKnowledgeScope,
-                      },
-                    }))
-                  }
-                  value={draft.delegation.knowledgeScope}
-                >
-                  <option value="user_input_only">{t.userInputOnly}</option>
-                  <option value="public_knowledge">{t.approvedPublicKnowledge}</option>
-                </select>
-              </label>
-
-              <label className="field-stack">
-                <span>{t.delegationMaxSteps}</span>
-                <input
-                  className="text-input"
-                  min={1}
-                  max={5}
-                  onChange={(event) =>
-                    updateDraft((value) => ({
-                      ...value,
-                      delegation: {
-                        ...value.delegation,
-                        maxSteps: Number(event.target.value || 1),
-                      },
-                    }))
-                  }
-                  type="number"
-                  value={draft.delegation.maxSteps}
-                />
-              </label>
-
-              <label className="field-stack">
-                <span>{t.delegationMaxTokens}</span>
-                <input
-                  className="text-input"
-                  min={0}
-                  onChange={(event) =>
-                    updateDraft((value) => ({
-                      ...value,
-                      delegation: {
-                        ...value.delegation,
-                        maxEstimatedTokens: Number(event.target.value || 0),
-                      },
-                    }))
-                  }
-                  type="number"
-                  value={draft.delegation.maxEstimatedTokens}
-                />
-                <small className="field-hint">{t.zeroMeansUnlimited}</small>
-              </label>
 
               <label className="field-stack">
                 <span>{t.baseImage}</span>
@@ -1442,18 +1325,11 @@ const setupCopy = {
     computeTitle: "配置委托触发、能力边界、审批策略与隔离沙盒资源上限。",
     togglesLabel: "能力开关",
     enableCompute: "Enable compute",
-    enableDelegation: "接受公开委托任务",
-    enableNaturalLanguageDelegation: "允许自然语言自动触发任务",
-    enableExplicitCompute: "开放高级 /compute 命令",
-    delegationToggleHint: "自然语言负责识别任务；是否执行或审批始终由下方确定性策略决定。",
     defaultPolicyMode: "Default policy mode",
     capabilityPolicies: "能力策略",
     capabilityPolicyHint: "需审批会创建 Owner 审批；禁止会在创建沙盒前拦截。平台托管安全规则仍可进一步收紧。",
-    delegationKnowledgeScope: "任务可用数据",
     userInputOnly: "仅本次会话输入",
     approvedPublicKnowledge: "会话输入 + 已审核公开知识",
-    delegationMaxSteps: "单任务最大步骤数",
-    delegationMaxTokens: "单任务预计 Token 上限",
     zeroMeansUnlimited: "0 表示不设置额外的任务 Token 上限；仍受平台安全策略约束。",
     baseImage: "Base image",
     maxSessionMinutes: "Max session minutes",
@@ -1529,21 +1405,14 @@ const setupCopy = {
     materialsTitle: "Materials",
     policiesTitle: "Policies",
     computeEyebrow: "Isolated compute",
-    computeTitle: "Configure delegation triggers, capability gates, approval policy, and sandbox resource limits.",
+    computeTitle: "Configure Pi capability gates, approval policy, and sandbox resource limits.",
     togglesLabel: "Capability toggles",
     enableCompute: "Enable compute",
-    enableDelegation: "Accept public delegation tasks",
-    enableNaturalLanguageDelegation: "Trigger tasks from natural language",
-    enableExplicitCompute: "Expose advanced /compute command",
-    delegationToggleHint: "Natural language identifies the task; deterministic policy still decides whether it runs or requires approval.",
     defaultPolicyMode: "Default policy mode",
     capabilityPolicies: "Capability policies",
     capabilityPolicyHint: "Ask creates an Owner approval; deny blocks before sandbox creation. Managed platform safety rules can still tighten these choices.",
-    delegationKnowledgeScope: "Task data scope",
     userInputOnly: "Current conversation input only",
     approvedPublicKnowledge: "Conversation input + approved public knowledge",
-    delegationMaxSteps: "Maximum steps per task",
-    delegationMaxTokens: "Estimated token limit per task",
     zeroMeansUnlimited: "0 adds no task-specific token limit; managed platform safety policies still apply.",
     baseImage: "Base image",
     maxSessionMinutes: "Max session minutes",
@@ -1698,15 +1567,15 @@ function buildSetupStepCards(
       if (locale === "en") {
         return [
           {
-            label: "Delegation",
-            value: draft.compute.enabled && draft.delegation.enabled ? "Enabled" : "Disabled",
-            detail: "Whether this representative accepts tasks backed by isolated compute.",
+            label: "Pi compute",
+            value: draft.compute.enabled ? "Enabled" : "Disabled",
+            detail: "Whether the Pi agent may use isolated compute when needed.",
             tone: "accent",
           },
           {
-            label: "Natural language",
-            value: draft.delegation.naturalLanguageEnabled ? "On" : "Off",
-            detail: "Whether ordinary requests can become delegated tasks.",
+            label: "Policy",
+            value: getComputePolicyModeLabels(locale)[draft.compute.defaultPolicyMode],
+            detail: "Default capability decision for Pi tool execution.",
           },
           {
             label: "Network",
@@ -1723,15 +1592,15 @@ function buildSetupStepCards(
       }
       return [
         {
-          label: "Delegation",
-          value: draft.compute.enabled && draft.delegation.enabled ? "Enabled" : "Disabled",
-          detail: "这个代表是否接受由隔离 Compute 执行的委托任务。",
+          label: "Pi Compute",
+          value: draft.compute.enabled ? "Enabled" : "Disabled",
+          detail: "Pi Agent 是否可以在需要时使用隔离计算。",
           tone: "accent",
         },
         {
-          label: "Natural language",
-          value: draft.delegation.naturalLanguageEnabled ? "On" : "Off",
-          detail: "普通自然语言请求是否可以自动形成委托任务。",
+          label: "默认策略",
+          value: getComputePolicyModeLabels(locale)[draft.compute.defaultPolicyMode],
+          detail: "Pi 工具执行的默认能力决策。",
         },
         {
           label: "Network",
@@ -2163,7 +2032,6 @@ function cloneSnapshot(snapshot: RepresentativeSetupSnapshot): RepresentativeSet
       networkAllowlist: [...snapshot.compute.networkAllowlist],
       capabilityModes: { ...snapshot.compute.capabilityModes },
     },
-    delegation: { ...snapshot.delegation },
   };
 }
 

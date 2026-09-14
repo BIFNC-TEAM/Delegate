@@ -3,31 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   resolveConversationWorkerConfig,
   resolveConversationWorkerModelReadiness,
-  resolveTurnPlannerRunPolicy,
 } from "../src/config";
 
 describe("conversation worker config", () => {
-  it("runs only V3 in active modes and replays persisted delegation steps", () => {
-    expect(resolveTurnPlannerRunPolicy({
-      turnPlannerV2Mode: "active_low_risk",
-      turnPlannerV3Mode: "active_governed",
-      hasPersistedDelegationRequest: false,
-    })).toEqual({
-      runV2Planner: false,
-      runV3Planner: true,
-      allowLegacyDetailedPlanner: false,
-      authoritativeProtocol: 3,
-    });
-    expect(resolveTurnPlannerRunPolicy({
-      turnPlannerV2Mode: "shadow",
-      turnPlannerV3Mode: "active_governed",
-      hasPersistedDelegationRequest: true,
-    })).toMatchObject({
-      runV2Planner: false,
-      runV3Planner: false,
-      authoritativeProtocol: 3,
-    });
-  });
   it("allows web-only processing without Matrix credentials", () => {
     expect(resolveConversationWorkerConfig({})).toMatchObject({
       port: 4040,
@@ -39,66 +17,30 @@ describe("conversation worker config", () => {
       memoryTickTimeoutMs: 60_000,
       readinessStaleMs: 180_000,
       telegramConversationPlatformMode: "worker",
-      turnPlannerV2Mode: "shadow",
-      turnPlannerV3Mode: "disabled",
-      pendingClarificationMode: "shadow",
+      agentRuntimeMode: "pi",
       telegramRequestTimeoutMs: 15_000,
       outboxProcessingLeaseMs: 5 * 60_000,
     });
   });
 
-  it("supports disabled, shadow, and active pending clarification rollout", () => {
-    expect(resolveConversationWorkerConfig({
-      PENDING_CLARIFICATION_MODE: "disabled",
-    })).toMatchObject({ pendingClarificationMode: "disabled" });
-    expect(resolveConversationWorkerConfig({
-      PENDING_CLARIFICATION_MODE: "shadow",
-    })).toMatchObject({ pendingClarificationMode: "shadow" });
-    expect(resolveConversationWorkerConfig({
-      PENDING_CLARIFICATION_MODE: "active",
-    })).toMatchObject({ pendingClarificationMode: "active" });
+  it("refuses to restore the retired Agent runtime for new turns", () => {
+    expect(resolveConversationWorkerConfig({ DELEGATE_AGENT_RUNTIME: "pi" }))
+      .toMatchObject({ agentRuntimeMode: "pi" });
     expect(() => resolveConversationWorkerConfig({
-      PENDING_CLARIFICATION_MODE: "invalid",
-    })).toThrow();
+      DELEGATE_AGENT_RUNTIME: "legacy",
+    })).toThrow("legacy Agent runtime is retired");
   });
 
-  it("supports shadow and read-only V3 rollout before governed lanes exist", () => {
-    expect(resolveConversationWorkerConfig({
-      TURN_PLAN_V3_MODE: "shadow",
-    })).toMatchObject({ turnPlannerV3Mode: "shadow" });
-    expect(resolveConversationWorkerConfig({
-      TURN_PLAN_V3_MODE: "active_readonly",
-    })).toMatchObject({ turnPlannerV3Mode: "active_readonly" });
-    expect(resolveConversationWorkerConfig({
-      TURN_PLAN_V3_MODE: "active_governed",
-    })).toMatchObject({ turnPlannerV3Mode: "active_governed" });
-    expect(() => resolveConversationWorkerConfig({
-      TURN_PLAN_V3_MODE: "full",
-    })).toThrow();
-  });
-
-  it("requires an explicit release attestation for production V3 active modes", () => {
-    expect(() => resolveConversationWorkerConfig({
-      NODE_ENV: "production",
-      TURN_PLAN_V3_MODE: "active_governed",
-    })).toThrow("TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true");
-    expect(resolveConversationWorkerConfig({
-      NODE_ENV: "production",
-      TURN_PLAN_V3_MODE: "active_governed",
-      TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED: "true",
-    })).toMatchObject({ turnPlannerV3Mode: "active_governed" });
-  });
-
-  it("supports an explicit V2 planner rollout mode", () => {
-    expect(resolveConversationWorkerConfig({
-      TURN_PLANNER_V2_MODE: "active_low_risk",
-    })).toMatchObject({ turnPlannerV2Mode: "active_low_risk" });
-    expect(resolveConversationWorkerConfig({
-      TURN_PLANNER_V2_MODE: "disabled",
-    })).toMatchObject({ turnPlannerV2Mode: "disabled" });
-    expect(() => resolveConversationWorkerConfig({
-      TURN_PLANNER_V2_MODE: "full",
-    })).toThrow();
+  it("rejects all retired V2/V3 planner and clarification switches", () => {
+    for (const [key, value] of [
+      ["PENDING_CLARIFICATION_MODE", "active"],
+      ["TURN_PLAN_V3_MODE", "active_governed"],
+      ["TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED", "true"],
+      ["TURN_PLANNER_V2_MODE", "active_low_risk"],
+    ] as const) {
+      expect(() => resolveConversationWorkerConfig({ [key]: value }))
+        .toThrow("Retired Agent planner configuration is not supported");
+    }
   });
 
   it("validates the canonical public representative origin used for channel links", () => {
@@ -185,16 +127,12 @@ describe("conversation worker config", () => {
         NODE_ENV: "production",
         TELEGRAM_CONVERSATION_PLATFORM_MODE: "legacy",
       })
-    ).toThrow("Production Telegram traffic must use");
+    ).toThrow("legacy and shadow ownership are retired");
     expect(() =>
       resolveConversationWorkerConfig({
         TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
       })
-    ).toThrow("diagnostics-only");
-    expect(resolveConversationWorkerConfig({
-      TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
-      TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED: "true",
-    })).toMatchObject({ telegramConversationPlatformMode: "shadow" });
+    ).toThrow("legacy and shadow ownership are retired");
     expect(() =>
       resolveConversationWorkerConfig({
         TELEGRAM_REQUEST_TIMEOUT_MS: "500",

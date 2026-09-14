@@ -28,7 +28,6 @@ vi.mock("../src/anthropic", () => ({
 import {
   detectRepresentativeReplyPolicyViolation,
   generateRepresentativeReply,
-  planNaturalLanguageComputeRequest,
 } from "../src/index";
 
 describe("provider fallback", () => {
@@ -305,26 +304,6 @@ describe("provider fallback", () => {
       citedMemoryUseItemIds: [],
       contextTrace: {
         selectedMemoryUseItemIds: [],
-      },
-    });
-  });
-
-  it("keeps a deterministic clarification when the model returns a false negative", async () => {
-    vi.stubEnv("DELEGATE_MODEL_ENABLED", "true");
-    vi.stubEnv("DELEGATE_MODEL_PROVIDER", "bailian");
-    vi.stubEnv("DELEGATE_BAILIAN_API_KEY", "dashscope-key");
-    mocks.generateBailianResponse.mockResolvedValue({ replyText: '{"needsCompute":false}' });
-
-    const result = await planNaturalLanguageComputeRequest({
-      userText: "帮我生成一个报告",
-    });
-
-    expect(result).toMatchObject({
-      ok: true,
-      source: "deterministic",
-      plan: {
-        kind: "clarification",
-        missingFields: ["content"],
       },
     });
   });

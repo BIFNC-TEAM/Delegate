@@ -14,14 +14,9 @@ import {
 
 const encoder = new TextEncoder();
 const terminalStates = new Set(["waiting_approval", "completed", "failed", "canceled"]);
-const continuouslyStreamingTaskStates = new Set([
-  "draft",
-  "ready",
-  "queued",
-  "running",
-]);
 const RUN_STREAM_WINDOW_MS = 300_000;
 const PRINCIPAL_REVALIDATION_INTERVAL_MS = 2_000;
+const RUN_STREAM_POLL_INTERVAL_MS = 150;
 
 export async function GET(
   request: Request,
@@ -91,16 +86,8 @@ export async function GET(
           } else {
             controller.enqueue(encoder.encode(": keep-alive\n\n"));
           }
-          const taskStillRunning = snapshot.taskProgress
-            ? continuouslyStreamingTaskStates.has(snapshot.taskProgress.status)
-            : false;
-          const turnStillRunning = snapshot.turnProgress?.status === "running";
-          if (
-            terminalStates.has(snapshot.status)
-            && !taskStillRunning
-            && !turnStillRunning
-          ) break;
-          await wait(500, request.signal);
+          if (terminalStates.has(snapshot.status)) break;
+          await wait(RUN_STREAM_POLL_INTERVAL_MS, request.signal);
         }
       } catch (error) {
         if (!request.signal.aborted) {

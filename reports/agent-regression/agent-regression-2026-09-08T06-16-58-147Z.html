@@ -1,0 +1,56 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T06-16-58-147Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T06-16-58-147Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T06:16:58.147Z
+- Total: 31322.0 ms
+- Cases: 8/8; PASS 5, FAIL 3, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 62.50%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 7 | 7/0/0/0 | 0 | 4.3 | 0.6 | 0.6 | 0.7 | 0.7 | N/A |
+| mcp/weather-test.get_weather | 2 | 2/0/0/0 | 0 | 0.5 | 0.3 | 0.1 | 0.4 | 0.4 | N/A |
+| model/generate | 13 | 13/0/0/0 | 0 | 31283.1 | 2406.4 | 2326.7 | 3511.9 | 3511.9 | N/A |
+| request/agent_run | 7 | 7/0/0/0 | 0 | 31308.7 | 4472.7 | 4648.5 | 4968.1 | 4968.1 | N/A |
+| response/stream | 7 | 7/0/0/0 | 0 | 23342.1 | 3334.6 | 3519.5 | 4063.2 | 4063.2 | N/A |
+| web/search | 4 | 4/0/0/0 | 0 | 0.4 | 0.1 | 0.1 | 0.2 | 0.2 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| skill/未调用 | — | — | — | — | — | — | — | — | N/A |
+| sandbox/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BASIC-08 | PASS | N/A | N/A | 0 | 0 |  |
+| WEB-02 | PASS | 1525.4 | 4648.9 | 2 | 1 |  |
+| WEB-03 | FAIL | 816.2 | 4879.7 | 2 | 1 | ASSERTION_FAILED: MCP channel/tool disclosure missing |
+| WEB-04 | PASS | 1941.7 | 3512.9 | 1 | 0 |  |
+| WEB-05 | FAIL | 982.5 | 4502.0 | 2 | 1 | ASSERTION_FAILED: failed primary web channel was not attempted; fallback weather result/source missing |
+| WEB-06 | PASS | 800.3 | 4053.1 | 2 | 1 |  |
+| WEB-07 | PASS | 922.1 | 4744.8 | 2 | 1 |  |
+| WEB-08 | FAIL | 978.2 | 4968.1 | 2 | 1 | ASSERTION_FAILED: two-city weather did not query both cities; two-city facts missing |
+
+## Slowest cases
+
+- WEB-08: 4968.1 ms (request/agent_run)
+- WEB-03: 4879.7 ms (request/agent_run)
+- WEB-07: 4744.8 ms (request/agent_run)
+- WEB-02: 4648.9 ms (request/agent_run)
+- WEB-05: 4502.0 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

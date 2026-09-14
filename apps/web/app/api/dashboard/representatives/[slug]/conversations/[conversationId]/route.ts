@@ -103,8 +103,7 @@ export async function PATCH(
       && typeof error === "object"
       && "code" in error
       && (
-        error.code === "ACTIVE_DELEGATION_TASK"
-        || error.code === "CONVERSATION_WORK_IN_FLIGHT"
+        error.code === "CONVERSATION_WORK_IN_FLIGHT"
       )
     ) {
       const code = error.code;
@@ -112,7 +111,7 @@ export async function PATCH(
         {
           error: error instanceof Error
             ? error.message
-            : "An active delegation task must finish before operator takeover.",
+            : "Conversation work is currently in flight.",
           code,
         },
         { status: 409 },

@@ -1,0 +1,49 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T06-18-49-861Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T06-18-49-861Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model
+- Started: 2026-09-08T06:18:49.861Z
+- Total: 15031.4 ms
+- Cases: 3/3; PASS 2, FAIL 1, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 66.67%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 3 | 3/0/0/0 | 0 | 1.7 | 0.6 | 0.5 | 0.7 | 0.7 | N/A |
+| mcp/weather-test.get_weather | 2 | 2/0/0/0 | 0 | 0.2 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| model/generate | 6 | 6/0/0/0 | 0 | 15015.8 | 2502.6 | 2408.3 | 2812.5 | 2812.5 | N/A |
+| request/agent_run | 3 | 3/0/0/0 | 0 | 15027.4 | 5009.1 | 4874.7 | 5613.1 | 5613.1 | N/A |
+| response/stream | 3 | 3/0/0/0 | 0 | 11913.7 | 3971.2 | 3957.9 | 4567.2 | 4567.2 | N/A |
+| web/search | 1 | 1/0/0/0 | 0 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| knowledge/未调用 | — | — | — | — | — | — | — | — | N/A |
+| skill/未调用 | — | — | — | — | — | — | — | — | N/A |
+| sandbox/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+| wait/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| WEB-03 | PASS | 1151.0 | 4539.8 | 2 | 1 |  |
+| WEB-05 | FAIL | 916.8 | 4875.0 | 2 | 1 | ASSERTION_FAILED: failed primary web channel was not attempted |
+| WEB-08 | PASS | 1045.9 | 5613.2 | 2 | 1 |  |
+
+## Slowest cases
+
+- WEB-08: 5613.2 ms (request/agent_run)
+- WEB-05: 4875.0 ms (request/agent_run)
+- WEB-03: 4539.8 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 
-import { ChannelUnavailableError } from "@delegate/web-data";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -107,27 +106,6 @@ describe("Telegram conversation platform mode", () => {
     );
   });
 
-  it.each(["legacy", "shadow"] as const)(
-    "fails closed for an explicit channel pause in %s mode",
-    (mode) => {
-      expect(
-        shouldFailClosedAfterConversationPlatformWrite(
-          mode,
-          new ChannelUnavailableError("channel_paused"),
-        ),
-      ).toBe(true);
-    },
-  );
-
-  it("allows shadow mode to fall back only for a non-policy shadow-write outage", () => {
-    expect(
-      shouldFailClosedAfterConversationPlatformWrite(
-        "shadow",
-        new Error("shadow persistence unavailable"),
-      ),
-    ).toBe(false);
-  });
-
   it("always fails closed in worker mode", () => {
     expect(
       shouldFailClosedAfterConversationPlatformWrite(
@@ -137,23 +115,23 @@ describe("Telegram conversation platform mode", () => {
     ).toBe(true);
   });
 
-  it("defaults to worker and rejects legacy ownership in production", () => {
+  it("defaults to worker and rejects every retired ownership mode", () => {
     expect(resolveTelegramConversationPlatformMode({})).toBe("worker");
     expect(() =>
       resolveTelegramConversationPlatformMode({
         NODE_ENV: "production",
         TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
       }),
-    ).toThrow("Production Telegram traffic must use");
+    ).toThrow("legacy and shadow ownership are retired");
     expect(() =>
       resolveTelegramConversationPlatformMode({
         TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
       }),
-    ).toThrow("diagnostics-only");
-    expect(resolveTelegramConversationPlatformMode({
+    ).toThrow("legacy and shadow ownership are retired");
+    expect(() => resolveTelegramConversationPlatformMode({
       TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
       TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED: "true",
-    })).toBe("shadow");
+    })).toThrow("legacy and shadow ownership are retired");
   });
 
 });

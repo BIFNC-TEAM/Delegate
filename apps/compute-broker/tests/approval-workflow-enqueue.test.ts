@@ -169,8 +169,6 @@ describe("approval workflow enqueue", () => {
     ["contactId", "contact-other"],
     ["conversationId", "conversation-other"],
     ["generationRunId", "run-other"],
-    ["delegationTaskId", "task-other"],
-    ["delegationTaskStepId", "step-other"],
     ["sessionId", "session-other"],
     ["toolExecutionId", "execution-other"],
     ["subagentId", "subagent-other"],

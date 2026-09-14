@@ -8,7 +8,6 @@ const { mockGetRepresentativeRuntimeAuthoritySnapshot, mockPrisma } = vi.hoisted
   mockPrisma: {
     contact: { findFirst: vi.fn() },
     generationRun: { findFirst: vi.fn() },
-    delegationTask: { findFirst: vi.fn() },
     conversation: { findFirst: vi.fn() },
     conversationEpisode: { findFirst: vi.fn() },
   },
@@ -46,7 +45,6 @@ describe("compute runtime authority version pin", () => {
         activeVersionId: "version-activated-later",
         conversationId: "conversation-that-may-roll-over",
         generationRunId: "run-1",
-        delegationTaskId: "task-1",
       }),
     ).resolves.toBe(authority);
 
@@ -55,7 +53,6 @@ describe("compute runtime authority version pin", () => {
       "version-created-with",
     );
     expect(mockPrisma.generationRun.findFirst).not.toHaveBeenCalled();
-    expect(mockPrisma.delegationTask.findFirst).not.toHaveBeenCalled();
     expect(mockPrisma.conversation.findFirst).not.toHaveBeenCalled();
     expect(mockPrisma.conversationEpisode.findFirst).not.toHaveBeenCalled();
   });
@@ -75,7 +72,7 @@ describe("compute runtime authority version pin", () => {
     expect(mockGetRepresentativeRuntimeAuthoritySnapshot).not.toHaveBeenCalled();
   });
 
-  it("binds contact, conversation, generation run, and delegation task to one context", async () => {
+  it("binds contact, conversation, and generation run to one context", async () => {
     const authority = {
       representativeVersionId: "version-1",
       compute: { enabled: true },
@@ -84,9 +81,6 @@ describe("compute runtime authority version pin", () => {
     };
     mockPrisma.contact.findFirst.mockResolvedValue({ id: "contact-1" });
     mockPrisma.generationRun.findFirst.mockResolvedValue({
-      representativeVersionId: "version-1",
-    });
-    mockPrisma.delegationTask.findFirst.mockResolvedValue({
       representativeVersionId: "version-1",
     });
     mockPrisma.conversation.findFirst.mockResolvedValue({
@@ -106,29 +100,17 @@ describe("compute runtime authority version pin", () => {
         contactId: "contact-1",
         conversationId: "conversation-1",
         generationRunId: "run-1",
-        delegationTaskId: "task-1",
       }),
     ).resolves.toBe(authority);
 
     expect(mockPrisma.generationRun.findFirst).toHaveBeenCalledWith({
       where: {
         id: "run-1",
-        delegationTaskId: "task-1",
         conversation: {
           representativeId: "rep-1",
           id: "conversation-1",
           contactId: "contact-1",
         },
-      },
-      select: { representativeVersionId: true },
-    });
-    expect(mockPrisma.delegationTask.findFirst).toHaveBeenCalledWith({
-      where: {
-        id: "task-1",
-        representativeId: "rep-1",
-        contactId: "contact-1",
-        originConversationId: "conversation-1",
-        generationRuns: { some: { id: "run-1" } },
       },
       select: { representativeVersionId: true },
     });
@@ -152,7 +134,6 @@ describe("compute runtime authority version pin", () => {
     expect(mockPrisma.generationRun.findFirst).toHaveBeenCalledWith({
       where: {
         id: "run-from-conversation-b",
-        delegationTaskId: null,
         conversation: {
           representativeId: "rep-1",
           id: "conversation-a",
@@ -181,37 +162,6 @@ describe("compute runtime authority version pin", () => {
         generationRunId: "run-1",
       }),
     ).rejects.toThrow("generation_run_conversation_context_missing");
-  });
-
-  it("rejects runtime contexts pinned to different versions", async () => {
-    mockPrisma.contact.findFirst.mockResolvedValue({ id: "contact-1" });
-    mockPrisma.generationRun.findFirst.mockResolvedValue({
-      representativeVersionId: "version-1",
-    });
-    mockPrisma.delegationTask.findFirst.mockResolvedValue({
-      representativeVersionId: "version-2",
-    });
-    mockPrisma.conversation.findFirst.mockResolvedValue({
-      id: "conversation-1",
-      activeEpisodeId: "episode-1",
-    });
-    mockPrisma.conversationEpisode.findFirst.mockResolvedValue({
-      representativeVersionId: "version-1",
-    });
-    const { loadComputeRuntimeAuthority } = await import("../src/runtime-authority");
-
-    await expect(
-      loadComputeRuntimeAuthority({
-        representativeId: "rep-1",
-        representativeSlug: "rep-one",
-        contactId: "contact-1",
-        conversationId: "conversation-1",
-        generationRunId: "run-1",
-        delegationTaskId: "task-1",
-      }),
-    ).rejects.toThrow("compute_runtime_version_context_mismatch");
-
-    expect(mockGetRepresentativeRuntimeAuthoritySnapshot).not.toHaveBeenCalled();
   });
 
   it("uses the current active version only for contextless session creation", async () => {

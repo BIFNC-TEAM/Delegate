@@ -77,6 +77,10 @@ const publicBrokerErrors: Record<string, { statusCode: number; message: string }
     statusCode: 400,
     message: "The compute broker rejected the request.",
   },
+  sandbox_input_integrity_failed: {
+    statusCode: 502,
+    message: "The sandbox could not verify the uploaded input file.",
+  },
 };
 
 export async function createAudienceComputeSession(input: {
@@ -88,8 +92,6 @@ export async function createAudienceComputeSession(input: {
     outboxId: string;
     leaseAttempt: number;
   };
-  delegationTaskId?: string;
-  delegationTaskStepId?: string;
   subagentId: "compute-agent" | "browser-agent";
   requestedCapabilities: ToolExecutionRequest["capability"][];
   reason: string;
@@ -105,8 +107,6 @@ export async function createAudienceComputeSession(input: {
       ...(input.generationWorkLease
         ? { generationWorkLease: input.generationWorkLease }
         : {}),
-      ...(input.delegationTaskId ? { delegationTaskId: input.delegationTaskId } : {}),
-      ...(input.delegationTaskStepId ? { delegationTaskStepId: input.delegationTaskStepId } : {}),
       subagentId: input.subagentId,
       requestedBy: "audience",
       requestedCapabilities: input.requestedCapabilities,
@@ -121,6 +121,36 @@ export async function executeAudienceTool(sessionId: string, request: ToolExecut
     `/internal/compute/sessions/${sessionId}/executions`,
     { method: "POST", body: JSON.stringify(request) },
   );
+}
+
+export async function uploadAudienceComputeInput(sessionId: string, input: {
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  checksum: string;
+  base64: string;
+}) {
+  return callComputeBroker<{
+    fileName: string;
+    sandboxPath: string;
+    mimeType: string;
+    sizeBytes: number;
+    checksum: string;
+    transferDurationMs: number;
+    provider: "docker" | "daytona" | "tencent";
+  }>(`/internal/compute/sessions/${sessionId}/inputs`, {
+    method: "POST",
+    // Deliberately project the wire contract. Attachment records also carry a
+    // database id, and forwarding that extra field would be rejected by the
+    // Broker's strict input schema before any sandbox lease is started.
+    body: JSON.stringify({
+      fileName: input.fileName,
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      checksum: input.checksum,
+      base64: input.base64,
+    }),
+  });
 }
 
 export async function resolveComputeApproval(

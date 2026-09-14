@@ -31,10 +31,19 @@ async function main() {
       sessionId: runId,
     });
     const startMs = Date.now() - startedAt;
+    const inputBytes = Buffer.from("order_id,quantity,unit_price,refund_amount\nO1,2,10,1\n", "utf8");
+    const inputChecksum = createHash("sha256").update(inputBytes).digest("hex");
+    const inputTransfer = await provider.writeInput({
+      lease,
+      sessionId: runId,
+      path: "/workspace/inputs/orders.csv",
+      content: inputBytes,
+      timeoutMs: 30_000,
+    });
     const execution = await provider.execute({
       lease,
       runnerType: "docker",
-      command: "printf delegate-tencent-smoke",
+      command: "python -c \"import hashlib,pathlib; b=pathlib.Path('inputs/orders.csv').read_bytes(); print(f'{len(b)}:{hashlib.sha256(b).hexdigest()}', end='')\"",
       maxCommandSeconds: 30,
       maxStdoutBytes: 64 * 1024,
       maxStderrBytes: 64 * 1024,
@@ -43,7 +52,7 @@ async function main() {
       sessionId: runId,
       executionId: `${runId}-exec`,
     });
-    if (execution.exitCode !== 0 || execution.stdout !== "delegate-tencent-smoke") {
+    if (execution.exitCode !== 0 || execution.stdout !== `${inputBytes.byteLength}:${inputChecksum}`) {
       throw new Error("tencent_agsx_execution_contract_failed");
     }
 
@@ -67,6 +76,9 @@ async function main() {
       domain,
       codeTool,
       startMs,
+      inputTransferMs: inputTransfer.durationMs,
+      inputBytes: inputTransfer.bytes,
+      inputChecksumVerified: true,
       executionMs: execution.wallMs,
       noNetworkVerified: true,
     })}\n`);

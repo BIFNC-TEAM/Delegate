@@ -1,0 +1,152 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-08T10-08-46-862Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-08T10-08-46-862Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: mixed-real-model+scripted-control
+- Started: 2026-09-08T10:08:46.862Z
+- Total: 1273347.1 ms
+- Cases: 90/90; PASS 78, FAIL 11, BLOCKED 1, SKIP 0, REVIEW 0
+- Strict pass rate: 86.67%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| artifact/product.artifact_download | 1 | 1/0/0/0 | 0 | 40.8 | 40.8 | 40.8 | 40.8 | 40.8 | N/A |
+| artifact/register | 2 | 0/2/0/0 | 1 | 0.1 | 0.1 | 0.0 | 0.1 | 0.1 | N/A |
+| context/assemble | 139 | 139/0/0/0 | 0 | 30.4 | 0.2 | 0.2 | 0.6 | 2.1 | N/A |
+| context/product.memory_disclosure | 1 | 1/0/0/0 | 0 | 21.7 | 21.7 | 21.7 | 21.7 | 21.7 | N/A |
+| handoff/cancel | 1 | 1/0/0/0 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | N/A |
+| handoff/request | 7 | 7/0/0/0 | 0 | 0.2 | 0.0 | 0.0 | 0.1 | 0.1 | N/A |
+| knowledge/retrieve | 21 | 19/2/0/0 | 1 | 27.7 | 1.3 | 0.0 | 0.2 | 26.5 | N/A |
+| mcp/fault-test.invalid_schema | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| mcp/fault-test.oversized_result | 1 | 1/0/0/0 | 0 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | N/A |
+| mcp/orders-test.get_order | 11 | 10/1/0/0 | 1 | 1003.0 | 91.2 | 0.1 | 1002.1 | 1002.1 | N/A |
+| mcp/orders-test.list_orders | 4 | 4/0/0/0 | 0 | 174.7 | 43.7 | 0.4 | 173.6 | 173.6 | N/A |
+| mcp/orders-test.refund_order | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| mcp/tickets-test.create_ticket | 10 | 9/0/1/0 | 1 | 0.8 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| mcp/tickets-test.verify_ticket | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| mcp/weather-test.get_weather | 2 | 2/0/0/0 | 0 | 7.8 | 3.9 | 0.1 | 7.7 | 7.7 | N/A |
+| model/generate | 361 | 339/22/0/0 | 0 | 1247264.0 | 3455.0 | 2349.8 | 10429.9 | 28870.0 | N/A |
+| orchestration/product.runtime_evidence | 1 | 1/0/0/0 | 0 | 75.7 | 75.7 | 75.7 | 75.7 | 75.7 | N/A |
+| request/agent_run | 139 | 115/3/0/21 | 0 | 1270545.8 | 9140.6 | 3233.4 | 47822.2 | 126570.0 | N/A |
+| request/product.accept | 1 | 1/0/0/0 | 0 | 81.8 | 81.8 | 81.8 | 81.8 | 81.8 | N/A |
+| request/product.session | 1 | 1/0/0/0 | 0 | 68.6 | 68.6 | 68.6 | 68.6 | 68.6 | N/A |
+| response/product.sse | 1 | 1/0/0/0 | 0 | 30144.5 | 30144.5 | 30144.5 | 30144.5 | 30144.5 | N/A |
+| response/stream | 115 | 112/3/0/0 | 0 | 1117780.0 | 9719.8 | 2248.8 | 50333.9 | 125846.2 | N/A |
+| sandbox/execute | 77 | 35/41/0/1 | 0 | 21608.9 | 280.6 | 85.5 | 1070.7 | 9316.4 | N/A |
+| skill/discover | 23 | 23/0/0/0 | 0 | 2.6 | 0.1 | 0.0 | 0.2 | 1.7 | N/A |
+| skill/load | 23 | 23/0/0/0 | 0 | 1.0 | 0.0 | 0.0 | 0.2 | 0.2 | N/A |
+| wait/retry_backoff | 5 | 5/0/0/0 | 0 | 260.2 | 52.0 | 52.3 | 52.4 | 52.4 | N/A |
+| web/search | 12 | 10/2/0/0 | 1 | 1003.0 | 83.6 | 0.1 | 1002.1 | 1002.1 | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BASIC-01 | PASS | 959.3 | 1724.6 | 1 | 0 |  |
+| BASIC-02 | PASS | 915.3 | 3164.2 | 1 | 0 |  |
+| BASIC-03 | PASS | 922.0 | 2350.5 | 1 | 0 |  |
+| BASIC-04 | PASS | 911.4 | 1405.2 | 1 | 0 |  |
+| BASIC-05 | PASS | 803.9 | 1990.7 | 1 | 0 |  |
+| BASIC-06 | PASS | 732.7 | 1227.9 | 1 | 0 |  |
+| BASIC-07 | PASS | 732.8 | 7793.8 | 1 | 0 |  |
+| BASIC-08 | PASS | N/A | N/A | 0 | 0 |  |
+| KB-01 | PASS | 960.8 | 5429.9 | 2 | 1 |  |
+| KB-02 | PASS | 747.4 | 4540.7 | 2 | 1 |  |
+| KB-03 | PASS | 751.6 | 5952.4 | 2 | 1 |  |
+| KB-04 | PASS | 924.4 | 9007.5 | 2 | 1 |  |
+| KB-05 | PASS | 861.9 | 6438.7 | 2 | 1 |  |
+| KB-06 | PASS | 735.0 | 7805.3 | 2 | 1 |  |
+| KB-07 | PASS | 830.4 | 4725.7 | 2 | 1 |  |
+| KB-08 | FAIL | 772.2 | 5779.5 | 2 | 1 | ASSERTION_FAILED: probation leave entitlement was inferred beyond the source |
+| WEB-01 | PASS | 791.9 | 4075.2 | 2 | 1 |  |
+| WEB-02 | PASS | 845.5 | 3784.4 | 2 | 1 |  |
+| WEB-03 | PASS | 812.9 | 4859.2 | 2 | 1 |  |
+| WEB-04 | PASS | 777.9 | 2057.2 | 1 | 0 |  |
+| WEB-05 | PASS | 835.6 | 8512.8 | 3 | 2 |  |
+| WEB-06 | PASS | 669.8 | 4222.3 | 2 | 1 |  |
+| WEB-07 | PASS | 897.3 | 5444.0 | 2 | 1 |  |
+| WEB-08 | PASS | 859.2 | 4383.4 | 2 | 1 |  |
+| SKILL-01 | PASS | 952.0 | 51285.9 | 5 | 4 |  |
+| SKILL-02 | PASS | 867.6 | 23004.8 | 5 | 4 |  |
+| SKILL-03 | PASS | 826.3 | 18475.6 | 5 | 4 |  |
+| SKILL-04 | PASS | 852.0 | 77435.7 | 6 | 5 |  |
+| SKILL-05 | FAIL | 1030.7 | 33682.5 | 6 | 4 | ASSERTION_FAILED: empty data state missing |
+| SKILL-06 | FAIL | 1223.0 | 39260.7 | 6 | 5 | ASSERTION_FAILED: unreliable net result was not disclosed |
+| SKILL-07 | PASS | 916.9 | 31992.6 | 5 | 4 |  |
+| SKILL-08 | PASS | 851.3 | 60976.1 | 7 | 6 |  |
+| BOX-01 | PASS | 2818.2 | 3652.7 | 2 | 1 |  |
+| BOX-02 | PASS | 1141.4 | 28915.8 | 5 | 4 |  |
+| BOX-03 | PASS | 1084.5 | 31898.1 | 5 | 4 |  |
+| BOX-04 | PASS | 913.2 | 12453.6 | 2 | 1 |  |
+| BOX-05 | FAIL | 707.7 | 77938.8 | 16 | 16 | ASSERTION_FAILED: expected completed, got partial; chart image artifact missing; chart source-data artifact missing; daily net-sales values missing |
+| BOX-06 | PASS | 934.5 | 25302.2 | 7 | 6 |  |
+| BOX-07 | PASS | 1015.0 | 24210.9 | 4 | 2 |  |
+| BOX-08 | PASS | 926.0 | 5253.8 | 2 | 1 |  |
+| MCP-01 | PASS | 1057.1 | 3542.4 | 2 | 1 |  |
+| MCP-02 | PASS | 2535.9 | 4246.1 | 2 | 1 |  |
+| MCP-03 | PASS | 700.5 | 2300.6 | 1 | 0 |  |
+| MCP-04 | FAIL | 954.8 | 11711.3 | 2 | 1 | ASSERTION_FAILED: all eight rows were not reported |
+| MCP-05 | PASS | 882.8 | 4127.7 | 2 | 1 |  |
+| MCP-06 | PASS | 2610.1 | 3233.4 | 2 | 1 |  |
+| MCP-07 | PASS | 2742.7 | 4602.0 | 2 | 1 |  |
+| MCP-08 | PASS | 2692.9 | 4004.2 | 2 | 1 |  |
+| HUMAN-01 | PASS | 2696.2 | 3428.9 | 2 | 1 |  |
+| HUMAN-02 | PASS | 3058.2 | 4269.1 | 2 | 1 |  |
+| HUMAN-03 | PASS | 2844.6 | 4294.1 | 2 | 1 |  |
+| HUMAN-04 | PASS | 2893.0 | 4846.6 | 2 | 1 |  |
+| HUMAN-05 | PASS | 3043.6 | 6130.8 | 2 | 1 |  |
+| HUMAN-06 | PASS | 2946.2 | 4305.6 | 2 | 1 |  |
+| HUMAN-07 | PASS | 2103.4 | 2578.8 | 2 | 1 |  |
+| HUMAN-08 | PASS | 2979.4 | 4135.9 | 2 | 1 |  |
+| FLOW-01 | PASS | 738.4 | 21220.3 | 6 | 5 |  |
+| FLOW-02 | PASS | 914.6 | 8689.2 | 2 | 2 |  |
+| FLOW-03 | PASS | 816.1 | 9493.4 | 4 | 3 |  |
+| FLOW-04 | PASS | 19032.7 | 24285.4 | 5 | 4 |  |
+| FLOW-05 | FAIL | 928.5 | 47822.3 | 7 | 6 | ASSERTION_FAILED: report workflow capabilities were incomplete |
+| FLOW-06 | PASS | 904.5 | 12538.1 | 2 | 3 |  |
+| FLOW-07 | FAIL | 889.3 | 52076.3 | 12 | 12 | ASSERTION_FAILED: expected completed, got partial; CSV success plus chart failure path was not exercised; usable CSV was not preserved; partial completion was not accurately disclosed |
+| FLOW-08 | PASS | 689.9 | 19323.0 | 6 | 5 |  |
+| CHAT-01 | PASS | 2697.0 | 4423.2 | 2 | 1 |  |
+| CHAT-02 | FAIL | 13857.7 | 43581.1 | 10 | 8 | ASSERTION_FAILED: Shenzhen-only result missing |
+| CHAT-03 | PASS | 823.9 | 3588.0 | 1 | 0 |  |
+| CHAT-04 | PASS | N/A | 1891.3 | 2 | 1 |  |
+| CHAT-05 | PASS | N/A | 23.3 | 3 | 2 |  |
+| CHAT-06 | PASS | 912.7 | 3893.4 | 2 | 1 |  |
+| CHAT-07 | PASS | N/A | 5.8 | 4 | 2 |  |
+| CHAT-08 | PASS | N/A | 6.9 | 4 | 2 |  |
+| ERROR-01 | PASS | N/A | 1.7 | 1 | 0 |  |
+| ERROR-02 | PASS | 1034.6 | 9861.5 | 2 | 1 |  |
+| ERROR-03 | FAIL | 13178.2 | 13524.9 | 2 | 1 | ASSERTION_FAILED: tail coverage was omitted without limitation disclosure |
+| ERROR-04 | PASS | N/A | 20.0 | 5 | 5 |  |
+| ERROR-05 | PASS | 1167.8 | 41130.2 | 6 | 4 |  |
+| ERROR-06 | PASS | N/A | 70.3 | 3 | 2 |  |
+| ERROR-07 | PASS | N/A | 6.7 | 2 | 2 |  |
+| ERROR-08 | FAIL | 762.4 | 18057.3 | 6 | 5 | ASSERTION_FAILED: unverified success was presented as complete |
+| PERF-01 | PASS | 752.4 | 53503.6 | 20 | 0 |  |
+| PERF-02 | PASS | N/A | 15.3 | 8 | 6 |  |
+| PERF-03 | PASS | N/A | 1009.9 | 2 | 2 |  |
+| PERF-04 | FAIL | 723.8 | 126570.1 | 16 | 16 | ASSERTION_FAILED: expected completed, got partial; large-file row count or total is incorrect; bounded large-file summary artifact missing |
+| PERF-05 | PASS | N/A | 1.1 | 10 | 0 |  |
+| PERF-06 | PASS | N/A | 13.3 | 40 | 20 |  |
+| ARCH-01 | PASS | N/A | 6.1 | 5 | 2 |  |
+| ARCH-02 | PASS | N/A | N/A | 0 | 0 |  |
+| ARCH-03 | PASS | 1490.8 | 30439.5 | 3 | 5 |  |
+| ARCH-04 | BLOCKED | N/A | N/A | 0 | 0 | AGENT_TEST_BROWSE_BIN_MISSING: persistent browser QA driver is required |
+
+## Slowest cases
+
+- PERF-04: 126570.1 ms (request/agent_run)
+- BOX-05: 77938.8 ms (request/agent_run)
+- SKILL-04: 77435.7 ms (request/agent_run)
+- SKILL-08: 60976.1 ms (request/agent_run)
+- PERF-01: 53503.6 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

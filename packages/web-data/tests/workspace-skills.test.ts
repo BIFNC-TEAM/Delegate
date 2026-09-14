@@ -60,6 +60,12 @@ describe("workspace skill governance", () => {
       executesCode: true,
       registryTrustEligible: true,
       signatureStatus: WorkspaceSkillSignatureStatus.VERIFIED,
+    })).toBe(true);
+    expect(isWorkspaceSkillReleaseRuntimeTrusted({
+      source: SkillPackSource.OWNER_UPLOAD,
+      executesCode: true,
+      registryTrustEligible: true,
+      signatureStatus: WorkspaceSkillSignatureStatus.VERIFIED,
     })).toBe(false);
   });
 
@@ -707,8 +713,18 @@ describe("workspace skill governance", () => {
       executesCode: true,
       reviewStatus: WorkspaceSkillReviewStatus.APPROVED,
       status: WorkspaceSkillInstallStatus.INSTALLED,
+      source: SkillPackSource.CLAWHUB,
       bindings: binding,
     }).status).toBe("blocked");
+    expect(resolveWorkspaceSkillReadiness({
+      executesCode: true,
+      reviewStatus: WorkspaceSkillReviewStatus.APPROVED,
+      status: WorkspaceSkillInstallStatus.INSTALLED,
+      source: SkillPackSource.BUILTIN,
+      registryTrustEligible: true,
+      signatureStatus: WorkspaceSkillSignatureStatus.VERIFIED,
+      bindings: binding,
+    }).status).toBe("ready");
     expect(resolveWorkspaceSkillReadiness({
       executesCode: false,
       reviewStatus: WorkspaceSkillReviewStatus.NEEDS_REVIEW,

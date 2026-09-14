@@ -22,14 +22,7 @@ import {
 import { Prisma } from "@prisma/client";
 import {
   finalizeComputeApprovalConversation,
-  markDelegationTaskRunningAfterApprovalInTransaction,
-  recordConversationPlanActionAuthorization,
-  resolveServerOwnedMcpCapabilityPolicyV3,
-  terminalizeV3ActionAdmission,
-  terminalizeV3ActionAdmissionInTransaction,
-  validateDelegationApprovedExecutionInTransaction,
 } from "@delegate/web-data";
-import { stableSha256 } from "@delegate/runtime";
 
 import { createApprovalRequestForExecution } from "./approvals";
 import {
@@ -63,6 +56,7 @@ import {
 } from "./mcp-bindings";
 import {
   callRemoteMcpTool,
+  isMcpToolErrorResult,
   toMcpExecutionFailureSummary,
   toMcpHealthFailureCode,
 } from "./mcp";
@@ -86,12 +80,6 @@ import {
   serializeSession,
 } from "./serializers";
 import { SessionError } from "./session-error";
-import { persistVerifiedActionResult } from "./verified-action-results";
-import {
-  admitApprovedV3ActionExecutionInTransaction,
-  claimDelegatedGenerationExecution,
-} from "./generation-work-fence";
-import { replaceApprovedV3ExecutionSession } from "./sessions";
 
 type PolicyExecutionContext = Awaited<ReturnType<typeof loadSessionPolicyContext>>;
 type LeasedSessionRecord = {
@@ -172,8 +160,6 @@ type RuntimeExecutionResult = {
   failureSummary?: string | undefined;
   browserCapture?: BrowserCaptureSummary | undefined;
   transport: "docker" | "mcp";
-  /** Raw business payload used only by the verified ActionResult pipeline. */
-  semanticPayload?: unknown;
   transportOutcome?: "response_received" | "confirmed_not_sent" | "outcome_unknown";
   remoteUrl?: string | undefined;
   providerCostCents?: number | undefined;
@@ -237,18 +223,6 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
         }
       : {}),
   });
-  const delegatedAdmission = await admitDelegatedGenerationExecution({
-    context,
-    input: normalized,
-    generationWorkLease: input.generationWorkLease,
-    decision: effectiveDecision.decision,
-    decisionReason: effectiveDecision.reason,
-    subagentId: sessionSubagentId,
-  });
-  if (delegatedAdmission?.response) {
-    return delegatedAdmission.response;
-  }
-
   if (effectiveDecision.decision === "deny") {
     const requestPayload = buildExecutionRequestPayload(normalized);
     return blockExecution({
@@ -262,18 +236,14 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
       reason: effectiveDecision.reason,
       ...(requestPayload ? { requestPayload } : {}),
       mcpBindingId: normalized.bindingId,
-      existingExecutionId: delegatedAdmission?.execution.id,
     });
   }
 
   if (effectiveDecision.decision === "ask") {
     const requestPayload = buildExecutionRequestPayload(normalized);
-    const execution = delegatedAdmission?.execution
-      ?? await prisma.toolExecution.create({
+    const execution = await prisma.toolExecution.create({
         data: {
           sessionId,
-          delegationTaskId: context.session.delegationTaskId,
-          delegationTaskStepId: context.session.delegationTaskStepId,
           capability: mapCapabilityToDb(normalized.capability),
           subagentId: sessionSubagentId,
           status: "BLOCKED",
@@ -291,8 +261,6 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
       contactId: context.session.contactId ?? null,
       conversationId: context.session.conversationId ?? null,
       generationRunId: context.session.generationRunId ?? null,
-      delegationTaskId: context.session.delegationTaskId ?? null,
-      delegationTaskStepId: context.session.delegationTaskStepId ?? null,
       sessionId,
       executionId: execution.id,
       subagentId: sessionSubagentId,
@@ -312,7 +280,6 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
         representativeId: context.session.representativeId,
         contactId: context.session.contactId ?? null,
         conversationId: context.session.conversationId ?? null,
-        delegationTaskId: context.session.delegationTaskId ?? null,
         type: "TOOL_EXECUTION_BLOCKED",
         payload: {
           sessionId,
@@ -335,41 +302,16 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
       approvalRequest: serializeApprovalRequest(approval),
       artifacts: [],
     });
-    await persistDelegatedExecutionResponse(execution.id, response);
     return response;
   }
 
-  try {
-    return await runAllowedExecution({
-      context,
-      input: {
-        ...normalized,
-        subagentId: sessionSubagentId,
-      },
-      ...(delegatedAdmission
-        ? delegatedAdmission.execution.executionLeaseToken
-          ? {
-              existingExecutionId: delegatedAdmission.execution.id,
-              expectedExecutionLeaseToken:
-                delegatedAdmission.execution.executionLeaseToken,
-            }
-          : {
-            existingExecutionId: delegatedAdmission.execution.id,
-          }
-        : {}),
-    });
-  } catch (error) {
-    if (delegatedAdmission?.execution.planActionId) {
-      await terminalizeV3ActionAdmission({
-        executionId: delegatedAdmission.execution.id,
-        outcome: "invalid",
-        reason: error instanceof Error
-          ? error.message
-          : "v3_action_execution_failed",
-      });
-    }
-    throw error;
-  }
+  return runAllowedExecution({
+    context,
+    input: {
+      ...normalized,
+      subagentId: sessionSubagentId,
+    },
+  });
 }
 
 export async function resolveApproval(approvalId: string, rawInput: unknown) {
@@ -418,35 +360,21 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
       });
       if (expired.count !== 1) return false;
 
-      const expiringExecution = approval.toolExecutionId
-        ? await tx.toolExecution.findUnique({
-            where: { id: approval.toolExecutionId },
-          })
-        : null;
-      if (expiringExecution?.planActionId) {
-        await terminalizeV3ActionAdmissionInTransaction(tx, {
-          executionId: expiringExecution.id,
-          outcome: "expired",
-          reason: "approval_request_expired",
-        });
-      } else {
-        await tx.toolExecution.updateMany({
-          where: {
-            approvalRequestId: approval.id,
-            status: "BLOCKED",
-          },
-          data: {
-            status: "CANCELED",
-            finishedAt: resolutionStartedAt,
-          },
-        });
-      }
+      await tx.toolExecution.updateMany({
+        where: {
+          approvalRequestId: approval.id,
+          status: "BLOCKED",
+        },
+        data: {
+          status: "CANCELED",
+          finishedAt: resolutionStartedAt,
+        },
+      });
       await tx.eventAudit.create({
         data: {
           representativeId: approval.representativeId,
           contactId: approval.contactId ?? null,
           conversationId: approval.conversationId ?? null,
-          delegationTaskId: approval.delegationTaskId ?? null,
           type: "APPROVAL_RESOLVED",
           payload: {
             approvalRequestId: approval.id,
@@ -504,22 +432,15 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
           where: { id: approval.id },
         });
 
-        const nextExecution =
-          blockedExecution
-            ? blockedExecution.planActionId
-              ? await terminalizeV3ActionAdmissionInTransaction(tx, {
-                  executionId: blockedExecution.id,
-                  outcome: "rejected",
-                  reason: input.decisionNote ?? "owner_rejected_action_intent",
-                })
-              : await tx.toolExecution.update({
-                  where: { id: blockedExecution.id },
-                  data: {
-                    status: "CANCELED",
-                    finishedAt: resolvedAt,
-                  },
-                })
-            : null;
+        const nextExecution = blockedExecution
+          ? await tx.toolExecution.update({
+              where: { id: blockedExecution.id },
+              data: {
+                status: "CANCELED",
+                finishedAt: resolvedAt,
+              },
+            })
+          : null;
 
         const nextSession =
           approval.sessionId
@@ -537,7 +458,6 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
             representativeId: approval.representativeId,
             contactId: approval.contactId ?? null,
             conversationId: approval.conversationId ?? null,
-            delegationTaskId: approval.delegationTaskId ?? null,
             type: "APPROVAL_RESOLVED",
             payload: {
               approvalRequestId: approval.id,
@@ -576,50 +496,8 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     });
   }
 
-  const delegatedApprovalContext =
-    approval.delegationTaskId
-      ? {
-          taskId: approval.delegationTaskId,
-          stepId: approval.delegationTaskStepId,
-          generationRunId: approval.generationRunId,
-          originConversationId: approval.conversationId,
-          approvalId: approval.id,
-        }
-      : null;
-  if (
-    delegatedApprovalContext
-    && (
-      !delegatedApprovalContext.stepId
-      || !delegatedApprovalContext.generationRunId
-      || !delegatedApprovalContext.originConversationId
-    )
-  ) {
-    throw new SessionError(409, "delegation_approval_context_incomplete");
-  }
-
   const resolvedAt = new Date();
   const updatedApproval = await prisma.$transaction(async (tx) => {
-    if (
-      delegatedApprovalContext?.stepId
-      && delegatedApprovalContext.generationRunId
-      && delegatedApprovalContext.originConversationId
-    ) {
-      await tx.$executeRaw`
-        SELECT pg_advisory_xact_lock(
-          hashtext(${delegatedApprovalContext.originConversationId})
-        )
-      `;
-      await tx.$executeRaw`
-        SELECT pg_advisory_xact_lock(
-          hashtext(${delegatedApprovalContext.generationRunId})
-        )
-      `;
-      await tx.$executeRaw`
-        SELECT pg_advisory_xact_lock(
-          hashtext(${delegatedApprovalContext.taskId})
-        )
-      `;
-    }
     const claimedApproval = await tx.approvalRequest.updateMany({
       where: { id: approval.id, status: "PENDING" },
       data: {
@@ -635,21 +513,6 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     const nextApproval = await tx.approvalRequest.findUniqueOrThrow({
       where: { id: approval.id },
     });
-
-    if (
-      delegatedApprovalContext?.stepId
-      && delegatedApprovalContext.generationRunId
-      && delegatedApprovalContext.originConversationId
-    ) {
-      await markDelegationTaskRunningAfterApprovalInTransaction(tx, {
-        taskId: delegatedApprovalContext.taskId,
-        stepId: delegatedApprovalContext.stepId,
-        generationRunId: delegatedApprovalContext.generationRunId,
-        originConversationId: delegatedApprovalContext.originConversationId,
-        approvalId: delegatedApprovalContext.approvalId,
-        actorId: input.resolvedBy ?? "owner-dashboard",
-      });
-    }
 
     if (blockedExecution) {
       const queued = await tx.toolExecution.updateMany({
@@ -672,7 +535,6 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
         representativeId: approval.representativeId,
         contactId: approval.contactId ?? null,
         conversationId: approval.conversationId ?? null,
-        delegationTaskId: approval.delegationTaskId ?? null,
         type: "APPROVAL_RESOLVED",
         payload: {
           approvalRequestId: approval.id,
@@ -698,7 +560,7 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
       });
     }
 
-    if (approval.sessionId && !blockedExecution?.planActionId) {
+    if (approval.sessionId) {
       const expiryCeiling = resolveApprovalSessionExpiryCeiling({
         existingExpiresAt: approval.session?.expiresAt ?? null,
         resolvedAt,
@@ -769,11 +631,6 @@ export async function processNextApprovedExecution() {
         >;
         executionLeaseToken: string;
       }
-    | {
-        kind: "invalid";
-        approvalId: string;
-        reason: string;
-      }
     | null = null;
   for (const candidate of queuedExecutions) {
     if (!candidate.approvalRequestId) continue;
@@ -794,64 +651,6 @@ export async function processNextApprovedExecution() {
         || candidateApproval.toolExecutionId !== currentExecution.id
       ) {
         return null;
-      }
-
-      if (candidateApproval.delegationTaskId) {
-        const invalidContext =
-          !candidateApproval.delegationTaskStepId
-          || !candidateApproval.generationRunId
-          || !candidateApproval.conversationId
-          || currentExecution.delegationTaskId
-            !== candidateApproval.delegationTaskId
-          || currentExecution.delegationTaskStepId
-            !== candidateApproval.delegationTaskStepId;
-        const validation = invalidContext
-          ? {
-              ready: false as const,
-              reason: "delegation_approval_context_mismatch",
-            }
-          : await validateDelegationApprovedExecutionInTransaction(tx, {
-              taskId: candidateApproval.delegationTaskId,
-              stepId: candidateApproval.delegationTaskStepId!,
-              generationRunId: candidateApproval.generationRunId!,
-              originConversationId: candidateApproval.conversationId!,
-              approvalId: candidateApproval.id,
-            });
-        if (!validation.ready) {
-          const now = new Date();
-          if (currentExecution.planActionId) {
-            await terminalizeV3ActionAdmissionInTransaction(tx, {
-              executionId: currentExecution.id,
-              outcome: "invalid",
-              reason: validation.reason,
-            });
-          } else {
-            await tx.toolExecution.updateMany({
-              where: {
-                id: currentExecution.id,
-                status: "QUEUED",
-              },
-              data: {
-                status: "CANCELED",
-                finishedAt: now,
-                executionLeaseToken: null,
-              },
-            });
-          }
-          await tx.computeSession.updateMany({
-            where: { id: requireExecutionSessionId(currentExecution) },
-            data: {
-              status: "IDLE",
-              failureReason: validation.reason,
-              lastHeartbeatAt: now,
-            },
-          });
-          return {
-            kind: "invalid" as const,
-            approvalId: candidateApproval.id,
-            reason: validation.reason,
-          };
-        }
       }
 
       const executionLeaseToken = createExecutionLeaseToken();
@@ -886,29 +685,10 @@ export async function processNextApprovedExecution() {
     }
   }
   if (!claim) return false;
-  if (claim.kind === "invalid") {
-    await finalizeComputeApprovalConversation({
-      approvalId: claim.approvalId,
-      outcome: "failed",
-      failureReason: claim.reason,
-    });
-    return true;
-  }
   const { execution, approval, executionLeaseToken } = claim;
-  let executionForRun = execution;
+  const executionForRun = execution;
 
   try {
-    if (execution.planActionId) {
-      const rebound = await replaceApprovedV3ExecutionSession({
-        executionId: execution.id,
-        approvalId: approval.id,
-        executionLeaseToken,
-      });
-      if (!rebound) {
-        throw new SessionError(409, "approval_request_execution_missing");
-      }
-      executionForRun = rebound;
-    }
     if (
       approval.requestPayloadHash &&
       hashRequestPayload(normalizePersistedRequestPayload(executionForRun.requestPayload)) !==
@@ -935,39 +715,22 @@ export async function processNextApprovedExecution() {
     });
 
     if (decision.decision === "deny") {
-      if (executionForRun.planActionId) {
-        await recordConversationPlanActionAuthorization({
-          planActionId: executionForRun.planActionId,
-          phase: "pre_execution",
-          decision: "deny",
-          reason: decision.reason,
-          policyVersion: "compute-broker.runtime.1",
-        });
-      }
       const now = new Date();
       const denied = await prisma.$transaction(async (tx) => {
-        if (executionForRun.planActionId) {
-          await terminalizeV3ActionAdmissionInTransaction(tx, {
-            executionId: executionForRun.id,
-            outcome: "policy_denied",
-            reason: decision.reason,
-          });
-        } else {
-          const canceled = await tx.toolExecution.updateMany({
-            where: {
-              id: executionForRun.id,
-              status: "RUNNING",
-              executionLeaseToken,
-            },
-            data: {
-              status: "CANCELED",
-              finishedAt: now,
-              policyDecision: "DENY",
-              executionLeaseToken: null,
-            },
-          });
-          if (canceled.count !== 1) return false;
-        }
+        const canceled = await tx.toolExecution.updateMany({
+          where: {
+            id: executionForRun.id,
+            status: "RUNNING",
+            executionLeaseToken,
+          },
+          data: {
+            status: "CANCELED",
+            finishedAt: now,
+            policyDecision: "DENY",
+            executionLeaseToken: null,
+          },
+        });
+        if (canceled.count !== 1) return false;
         await tx.computeSession.update({
           where: { id: requireExecutionSessionId(executionForRun) },
           data: {
@@ -989,83 +752,23 @@ export async function processNextApprovedExecution() {
       return true;
     }
 
-    if (
-      approval.delegationTaskId
-      && approval.delegationTaskStepId
-      && approval.generationRunId
-      && approval.conversationId
-    ) {
-      const validation = await prisma.$transaction(async (tx) => {
-        const ready =
-          await validateDelegationApprovedExecutionInTransaction(tx, {
-            taskId: approval.delegationTaskId!,
-            stepId: approval.delegationTaskStepId!,
-            generationRunId: approval.generationRunId!,
-            originConversationId: approval.conversationId!,
-            approvalId: approval.id,
-          });
-        if (!ready.ready) return ready;
-        const retained = await tx.toolExecution.updateMany({
-          where: {
-            id: execution.id,
-            status: "RUNNING",
-            executionLeaseToken,
-            approvalRequestId: approval.id,
-          },
-          data: {
-            startedAt: execution.startedAt ?? new Date(),
-          },
-        });
-        if (retained.count !== 1) {
-          return {
-            ready: false as const,
-            reason: "compute_execution_claim_lost",
-          };
-        }
-        await admitApprovedV3ActionExecutionInTransaction(tx, {
-          executionId: execution.id,
-          approvalId: approval.id,
-          executionLeaseToken,
-          decisionReason: decision.reason,
-          policyVersion: "compute-broker.runtime.1",
-        });
-        await tx.delegationTaskExternalEffect.updateMany({
-          where: {
-            delegationTaskId: approval.delegationTaskId!,
-            delegationTaskStepId: approval.delegationTaskStepId!,
-            approvalRequestId: approval.id,
-            status: "APPROVED",
-          },
-          data: normalized.capability === "mcp"
-            ? { failureReason: null }
-            : { status: "EXECUTING", failureReason: null },
-        });
-        return ready;
-      });
-      if (!validation.ready) {
-        throw new SessionError(409, validation.reason);
-      }
-    }
-
     const result = await runAllowedExecution({
       context: evaluated.context,
       input: normalized,
       existingExecutionId: execution.id,
       expectedExecutionLeaseToken: executionLeaseToken,
     });
-    if (shouldFinalizeApprovedExecutionImmediately(executionForRun)) {
-      await finalizeComputeApprovalConversation({
-        approvalId: approval.id,
-        outcome: result.outcome === "completed" ? "completed" : "failed",
-        artifacts: result.artifacts.map((artifact) => ({
-          ...artifact,
-          ...(artifact.kind === "file" && normalized.path
-            ? { fileName: normalized.path.split("/").pop() || "result.txt" }
-            : {}),
-        })),
-        ...(result.session.failureReason ? { failureReason: result.session.failureReason } : {}),
-      });
-    }
+    await finalizeComputeApprovalConversation({
+      approvalId: approval.id,
+      outcome: result.outcome === "completed" ? "completed" : "failed",
+      artifacts: result.artifacts.map((artifact) => ({
+        ...artifact,
+        ...(artifact.kind === "file" && normalized.path
+          ? { fileName: normalized.path.split("/").pop() || "result.txt" }
+          : {}),
+      })),
+      ...(result.session.failureReason ? { failureReason: result.session.failureReason } : {}),
+    });
   } catch (error) {
     if (
       error instanceof SessionError
@@ -1076,29 +779,19 @@ export async function processNextApprovedExecution() {
     const reason = error instanceof Error ? error.message : "approved_compute_execution_failed";
     const now = new Date();
     const closure = await prisma.$transaction(async (tx) => {
-      if (executionForRun.planActionId) {
-        await terminalizeV3ActionAdmissionInTransaction(tx, {
-          executionId: executionForRun.id,
-          outcome: "invalid",
-          reason,
-        });
-      } else {
-        const terminalized = await tx.toolExecution.updateMany({
-          where: {
-            id: executionForRun.id,
-            status: "RUNNING",
-            executionLeaseToken,
-          },
-          data: {
-            status: "FAILED",
-            finishedAt: now,
-            executionLeaseToken: null,
-          },
-        });
-        if (terminalized.count !== 1) {
-          return { closed: false, deferToV3Result: false };
-        }
-      }
+      const terminalized = await tx.toolExecution.updateMany({
+        where: {
+          id: executionForRun.id,
+          status: "RUNNING",
+          executionLeaseToken,
+        },
+        data: {
+          status: "FAILED",
+          finishedAt: now,
+          executionLeaseToken: null,
+        },
+      });
+      if (terminalized.count !== 1) return false;
       await tx.computeSession.updateMany({
         where: { id: requireExecutionSessionId(executionForRun) },
         data: {
@@ -1107,19 +800,9 @@ export async function processNextApprovedExecution() {
           lastHeartbeatAt: now,
         },
       });
-      const action = executionForRun.planActionId
-        ? await tx.conversationPlanAction.findUnique({
-            where: { id: executionForRun.planActionId },
-            select: { status: true },
-          })
-        : null;
-      return {
-        closed: true,
-        deferToV3Result: action?.status === "RECONCILIATION_REQUIRED"
-          || action?.status === "SUCCEEDED",
-      };
+      return true;
     });
-    if (closure.closed && !closure.deferToV3Result) {
+    if (closure) {
       await finalizeComputeApprovalConversation({
         approvalId: approval.id,
         outcome: "failed",
@@ -1129,15 +812,6 @@ export async function processNextApprovedExecution() {
   }
 
   return true;
-}
-
-export function shouldFinalizeApprovedExecutionImmediately(execution: {
-  planActionId: string | null;
-}) {
-  // V3 ActionResults are finalized by the semantic reconciler, which can
-  // distinguish succeeded, confirmed failure, and reconciliation-required.
-  // Legacy attempts have no ActionResult and retain the direct path.
-  return execution.planActionId === null;
 }
 
 export async function listSessionArtifacts(sessionId: string) {
@@ -1180,174 +854,7 @@ export async function listSessionApprovals(sessionId: string) {
   });
 }
 
-async function admitDelegatedGenerationExecution(params: {
-  context: PolicyExecutionContext;
-  input: NormalizedExecutionInput;
-  generationWorkLease?: ToolExecutionRequest["generationWorkLease"];
-  decision: "allow" | "ask" | "deny";
-  decisionReason: string;
-  subagentId: ComputeSubagentId;
-}): Promise<{
-  execution: Awaited<
-    ReturnType<typeof claimDelegatedGenerationExecution>
-  >["execution"];
-  response?: ExecuteToolResponse;
-} | null> {
-  const session = params.context.session;
-  const isDelegated = Boolean(
-    session.delegationTaskId || session.delegationTaskStepId,
-  );
-  if (!isDelegated) return null;
-  if (
-    !session.conversationId
-    || !session.generationRunId
-    || !session.delegationTaskId
-    || !session.delegationTaskStepId
-    || !params.generationWorkLease
-  ) {
-    throw new SessionError(409, "delegation_generation_lease_required");
-  }
-
-  const descriptor = describeExecution(params.context, params.input);
-  const requestPayload = buildExecutionRequestPayload(params.input);
-  const requestPayloadHash = hashRequestPayload(requestPayload);
-  const startedAt = params.decision === "allow" ? new Date() : null;
-  const executionLeaseToken =
-    params.decision === "allow" ? createExecutionLeaseToken() : null;
-  const admission = await prisma.$transaction((tx) =>
-    claimDelegatedGenerationExecution(tx, {
-      sessionId: session.id,
-      conversationId: session.conversationId!,
-      generationRunId: session.generationRunId!,
-      delegationTaskId: session.delegationTaskId!,
-      delegationTaskStepId: session.delegationTaskStepId!,
-      ...params.generationWorkLease!,
-      requestPayloadHash,
-      authorization: {
-        decision: params.decision,
-        reason: params.decisionReason,
-        policyVersion: "compute-broker.runtime.1",
-      },
-      execution: {
-        delegationTaskId: session.delegationTaskId,
-        delegationTaskStepId: session.delegationTaskStepId,
-        capability: mapCapabilityToDb(descriptor.capability),
-        subagentId: params.subagentId,
-        status: params.decision === "allow" ? "RUNNING" : "BLOCKED",
-        requestedCommand: descriptor.requestedCommand ?? null,
-        requestedPath: descriptor.requestedPath ?? null,
-        requestPayload,
-        workingDirectory: descriptor.workingDirectory ?? null,
-        mcpBindingId: params.input.bindingId ?? null,
-        policyDecision: mapPolicyDecisionToDb(params.decision),
-        startedAt,
-        executionLeaseToken,
-      },
-    }),
-  );
-  if (admission.claimed) {
-    return { execution: admission.execution };
-  }
-
-  const response = await replayDelegatedGenerationExecution({
-    context: params.context,
-    execution: admission.execution,
-    decision: params.decision,
-  });
-  return response
-    ? { execution: admission.execution, response }
-    : { execution: admission.execution };
-}
-
-async function replayDelegatedGenerationExecution(params: {
-  context: PolicyExecutionContext;
-  execution: Awaited<
-    ReturnType<typeof claimDelegatedGenerationExecution>
-  >["execution"];
-  decision: "allow" | "ask" | "deny";
-}): Promise<ExecuteToolResponse | null> {
-  if (params.execution.status === "RUNNING" || params.execution.status === "QUEUED") {
-    throw new SessionError(409, "generation_execution_in_progress");
-  }
-
-  const approval = await prisma.approvalRequest.findUnique({
-    where: { toolExecutionId: params.execution.id },
-  });
-  if (
-    params.execution.status === "BLOCKED"
-    && params.decision === "ask"
-    && !approval
-  ) {
-    return null;
-  }
-  if (
-    params.execution.responseSnapshot
-    && (
-      params.execution.status === "SUCCEEDED"
-      || params.execution.status === "FAILED"
-      || (
-        params.execution.status === "BLOCKED"
-        && approval?.status === "PENDING"
-      )
-    )
-  ) {
-    return executeToolResponseSchema.parse(params.execution.responseSnapshot);
-  }
-
-  const [session, artifacts, ledgerEntries] = await Promise.all([
-    prisma.computeSession.findUnique({
-      where: { id: requireExecutionSessionId(params.execution) },
-    }),
-    prisma.artifact.findMany({
-      where: { toolExecutionId: params.execution.id },
-      orderBy: { createdAt: "asc" },
-    }),
-    params.execution.planActionId
-      ? Promise.resolve([])
-      : prisma.ledgerEntry.findMany({
-          where: { toolExecutionId: params.execution.id },
-        }),
-  ]);
-  if (!session) {
-    throw new SessionError(409, "generation_execution_context_mismatch");
-  }
-
-  const costFor = (kind: string) =>
-    ledgerEntries
-      .filter((entry) => entry.kind === kind)
-      .reduce((total, entry) => total + Math.max(0, entry.costCents), 0);
-  const outcome = approval?.status === "PENDING"
-    ? "pending_approval"
-    : params.execution.status === "SUCCEEDED"
-      ? "completed"
-      : params.execution.status === "BLOCKED"
-        ? "blocked"
-        : "failed";
-  return executeToolResponseSchema.parse({
-    outcome,
-    session: serializeSession(session),
-    execution: serializeExecution(params.execution),
-    ...(approval ? { approvalRequest: serializeApprovalRequest(approval) } : {}),
-    artifacts: artifacts.map((artifact) => serializeArtifact(artifact)),
-    billing: params.execution.planActionId
-      ? {
-          computeCostCents: 0,
-          browserCostCents: 0,
-          providerCostCents: 0,
-          mcpCostCents: 0,
-          storageCostCents: 0,
-        }
-      : {
-          computeCostCents: costFor("COMPUTE_MINUTES"),
-          browserCostCents: costFor("BROWSER_MINUTES"),
-          providerCostCents: costFor("MODEL_USAGE"),
-          mcpCostCents: costFor("MCP_CALLS"),
-          storageCostCents: costFor("STORAGE_BYTES"),
-        },
-  });
-}
-
-async function persistDelegatedExecutionResponse(
+async function persistGenerationExecutionResponse(
   executionId: string,
   response: ExecuteToolResponse,
 ) {
@@ -1416,8 +923,6 @@ async function runAllowedExecution(params: {
       : await prisma.toolExecution.create({
         data: {
           sessionId: params.context.session.id,
-          delegationTaskId: params.context.session.delegationTaskId,
-          delegationTaskStepId: params.context.session.delegationTaskStepId,
           capability: mapCapabilityToDb(executionDescriptor.capability),
           subagentId: params.input.subagentId,
           status: "RUNNING",
@@ -1454,9 +959,6 @@ async function runAllowedExecution(params: {
   });
 
   const runtimeStartedAt = Date.now();
-  if (params.input.capability !== "mcp" && execution.planActionId) {
-    await markV3ExecutionCallStarted(execution.id, executionLeaseToken);
-  }
   const runtimeResult =
     await (async () => {
       try {
@@ -1488,15 +990,8 @@ async function runAllowedExecution(params: {
           browserCapture: undefined,
           transport: params.input.capability === "mcp" ? ("mcp" as const) : ("docker" as const),
           transportOutcome: params.input.capability === "mcp"
-            ? classifyMcpTransportOutcome(
-                error,
-                execution.planActionId
-                  ? "confirmed_not_sent"
-                  : "outcome_unknown",
-              )
-            : execution.planActionId
-              ? ("outcome_unknown" as const)
-              : ("response_received" as const),
+            ? classifyMcpTransportOutcome(error, "outcome_unknown")
+            : ("response_received" as const),
           remoteUrl: undefined,
         } satisfies RuntimeExecutionResult;
       }
@@ -1538,7 +1033,6 @@ async function runAllowedExecution(params: {
     conversationId: params.context.session.conversationId ?? null,
     sessionId: leasedSession.id,
     toolExecutionId: execution.id,
-    delegationTaskId: params.context.session.delegationTaskId,
     computeCostCents,
     browserCostCents: runtimeResult.browserCostCents ?? 0,
     providerCostCents: runtimeResult.providerCostCents ?? 0,
@@ -1575,13 +1069,11 @@ async function runAllowedExecution(params: {
       : {}),
   });
 
-  if (!execution.planActionId) {
-    await prisma.eventAudit.create({
+  await prisma.eventAudit.create({
       data: {
         representativeId: params.context.session.representativeId,
         contactId: params.context.session.contactId ?? null,
         conversationId: params.context.session.conversationId ?? null,
-        delegationTaskId: params.context.session.delegationTaskId ?? null,
         type: "BILLING_LEDGER_RECORDED",
         payload: {
           sessionId: leasedSession.id,
@@ -1607,16 +1099,10 @@ async function runAllowedExecution(params: {
             + billing.storageCostCents,
         },
       },
-    });
-  }
+  });
 
   const [updatedExecution, updatedSession] = await prisma.$transaction(
     async (tx) => {
-      const v3ResponseState = execution.planActionId
-        ? buildV3PreverificationAttemptState(
-            runtimeResult.transportOutcome ?? "response_received",
-          )
-        : null;
       const finalized = await tx.toolExecution.updateMany({
         where: {
           id: execution.id,
@@ -1624,11 +1110,9 @@ async function runAllowedExecution(params: {
           executionLeaseToken,
         },
         data: {
-          ...(v3ResponseState ?? {
-            status: runtimeResult.exitCode === 0 ? "SUCCEEDED" as const : "FAILED" as const,
-            finishedAt,
-            executionLeaseToken: null,
-          }),
+          status: runtimeResult.exitCode === 0 ? "SUCCEEDED" as const : "FAILED" as const,
+          finishedAt,
+          executionLeaseToken: null,
           exitCode: runtimeResult.exitCode,
           wallMs: runtimeResult.wallMs,
           cpuMs: null,
@@ -1658,21 +1142,7 @@ async function runAllowedExecution(params: {
     },
   );
 
-  let resultExecution = updatedExecution;
-  if (updatedExecution.planActionId) {
-    await persistVerifiedActionResult({
-      executionAttemptId: updatedExecution.id,
-      transportOutcome: runtimeResult.transportOutcome ?? "response_received",
-      rawOutput: runtimeResult.semanticPayload ?? {
-        exitCode: runtimeResult.exitCode,
-        artifactRefs: runtimeResult.artifacts.map((artifact) => artifact.id),
-      },
-      artifactRefs: runtimeResult.artifacts.map((artifact) => artifact.id),
-    });
-    resultExecution = await prisma.toolExecution.findUniqueOrThrow({
-      where: { id: updatedExecution.id },
-    });
-  }
+  const resultExecution = updatedExecution;
 
   if (runtimeResult.nativeComputerUse) {
     const responseOutcome = resolveExecutionResponseOutcome({
@@ -1687,7 +1157,7 @@ async function runAllowedExecution(params: {
       billing,
       nativeComputerUse: runtimeResult.nativeComputerUse,
     });
-    await persistDelegatedExecutionResponse(execution.id, response);
+    await persistGenerationExecutionResponse(execution.id, response);
     return response;
   }
 
@@ -1702,7 +1172,7 @@ async function runAllowedExecution(params: {
     artifacts: runtimeResult.artifacts.map((artifact) => serializeArtifact(artifact)),
     billing,
   });
-  await persistDelegatedExecutionResponse(execution.id, response);
+  await persistGenerationExecutionResponse(execution.id, response);
   return response;
 }
 
@@ -1722,43 +1192,11 @@ export async function resolveExecutionSessionForCapability(input: {
 export function resolveExecutionResponseOutcome(input: {
   runtimeExitCode: number;
   execution: {
-    planActionId: string | null;
     status: string;
     semanticOutcome: string | null;
   };
 }) {
-  if (!input.execution.planActionId) {
-    return input.runtimeExitCode === 0 ? "completed" as const : "failed" as const;
-  }
-  return input.execution.status === "SUCCEEDED"
-    && input.execution.semanticOutcome === "succeeded"
-    ? "completed" as const
-    : "failed" as const;
-}
-
-/**
- * A V3 transport response is not a business-success terminal state. Keep the
- * attempt claimed until persistVerifiedActionResult atomically writes the
- * ActionResult and converges ToolExecution + PlanAction.
- */
-export function buildV3PreverificationAttemptState(
-  transportOutcome:
-    | "response_received"
-    | "confirmed_not_sent"
-    | "transport_failed"
-    | "outcome_unknown",
-) {
-  return {
-    status: "RUNNING" as const,
-    attemptPhase: transportOutcome === "response_received"
-      ? "RESPONSE_RECEIVED" as const
-      : "VERIFYING" as const,
-    transportOutcome,
-    semanticOutcome: null,
-    finishedAt: null,
-    // Deliberately retain executionLeaseToken. The verifier clears it in the
-    // same transaction that creates the terminal ActionResult.
-  };
+  return input.runtimeExitCode === 0 ? "completed" as const : "failed" as const;
 }
 
 function describeExecution(
@@ -2338,14 +1776,13 @@ async function runMcpExecution(params: {
     binding,
     requestedToolName: params.input.toolName,
   });
-  const v3Pin = await loadV3McpExecutionPin({
-    executionId: params.executionId,
-    bindingId: binding.id,
-    serverUrl: binding.serverUrl,
-    transportKind: binding.transportKind,
-    bindingRevision: binding.configRevision,
-    toolName: resolved.toolName,
-  });
+  const runtimeDefinition = params.context.runtimeAuthority.mcpBindings
+    .find((grant) => grant.id === binding.id)
+    ?.toolDefinitions?.find(
+      (definition) =>
+        definition.exactToolName === resolved.toolName
+        && definition.bindingRevision === binding.configRevision,
+    );
   const startedAt = new Date();
   const healthObservation = await beginRepresentativeMcpBindingHealthObservation({
     bindingId: binding.id,
@@ -2362,8 +1799,8 @@ async function runMcpExecution(params: {
       },
       requestedToolName: resolved.toolName,
       toolArguments: params.input.toolArguments,
-      retrySafe: v3Pin?.retrySafe ?? false,
-      ...(v3Pin
+      retrySafe: params.input.serverVerifiedReadOnlyMcp ?? false,
+      ...(runtimeDefinition
         ? {
             onToolsListed: async (tools: Array<{
               name: string;
@@ -2372,14 +1809,13 @@ async function runMcpExecution(params: {
             }>) => {
               assertLiveMcpToolSchemaPin({
                 toolName: resolved.toolName,
-                expectedToolSchemaHash: v3Pin.toolSchemaHash,
+                expectedToolSchemaHash: runtimeDefinition.toolSchemaHash,
                 tools,
               });
             },
           }
         : {}),
       onBeforeToolCall: async () => {
-        await markDelegatedMcpExternalEffectExecuting(params.context);
         externalCallStarted = true;
       },
     });
@@ -2433,17 +1869,17 @@ async function runMcpExecution(params: {
     value: payload,
     summary: toolResult.summary,
   });
+  const semanticError = isMcpToolErrorResult(toolResult.result);
 
   return {
-    exitCode: 0,
+    exitCode: semanticError ? 1 : 0,
     wallMs: Date.now() - startedAt.getTime(),
     bytesRead: Buffer.byteLength(JSON.stringify(payload), "utf8"),
     artifacts: [artifact],
-    failureSummary: undefined,
+    failureSummary: semanticError ? "external_tool_error_result" : undefined,
     browserCapture: undefined,
     transport: "mcp" as const,
     transportOutcome: "response_received" as const,
-    semanticPayload: normalizeMcpSemanticPayload(toolResult.result),
     remoteUrl: binding.serverUrl,
     providerCostCents: 0,
     browserCostCents: 0,
@@ -2451,257 +1887,6 @@ async function runMcpExecution(params: {
     // accounting remains an independent cent-denominated runtime setting.
     mcpCostCents: computeBrokerConfig.mcpDefaultCostCentsPerCall,
   };
-}
-
-async function loadV3McpExecutionPin(input: {
-  executionId: string;
-  bindingId: string;
-  serverUrl: string;
-  transportKind: string;
-  bindingRevision: number;
-  toolName: string;
-}) {
-  const execution = await prisma.toolExecution.findUnique({
-    where: { id: input.executionId },
-    include: {
-      planAction: true,
-      delegationTaskStep: true,
-    },
-  });
-  if (!execution?.planAction) return null;
-  const snapshot = asRecord(execution.delegationTaskStep?.inputSnapshot);
-  const compiled = asRecord(snapshot?.["executionRequest"]);
-  if (
-    compiled?.["executor"] !== "mcp"
-    || compiled["actionId"] !== execution.planAction.id
-    || compiled["bindingId"] !== input.bindingId
-    || compiled["bindingRevision"] !== input.bindingRevision
-    || compiled["toolName"] !== input.toolName
-  ) {
-    throw new SessionError(409, "mcp_compiled_request_coordinate_mismatch");
-  }
-  const expectedDefinitionHash = stripSha256(String(
-    compiled["capabilityDefinitionHash"] ?? "",
-  ));
-  if (
-    expectedDefinitionHash !== execution.planAction.capabilityDefinitionHash
-  ) {
-    throw new SessionError(409, "capability_definition_drift_replan_required");
-  }
-  const published = await prisma.mcpToolDefinition.findUnique({
-    where: {
-      bindingId_bindingRevision_exactToolName: {
-        bindingId: input.bindingId,
-        bindingRevision: input.bindingRevision,
-        exactToolName: input.toolName,
-      },
-    },
-  });
-  const expectedToolSchemaHash = stripSha256(String(
-    compiled["expectedToolSchemaHash"] ?? "",
-  ));
-  const expectedBindingDefinitionHash = stripSha256(String(
-    compiled["expectedBindingDefinitionHash"] ?? "",
-  ));
-  if (
-    !published
-    || published.availability !== "ready"
-    || published.supersededAt
-    || published.toolSchemaHash !== expectedToolSchemaHash
-    || published.bindingDefinitionHash !== expectedBindingDefinitionHash
-  ) {
-    throw new SessionError(409, "mcp_published_definition_drift_replan_required");
-  }
-  const currentPolicy = assertCurrentMcpEffectPolicyPin({
-    serverUrl: input.serverUrl,
-    transportKind: input.transportKind,
-    toolName: input.toolName,
-    toolSchemaHash: published.toolSchemaHash,
-    bindingRevision: input.bindingRevision,
-    capabilityVersion: execution.planAction.capabilityVersion,
-    plannedEffect: asRecord(execution.planAction.inputSnapshot)?.["effect"],
-    plannedSuccessContract: execution.planAction.successContract,
-  });
-  return {
-    toolSchemaHash: expectedToolSchemaHash,
-    retrySafe:
-      currentPolicy.effect.mutation === "none"
-      && currentPolicy.idempotency === "naturally_idempotent",
-  };
-}
-
-export function assertCurrentMcpEffectPolicyPin(input: {
-  serverUrl: string;
-  transportKind: string;
-  toolName: string;
-  toolSchemaHash: string;
-  bindingRevision: number;
-  capabilityVersion: string;
-  plannedEffect: unknown;
-  plannedSuccessContract: unknown;
-}) {
-  const currentPolicy = resolveServerOwnedMcpCapabilityPolicyV3({
-    serverUrl: input.serverUrl,
-    transportKind: input.transportKind,
-    toolName: input.toolName,
-    toolSchemaHash: input.toolSchemaHash,
-  });
-  const expectedCapabilityVersion = currentPolicy
-    ? [
-        input.bindingRevision,
-        currentPolicy.policyId,
-        currentPolicy.classificationVersion,
-      ].join(":")
-    : null;
-  if (
-    !currentPolicy
-    || input.capabilityVersion !== expectedCapabilityVersion
-    || stableSha256(input.plannedEffect) !== stableSha256(currentPolicy.effect)
-    || stableSha256(input.plannedSuccessContract)
-      !== stableSha256(currentPolicy.successContract ?? null)
-  ) {
-    throw new SessionError(409, "mcp_effect_policy_drift_replan_required");
-  }
-  return currentPolicy;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function stripSha256(value: string) {
-  return value.startsWith("sha256:") ? value.slice(7) : value;
-}
-
-function normalizeMcpSemanticPayload(value: unknown) {
-  const record = asRecord(value);
-  const structured = asRecord(record?.["structuredContent"]);
-  return structured ?? { result: value };
-}
-
-async function markDelegatedMcpExternalEffectExecuting(
-  context: PolicyExecutionContext,
-) {
-  const taskId = context.session.delegationTaskId;
-  const stepId = context.session.delegationTaskStepId;
-  if (!taskId && !stepId) return;
-  if (!taskId || !stepId) {
-    throw new SessionError(409, "delegation_external_effect_context_incomplete");
-  }
-
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${taskId}))`;
-    const transitioned = await tx.delegationTaskExternalEffect.updateMany({
-      where: {
-        delegationTaskId: taskId,
-        delegationTaskStepId: stepId,
-        status: { in: ["PROPOSED", "APPROVED"] },
-      },
-      data: {
-        status: "EXECUTING",
-        failureReason: null,
-      },
-    });
-    if (transitioned.count !== 1) {
-      const existing = await tx.delegationTaskExternalEffect.findFirst({
-        where: {
-          delegationTaskId: taskId,
-          delegationTaskStepId: stepId,
-        },
-        select: { status: true },
-      });
-      if (existing?.status !== "EXECUTING") {
-        throw new SessionError(409, "delegation_external_effect_not_ready");
-      }
-    }
-    const attempt = await tx.toolExecution.findFirst({
-      where: {
-        delegationTaskId: taskId,
-        delegationTaskStepId: stepId,
-        planActionId: { not: null },
-        status: "RUNNING",
-      },
-      orderBy: { createdAt: "desc" },
-    });
-    if (!attempt) return;
-    if (
-      attempt.attemptPhase !== "CALL_PREPARED"
-      || !attempt.executionLeaseToken
-    ) {
-      throw new SessionError(409, "compute_execution_claim_lost");
-    }
-    await tx.toolExecution.update({
-      where: { id: attempt.id },
-      data: { attemptPhase: "CALL_STARTED" },
-    });
-    await tx.delegationTaskExternalEffect.updateMany({
-      where: {
-        delegationTaskId: taskId,
-        delegationTaskStepId: stepId,
-        status: "EXECUTING",
-      },
-      data: {
-        callAttemptId: attempt.id,
-        executionLeaseTokenHash: createHash("sha256")
-          .update(attempt.executionLeaseToken)
-          .digest("hex"),
-        callStartedAt: new Date(),
-      },
-    });
-    if (attempt.executionOutboxId) {
-      await tx.outboxEvent.updateMany({
-        where: {
-          id: attempt.executionOutboxId,
-          status: { in: ["PENDING", "FAILED"] },
-        },
-        data: {
-          status: "PROCESSING",
-          attemptCount: { increment: 1 },
-          availableAt: new Date(Date.now() + 10 * 60_000),
-          lastError: null,
-        },
-      });
-    }
-  });
-}
-
-async function markV3ExecutionCallStarted(
-  executionId: string,
-  executionLeaseToken: string,
-) {
-  await prisma.$transaction(async (tx) => {
-    const attempt = await tx.toolExecution.findUnique({
-      where: { id: executionId },
-    });
-    if (!attempt?.planActionId) return;
-    if (
-      attempt.status !== "RUNNING"
-      || attempt.executionLeaseToken !== executionLeaseToken
-      || attempt.attemptPhase !== "CALL_PREPARED"
-    ) {
-      throw new SessionError(409, "compute_execution_claim_lost");
-    }
-    await tx.toolExecution.update({
-      where: { id: attempt.id },
-      data: { attemptPhase: "CALL_STARTED" },
-    });
-    if (attempt.executionOutboxId) {
-      await tx.outboxEvent.updateMany({
-        where: {
-          id: attempt.executionOutboxId,
-          status: { in: ["PENDING", "FAILED"] },
-        },
-        data: {
-          status: "PROCESSING",
-          attemptCount: { increment: 1 },
-          availableAt: new Date(Date.now() + 10 * 60_000),
-          lastError: null,
-        },
-      });
-    }
-  });
 }
 
 export function classifyMcpTransportOutcome(
@@ -2736,8 +1921,6 @@ async function blockExecution(params: {
     representativeId: string;
     contactId: string | null;
     conversationId: string | null;
-    delegationTaskId: string | null;
-    delegationTaskStepId: string | null;
     subagentId: string | null;
     requestedBy: string;
     status: string;
@@ -2786,8 +1969,6 @@ async function blockExecution(params: {
     : await prisma.toolExecution.create({
         data: {
           sessionId: params.session.id,
-          delegationTaskId: params.session.delegationTaskId,
-          delegationTaskStepId: params.session.delegationTaskStepId,
           capability: mapCapabilityToDb(params.capability),
           subagentId: params.subagentId,
           status: "BLOCKED",
@@ -2807,7 +1988,6 @@ async function blockExecution(params: {
       representativeId: params.session.representativeId,
       contactId: params.session.contactId ?? null,
       conversationId: params.session.conversationId ?? null,
-      delegationTaskId: params.session.delegationTaskId ?? null,
       type: "TOOL_EXECUTION_BLOCKED",
       payload: {
         sessionId: params.session.id,
@@ -2829,7 +2009,7 @@ async function blockExecution(params: {
     artifacts: [],
     billing: params.billing,
   });
-  await persistDelegatedExecutionResponse(execution.id, response);
+  await persistGenerationExecutionResponse(execution.id, response);
   return response;
 }
 
@@ -2931,7 +2111,8 @@ export function resolveEffectiveDecision(params: {
     typeof params.input.estimatedTokens === "number" &&
     params.input.estimatedTokens >
       params.context.runtimeAuthority.compute.autoApproveTokenLimit &&
-    params.decision.decision === "allow"
+    params.decision.decision === "allow" &&
+    !params.input.serverVerifiedReadOnlyMcp
   ) {
     return {
       decision: "ask" as const,

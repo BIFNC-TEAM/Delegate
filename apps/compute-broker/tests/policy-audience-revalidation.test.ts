@@ -170,37 +170,24 @@ describe("execution-time audience authorization revalidation", () => {
     ).rejects.toThrow("audience_generation_run_authorization_denied");
   });
 
-  it("loads task duration, network, and filesystem limits as stricter execution ceilings", async () => {
+  it("loads published duration, network, and filesystem limits as execution ceilings", async () => {
     const { loadSessionPolicyContext } = await import("../src/policy");
     const session = audienceSession();
     session.policyProfile.networkMode = "FULL";
     session.policyProfile.filesystemMode = "EPHEMERAL_FULL";
-    mockPrisma.computeSession.findUnique.mockResolvedValue({
-      ...session,
-      delegationTask: {
-        resourcePolicy: {
-          maxDurationMinutes: 2,
-          maxEstimatedTokens: 20,
-          allowedCapabilities: ["WRITE"],
-          allowedMcpBindingIds: [],
-          networkMode: "NO_NETWORK",
-          filesystemMode: "READ_ONLY_WORKSPACE",
-          requireApprovalForExternalSideEffects: true,
-        },
-      },
-    });
+    mockPrisma.computeSession.findUnique.mockResolvedValue(session);
     mockLoadComputeRuntimeAuthority.mockResolvedValueOnce({
       representativeVersionId: "version-1",
       compute: {
         enabled: true,
         defaultPolicyMode: "ask",
         baseImage: "runtime:1",
-        maxSessionMinutes: 10,
+        maxSessionMinutes: 2,
         autoApproveTokenLimit: 0,
         artifactRetentionDays: 7,
-        networkMode: "full",
+        networkMode: "no_network",
         networkAllowlist: [],
-        filesystemMode: "ephemeral_full",
+        filesystemMode: "read_only_workspace",
         capabilityModes: {
           exec: "ask",
           read: "allow",

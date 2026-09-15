@@ -357,10 +357,22 @@ export class DelegatePiAgentRuntime {
           evidenceFailure = "真人转接未完成：本轮没有取得真实转接接口状态，不能声称已接通、排队或取消。";
         }
       }
+      const currentInformationRequired = requiresCurrentInformationForInput(input);
+      if (
+        currentInformationRequired
+        && toolBuild.tools.some((tool) => tool.name === "search_current_web" || tool.name.startsWith("mcp__"))
+        && toolBuild.getCurrentInformationAttempts() === 0
+        && !controller.signal.aborted
+        && !terminalError
+      ) {
+        await agent.prompt([
+          "Runtime freshness evidence check rejected the previous draft: the current request needs live or time-sensitive data, but no current-information tool was attempted in this run.",
+          "Call search_current_web or the matching current-data MCP tool now. Use only the returned provider, value, and data time. If it fails, report the failure without substituting remembered current data.",
+        ].join(" "));
+      }
       const organizationKnowledgeRequired = requiresOrganizationKnowledgeEvidence(
         input.userText,
       );
-      const currentInformationRequired = requiresCurrentInformationForInput(input);
       const representativeKnowledgePreferred = !currentInformationRequired
         && requiresRepresentativeKnowledgeEvidence({
           userText: input.userText,
@@ -411,6 +423,8 @@ export class DelegatePiAgentRuntime {
         && !toolBuild.sources.some((source) => source.channel === "knowledge");
       const currentInformationMissing = currentInformationRequired
         && !toolBuild.sources.some((source) => source.channel === "web" || source.channel === "mcp");
+      const authorizedKnowledgeUnavailable = toolBuild.getKnowledgeAttempts() > 0
+        && toolBuild.getKnowledgeOutcome() === "unavailable";
       const pendingApproval = toolBuild.getPendingApproval();
       const generatedTextCandidate = toolBuild.getAuthoritativeSummary()
         ?? evidenceFailure
@@ -418,6 +432,8 @@ export class DelegatePiAgentRuntime {
           ? renderPendingApproval(input)
           : currentInformationMissing
             ? renderCurrentInformationUnavailable(input)
+            : authorizedKnowledgeUnavailable
+              ? renderAuthorizedKnowledgeUnavailable(input)
             : organizationKnowledgeMissing
               ? renderOrganizationKnowledgeMiss(input)
               : representativeKnowledgeMissing
@@ -724,6 +740,8 @@ function buildSystemPrompt(input: PiAgentRunInput, toolNames: string[]) {
     "For knowledge answers, use the returned evidence without appending document titles, internal ids, versions, or a source list to the prose; the product renders one structured source note separately. For current web data state the web provider, URL when returned, and data time. For MCP state the actual server/tool and upstream provider when returned.",
     "Never name or imply a publication, curriculum standard, textbook, website, authority, provider, or source unless that exact name appears in a successful tool result from this run. Do not call a source official or authoritative unless the tool result does.",
     "For a short factual question, answer in one to three concise sentences with the fact and its actual source title. Do not add a biography, generic teaching offer, emoji checklist, horizontal separator, or unrelated background unless the user requests detail.",
+    "When the user explicitly asks to generate, export, download, or deliver a file but does not provide a filename, choose a short descriptive filename with the correct extension and create the file; do not reinterpret that as 'no file requested'.",
+    "When debugging or repairing an attached script, execute the original script unchanged first to capture its real failure, then make a bounded correction and rerun it. Do not skip the failing execution evidence.",
     "Use public web search only for public current information. Use the matching MCP business tool for order, ticket, account, or other service identifiers; do not send business identifiers to generic web search when a published MCP tool is available.",
     "A knowledge miss means there is no supporting evidence in the authorized retrieval result; do not invent organization facts, internal access paths, employee status, HR procedures, or a human handoff. A failed current lookup must not be replaced with remembered current data.",
     "A queued human handoff is not connected. A started external write is not successful until its returned business status and required identifiers verify success.",
@@ -1016,6 +1034,12 @@ function renderCurrentInformationUnavailable(input: PiAgentRunInput) {
   return /\p{Script=Han}/u.test(input.userText)
     ? "本次实时信息查询没有取得可验证的数据，因此我无法可靠地比较或给出当前值。当前没有成功的实时来源；请稍后重试。"
     : "The current-information lookup did not return verifiable data, so I cannot reliably compare or provide a current value. No live source succeeded; please try again later.";
+}
+
+function renderAuthorizedKnowledgeUnavailable(input: PiAgentRunInput) {
+  return /\p{Script=Han}/u.test(input.userText)
+    ? "授权知识服务本轮不可用，未能取得可验证的资料，因此我不能给出具体答案。请稍后重试。"
+    : "The authorized knowledge service was unavailable for this request, so no verifiable material was retrieved and I cannot provide a specific answer. Please try again later.";
 }
 
 function renderRepresentativeKnowledgeMiss(input: PiAgentRunInput) {

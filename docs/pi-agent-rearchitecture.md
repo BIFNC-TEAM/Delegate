@@ -646,8 +646,11 @@ Fresh product evidence:
 
 ## Remaining release checks
 
-1. Full 90/90 and performance comparison remain deliberately paused by the
-   user. The retained failures must not be weakened when that work resumes.
+1. The post-fix full 90-case run is complete at 85 PASS / 5 FAIL. A 90/90
+   all-pass release claim remains open: SKILL-04 is reproducibly failing, while
+   BOX-02, BOX-06, FLOW-05 and FLOW-07 passed focused reruns but remain
+   unstable in the unified real-model run. Their assertions must not be
+   weakened.
 2. Planner and DelegationTask source/schema removal is complete. Migrations
    `20260910100000_remove_legacy_planner` and
    `20260910110000_remove_legacy_delegation` passed the repaired full
@@ -662,10 +665,10 @@ Fresh product evidence:
    policy remain as explicitly named, Pi-independent security modules. The
    public Reps stream and UI no longer expose the dead `taskProgress` or
    `turnProgress` Planner/Delegation compatibility contract.
-3. After the first future 90/90 run, collect a second full run with the exact
-   `mixed-real-model+scripted-control+isolated-product` mode before claiming a
-   full-suite performance improvement or regression. The current result remains
-   `NOT_DETERMINED` by design.
+3. Full-suite performance comparison remains deliberately paused. Collect a
+   second run with the exact `mixed-real-model+scripted-control+isolated-product`
+   mode and an explicit comparable baseline before claiming an improvement or
+   regression. The current result remains `NOT_DETERMINED` by design.
 
 ## Public response streaming correction — 2026-09-14
 
@@ -700,3 +703,31 @@ lookup itself took only about 35 ms; the redundant model turns produced the
   78/78; Reps 293/293; all three affected package typechecks passed; the Reps
   production build and local service rebuild passed. Detailed targeted evidence
   is in `reports/streaming-capability-optimization-2026-09-14.{json,md}`.
+
+## Post-fix complete 90-case regression — 2026-09-14
+
+- A clean isolated product stack was rebuilt from the current working tree.
+  The first seed attempt exposed and fixed a stale write to removed
+  `delegation*` fields; recreating the dedicated test volumes also exposed and
+  fixed the MinIO bootstrap entrypoint that previously skipped bucket creation.
+- Pi sandbox requests now carry generation-input and decoded-program hashes.
+  The Broker validates the exact Python, JavaScript or Shell base64 wrapper
+  before treating it as a server-verified self-contained computation; arbitrary
+  commands do not receive that classification.
+- Current-information follow-ups receive one bounded correction when the model
+  skipped all live tools. Knowledge outages are distinct from ordinary misses,
+  structured Skill detection includes published display metadata, and the
+  built-in spreadsheet recovery uses the collision-safe attachment URI.
+- Final unified run `agent-regression-2026-09-14T09-24-50-963Z` executed all
+  90 cases in `mixed-real-model+scripted-control+isolated-product` mode:
+  85 PASS, 5 FAIL, 0 BLOCKED/SKIP/REVIEW, strict pass rate 94.44%, total
+  1,327,724.7 ms. BASIC, KB, WEB, MCP, HUMAN, CHAT, ERROR, PERF and ARCH were
+  all 100%; the five failures were SKILL-04, BOX-02, BOX-06, FLOW-05 and
+  FLOW-07.
+- Focused reruns proved BOX-02, BOX-06, FLOW-05 and FLOW-07 can pass with the
+  same code and full evidence. SKILL-04 failed its repeat run and remains the
+  stable model/Skill reliability gap. The unified functional conclusion stays
+  FAIL; no focused result was merged into the immutable full-run count.
+- Performance remains `NOT_DETERMINED` because the run intentionally had no
+  comparable baseline. The Chinese statistical report is
+  `reports/agent-regression/pi-agent-90场景完整回归统计报告-2026-09-14.md`.

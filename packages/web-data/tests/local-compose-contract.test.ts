@@ -49,6 +49,15 @@ describe("local Compose source synchronization contract", () => {
   const baseServices = parseServiceBlocks(baseComposeSource);
   const services = parseServiceBlocks(localComposeSource);
 
+  it("executes the MinIO bootstrap script instead of passing it as an ignored shell argument", () => {
+    const artifactStoreInit = baseServices.get("artifact-store-init") ?? "";
+
+    expect(artifactStoreInit).toContain(
+      'entrypoint: ["/bin/sh", "/opt/delegate-minio/bootstrap.sh"]',
+    );
+    expect(artifactStoreInit).not.toContain('entrypoint: ["/bin/sh", "-c"]');
+  });
+
   it("runs local Next.js applications with Turbopack and source mounts", () => {
     for (const serviceName of ["dashboard", "reps"]) {
       const block = services.get(serviceName);

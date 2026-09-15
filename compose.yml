@@ -174,7 +174,7 @@ services:
 
   artifact-store-init:
     image: minio/mc:latest
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: ["/bin/sh", "/opt/delegate-minio/bootstrap.sh"]
     depends_on:
       artifact-store:
         condition: service_healthy
@@ -186,7 +186,6 @@ services:
       KNOWLEDGE_OBJECT_STORE_BUCKET: ${KNOWLEDGE_OBJECT_STORE_BUCKET:-delegate-1324808004}
     volumes:
       - ./deploy/minio:/opt/delegate-minio:ro
-    command: /bin/sh /opt/delegate-minio/bootstrap.sh
     restart: "no"
 
   browser-image-pull:

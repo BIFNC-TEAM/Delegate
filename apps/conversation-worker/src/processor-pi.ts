@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   createPiModelBindingFromEnv,
   delegatePiAgentRuntime,
@@ -91,6 +93,7 @@ import {
   resolveDeclaredAttachmentIds,
   resolveRequestedOutputFileName,
   validateDeclaredAttachmentRead,
+  type SpreadsheetSkillRecoveryPlan,
 } from "./spreadsheet-skill-recovery";
 
 type GenerationItem = NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
@@ -568,6 +571,7 @@ async function processPiConversationTurn(input: {
   const adapters: PiCapabilityAdapters = buildPiAdapters({
     ...input,
     authority,
+    ...(recoveryPlan ? { trustedSpreadsheetPlan: recoveryPlan } : {}),
     computeAttachments,
     onMemoryUse: (runId, itemIds) => {
       memoryUseRunId = runId;
@@ -767,6 +771,14 @@ async function processPiConversationTurn(input: {
     totalDurationMs: result.totalDurationMs,
     modelCalls: result.modelCalls,
     toolCalls: result.toolCalls,
+    sources: result.sources.map((source) => ({
+      id: source.id,
+      title: source.title,
+      channel: source.channel,
+      ...(source.provider ? { provider: source.provider } : {}),
+      ...(source.dataTime ? { dataTime: source.dataTime } : {}),
+      ...(source.version ? { version: source.version } : {}),
+    })),
     events: result.events.map((event) => ({ ...event })),
     spans: result.spans.map((span) => ({ ...span })),
   };
@@ -917,6 +929,7 @@ function buildPiAdapters(input: {
   leaseGuard: GenerationLease;
   workLease: WorkLease;
   authority: Awaited<ReturnType<typeof getRepresentativeRuntimeAuthoritySnapshot>>;
+  trustedSpreadsheetPlan?: SpreadsheetSkillRecoveryPlan;
   computeAttachments: Array<{
     fileName: string;
     mimeType?: string;
@@ -1034,10 +1047,18 @@ function buildPiAdapters(input: {
 
   const executeSandbox: PiSandboxExecute = async (request) => {
     request.signal.throwIfAborted();
+    const effectiveRequest = input.trustedSpreadsheetPlan
+      ? {
+          ...request,
+          ...input.trustedSpreadsheetPlan.request,
+          context: request.context,
+          signal: request.signal,
+        }
+      : request;
     input.onCompute(false);
     const declaredRead = validateDeclaredAttachmentRead({
-      code: request.code,
-      attachmentIds: request.attachmentIds,
+      code: effectiveRequest.code,
+      attachmentIds: effectiveRequest.attachmentIds,
       attachments: input.item.inputAttachments.map((attachment) => ({
         ...attachment,
         uri: buildSandboxAttachmentPath(attachment.id, attachment.fileName),
@@ -1062,15 +1083,15 @@ function buildPiAdapters(input: {
       };
     }
     const declaredAttachmentIds = resolveDeclaredAttachmentIds({
-      code: request.code,
-      attachmentIds: request.attachmentIds,
+      code: effectiveRequest.code,
+      attachmentIds: effectiveRequest.attachmentIds,
       attachments: input.item.inputAttachments.map((attachment) => ({
         ...attachment,
         uri: buildSandboxAttachmentPath(attachment.id, attachment.fileName),
       })),
     });
     const requestedOutputs = normalizeExpectedSandboxOutputs(
-      request.expectedOutputs,
+      effectiveRequest.expectedOutputs,
     );
     const inferredOutput = requestedOutputs.length === 0
       ? resolveRequestedOutputFileName(
@@ -1096,7 +1117,7 @@ function buildPiAdapters(input: {
     const common = {
       subagentId: "compute-agent" as const,
       generationWorkLease: input.workLease,
-      estimatedTokens: 600 + 100 * Math.ceil(request.code.length / 256),
+      estimatedTokens: 600 + 100 * Math.ceil(effectiveRequest.code.length / 256),
       hasPaidEntitlement: false,
       browserMode: "deterministic" as const,
       maxSteps: 1,
@@ -1112,7 +1133,7 @@ function buildPiAdapters(input: {
       return {
         status: "failed",
         text: "沙盒未找到工具请求中声明的会话附件，未执行分析。",
-        details: { requestedAttachmentIds: request.attachmentIds },
+        details: { requestedAttachmentIds: effectiveRequest.attachmentIds },
         artifacts: [],
       };
     }
@@ -1127,11 +1148,19 @@ function buildPiAdapters(input: {
       })));
     request.signal.throwIfAborted();
     const attachmentTransferMs = performance.now() - transferStartedAt;
+    const normalizedProgramSource = normalizeInlineProgramSource(effectiveRequest.code);
     const execution = await executeAudienceTool(session.session.id, {
       ...common,
       capability: "exec",
-      command: buildInlineSandboxCommand(request.language, request.code),
+      command: buildInlineSandboxCommand(effectiveRequest.language, normalizedProgramSource),
       workingDirectory: "/workspace",
+      compiledTask: {
+        compilerVersion: "sandbox-task-compiler.v1" as const,
+        instructionHash: sha256Text(input.item.userText.trim()),
+        codeHash: sha256Text(normalizedProgramSource),
+        riskClass: "self_contained_compute" as const,
+        compilerProvider: "delegate-pi-runtime",
+      },
     });
     request.signal.throwIfAborted();
     if (execution.outcome !== "completed") {
@@ -1458,6 +1487,10 @@ export function normalizeInlineProgramSource(code: string) {
     return code;
   }
   return code.replace(/\\r\\n|\\n/gu, "\n");
+}
+
+function sha256Text(value: string) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 export function attachVerifiedMcpSource(

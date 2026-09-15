@@ -134,8 +134,12 @@ export function compileBuiltinSpreadsheetRecovery(input: {
   if (!/\.csv$/iu.test(attachment.fileName) || !/(?:csv|text\/plain)/iu.test(attachment.mimeType)) {
     return undefined;
   }
-  const expectedInputPath = `/workspace/inputs/${attachment.fileName}`;
-  if (attachment.uri !== expectedInputPath) return undefined;
+  const expectedInputPath = attachment.uri;
+  if (
+    !expectedInputPath
+    || !expectedInputPath.startsWith("/workspace/inputs/")
+    || !expectedInputPath.toLocaleLowerCase().endsWith(".csv")
+  ) return undefined;
 
   const outputFileName = resolveRequestedOutputFileName(
     input.userText,

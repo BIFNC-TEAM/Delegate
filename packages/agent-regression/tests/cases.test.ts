@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { agentRegressionCases, selectCases } from "../src/cases";
@@ -22,5 +24,15 @@ describe("Agent regression catalog", () => {
   it("supports exact ID filtering", () => {
     expect(selectCases({ suite: "regression", ids: ["BOX-01"] }).map((item) => item.id))
       .toEqual(["BOX-01"]);
+  });
+
+  it("keeps the isolated product seed free of retired delegation fields", () => {
+    const seedSource = readFileSync(
+      new URL("../../../scripts/agent-test-seed.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(seedSource).not.toMatch(/delegationEnabled|delegationNaturalLanguageEnabled|delegationMaxSteps|delegationKnowledgeScope/u);
+    expect(seedSource).not.toContain("delegation: {");
   });
 });

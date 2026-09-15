@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/lifecycle-hooks", () => ({
@@ -374,6 +376,87 @@ describe("resolveEffectiveDecision", () => {
       decision: "allow",
       reason: "server_verified_read_only_mcp",
     });
+  });
+});
+
+describe("verifyInlineCompiledTask", () => {
+  it("verifies an exact Pi wrapper against the generation input and decoded source", async () => {
+    const { verifyInlineCompiledTask } = await import("../src/policy");
+    const source = "print(55)";
+    const encoded = Buffer.from(source, "utf8").toString("base64");
+    const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+
+    expect(verifyInlineCompiledTask({
+      generationInputText: "请运行代码",
+      input: {
+        capability: "exec",
+        subagentId: "compute-agent",
+        command: `python -c "import base64;exec(compile(base64.b64decode('${encoded}'),'<pi-agent>','exec'))"`,
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+        compiledTask: {
+          compilerVersion: "sandbox-task-compiler.v1",
+          instructionHash: hash("请运行代码"),
+          codeHash: hash(source),
+          riskClass: "self_contained_compute",
+          compilerProvider: "delegate-pi-runtime",
+        },
+      },
+    })).toBe(true);
+  });
+
+  it("rejects a mismatched instruction, source hash, or non-Pi wrapper", async () => {
+    const { verifyInlineCompiledTask } = await import("../src/policy");
+    const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+    const metadata = {
+      compilerVersion: "sandbox-task-compiler.v1" as const,
+      instructionHash: hash("原始请求"),
+      codeHash: hash("print(55)"),
+      riskClass: "self_contained_compute" as const,
+      compilerProvider: "delegate-pi-runtime",
+    };
+    const base = {
+      capability: "exec" as const,
+      subagentId: "compute-agent" as const,
+      command: "python -c \"print(55)\"",
+      hasPaidEntitlement: false,
+      browserMode: "deterministic" as const,
+      maxSteps: 1,
+      allowMutations: false,
+      compiledTask: metadata,
+    };
+
+    expect(verifyInlineCompiledTask({ input: base, generationInputText: "原始请求" })).toBe(false);
+    expect(verifyInlineCompiledTask({ input: base, generationInputText: "其他请求" })).toBe(false);
+  });
+
+  it("verifies the exact base64 shell wrapper without trusting raw shell syntax", async () => {
+    const { verifyInlineCompiledTask } = await import("../src/policy");
+    const source = "ls -la /workspace/inputs && head -n 5 /workspace/inputs/orders.csv";
+    const encoded = Buffer.from(source, "utf8").toString("base64");
+    const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+
+    expect(verifyInlineCompiledTask({
+      generationInputText: "检查附件",
+      input: {
+        capability: "exec",
+        subagentId: "compute-agent",
+        command: `printf '%s' '${encoded}' | base64 -d | sh`,
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+        compiledTask: {
+          compilerVersion: "sandbox-task-compiler.v1",
+          instructionHash: hash("检查附件"),
+          codeHash: hash(source),
+          riskClass: "self_contained_compute",
+          compilerProvider: "delegate-pi-runtime",
+        },
+      },
+    })).toBe(true);
   });
 });
 

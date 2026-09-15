@@ -94,6 +94,20 @@ describe("built-in spreadsheet Skill evidence recovery", () => {
     expect(plan?.request.code).toContain("row['city'].strip() != TARGET_CITY");
   });
 
+  it("uses the collision-safe runtime URI instead of reconstructing the display filename", () => {
+    const plan = compileBuiltinSpreadsheetRecovery({
+      userText: "只保留 city=深圳，按 quantity*unit_price-refund_amount 计算，输出 order_id,city,net_sales_cny 到 shenzhen-summary.csv",
+      skills: [trustedSkill],
+      attachments: [{
+        ...attachment,
+        uri: "/workspace/inputs/attachment-collision-safe.csv",
+      }],
+    });
+
+    expect(plan?.request.code).toContain("/workspace/inputs/attachment-collision-safe.csv");
+    expect(plan?.request.code).not.toContain("/workspace/inputs/orders.csv");
+  });
+
   it("fails closed for an untrusted release, ambiguous files, or an unspecified output", () => {
     const common = {
       userText: "按 quantity*unit_price-refund_amount 汇总并输出 metric,value",

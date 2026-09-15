@@ -27,6 +27,8 @@ export async function buildPiTools(input: {
   const artifacts: PiToolBuildResult["artifacts"] = [];
   const authoritativeSummaries: string[] = [];
   let knowledgeAttempts = 0;
+  let knowledgeOutcome: "not_attempted" | "found" | "missing" | "unavailable" = "not_attempted";
+  let currentInformationAttempts = 0;
   let mcpWriteAttempts = 0;
   const loadedSkillIds = new Set<string>();
   const loadedStructuredDataSkillIds = new Set<string>();
@@ -52,21 +54,33 @@ export async function buildPiTools(input: {
       replay: "safe",
       execute: async (_callId, params: any, signal) => {
         knowledgeAttempts += 1;
-        const result = await executeAdapter({
-          module: "knowledge",
-          operation: "retrieve",
-          toolName: "retrieve_authorized_knowledge",
-          retrySafe: true,
-          maximumRetries: input.maximumRetries,
-          signal: mergeSignals(input.signal, signal),
-          telemetry: input.telemetry,
-          call: (activeSignal) => input.adapters.knowledge!.retrieve({
-            query: params.query,
-            maximumResults: params.maximumResults ?? 6,
-            context: input.context,
-            signal: activeSignal,
-          }),
-        });
+        let result: PiCapabilityResult;
+        try {
+          result = await executeAdapter({
+            module: "knowledge",
+            operation: "retrieve",
+            toolName: "retrieve_authorized_knowledge",
+            retrySafe: true,
+            maximumRetries: input.maximumRetries,
+            signal: mergeSignals(input.signal, signal),
+            telemetry: input.telemetry,
+            call: (activeSignal) => input.adapters.knowledge!.retrieve({
+              query: params.query,
+              maximumResults: params.maximumResults ?? 6,
+              context: input.context,
+              signal: activeSignal,
+            }),
+          });
+        } catch (error) {
+          knowledgeOutcome = "unavailable";
+          throw error;
+        }
+        const normalizedStatus = result.status?.toLocaleLowerCase();
+        knowledgeOutcome = result.sources?.length
+          ? "found"
+          : normalizedStatus && ["failed", "error", "timeout", "unavailable"].includes(normalizedStatus)
+            ? "unavailable"
+            : "missing";
         collectResult(result, sources, artifacts);
         if (result.authoritativeSummary) authoritativeSummaries.push(result.authoritativeSummary);
         await input.telemetry.event({
@@ -96,6 +110,7 @@ export async function buildPiTools(input: {
       executionMode: "parallel",
       replay: "safe",
       execute: async (_callId, params: any, signal) => {
+        currentInformationAttempts += 1;
         const result = await executeAdapter({
           module: "web",
           operation: "search",
@@ -140,6 +155,7 @@ export async function buildPiTools(input: {
         artifacts,
         authoritativeSummaries,
         onWriteAttempt: () => { mcpWriteAttempts += 1; },
+        onReadAttempt: () => { currentInformationAttempts += 1; },
         onPendingApproval: () => { pendingApproval = true; },
       }));
     }
@@ -486,6 +502,8 @@ export async function buildPiTools(input: {
     getHandoff: () => handoff,
     getPendingApproval: () => pendingApproval,
     getKnowledgeAttempts: () => knowledgeAttempts,
+    getKnowledgeOutcome: () => knowledgeOutcome,
+    getCurrentInformationAttempts: () => currentInformationAttempts,
     getMcpWriteAttempts: () => mcpWriteAttempts,
     getAuthoritativeSummary: () => authoritativeSummaries.length
       ? [...new Set(authoritativeSummaries)].join("\n\n")
@@ -522,6 +540,7 @@ function buildMcpTool(input: {
   artifacts: PiToolBuildResult["artifacts"];
   authoritativeSummaries: string[];
   onWriteAttempt: () => void;
+  onReadAttempt: () => void;
   onPendingApproval: () => void;
 }): AgentTool<any> {
   const toolName = mcpToolName(input.descriptor.server, input.descriptor.name);
@@ -533,7 +552,8 @@ function buildMcpTool(input: {
     executionMode: input.descriptor.readOnly ? "parallel" : "sequential",
     replay: input.descriptor.readOnly || input.descriptor.idempotent ? "safe" : "never",
     execute: async (_callId, params: any, signal) => {
-      if (!input.descriptor.readOnly) input.onWriteAttempt();
+      if (input.descriptor.readOnly) input.onReadAttempt();
+      else input.onWriteAttempt();
       const result = await executeAdapter({
         module: "mcp",
         operation: `${input.descriptor.server}.${input.descriptor.name}`,
@@ -698,8 +718,13 @@ function isStructuredDataSkillDescriptor(
   if (!descriptor) return false;
   const value = [
     descriptor["id"],
+    descriptor["slug"],
     descriptor["name"],
+    descriptor["displayName"],
     descriptor["description"],
+    ...(Array.isArray(descriptor["capabilityTags"])
+      ? descriptor["capabilityTags"]
+      : []),
   ].filter((part): part is string => typeof part === "string")
     .join(" ")
     .toLocaleLowerCase();

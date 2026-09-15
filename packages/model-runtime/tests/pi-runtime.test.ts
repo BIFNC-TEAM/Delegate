@@ -330,6 +330,39 @@ describe("Delegate Pi Agent runtime", () => {
     expect(result.text).not.toMatch(/HR 系统|入职合同|真人评估入口|HR 专员/u);
   });
 
+  it("distinguishes an unavailable knowledge service from an ordinary miss", async () => {
+    const model = modelBinding([
+      fauxAssistantMessage(
+        fauxToolCall("retrieve_authorized_knowledge", {
+          query: "公司年假天数",
+          maximumResults: 3,
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("公司年假可能是 8 天。"),
+    ]);
+
+    const result = await new DelegatePiAgentRuntime().run({
+      runId: "knowledge-unavailable",
+      sessionId: "session-knowledge-unavailable",
+      userText: "公司年假几天？",
+      representative,
+      model: model.binding,
+      capabilities: {
+        knowledge: {
+          retrieve: async () => {
+            throw new Error("knowledge service unavailable");
+          },
+        },
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.text).toContain("授权知识服务本轮不可用");
+    expect(result.text).not.toContain("8 天");
+    expect(result.toolCalls).toBe(1);
+  });
+
   it("removes an unauthorized representative signature from drafted visitor content", async () => {
     const model = modelBinding([
       fauxAssistantMessage([
@@ -535,6 +568,60 @@ describe("Delegate Pi Agent runtime", () => {
     expect(result.text).toContain("没有取得可验证的数据");
     expect(result.text).not.toContain("广州今天多云");
     expect(result.modelCalls).toBe(1);
+  });
+
+  it("corrects a current-information follow-up that initially skips the live tool", async () => {
+    const model = modelBinding([
+      fauxAssistantMessage("广州今天应该更热。"),
+      fauxAssistantMessage(
+        fauxToolCall("search_current_web", {
+          query: "广州 2026-09-08 实时天气",
+          localDate: "2026-09-08",
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("广州今天最高气温 34°C。来源 weather.test。"),
+    ]);
+    let webCalls = 0;
+
+    const result = await new DelegatePiAgentRuntime().run({
+      runId: "current-follow-up-correction",
+      sessionId: "session-current-follow-up-correction",
+      userText: "广州呢？",
+      representative,
+      history: [
+        { role: "user", text: "深圳今天天气怎么样？" },
+        { role: "assistant", text: "深圳今天最高气温 32°C。" },
+      ],
+      currentTime: "2026-09-08T08:00:00.000Z",
+      model: model.binding,
+      capabilities: {
+        web: {
+          search: async () => {
+            webCalls += 1;
+            return {
+              status: "completed",
+              text: "广州 2026-09-08 最高气温 34°C。",
+              sources: [{
+                id: "weather-guangzhou",
+                title: "weather.test",
+                channel: "web",
+                provider: "weather.test",
+                dataTime: "2026-09-08T08:00:00+08:00",
+              }],
+            };
+          },
+        },
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.text).toContain("广州");
+    expect(result.text).toContain("34");
+    expect(result.text).not.toContain("应该");
+    expect(result.modelCalls).toBe(3);
+    expect(result.toolCalls).toBe(1);
+    expect(webCalls).toBe(1);
   });
 
   it("does not replace a failed current-data lookup with static knowledge or model suggestions", async () => {

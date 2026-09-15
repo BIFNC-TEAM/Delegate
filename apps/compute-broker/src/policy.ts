@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { evaluateCapabilityPolicyStack } from "@delegate/capability-policy";
 import {
   computeSubagentIdSchema,
@@ -5,6 +7,7 @@ import {
   toolExecutionRequestSchema,
   type CapabilityKind,
   type ComputeSubagentId,
+  type ToolExecutionRequest,
 } from "@delegate/compute-protocol";
 import {
   resolveServerOwnedMcpCapabilityPolicy,
@@ -96,6 +99,13 @@ export async function loadSessionPolicyContext(sessionId: string) {
       conversation: {
         select: {
           channel: true,
+        },
+      },
+      generationRun: {
+        select: {
+          inputMessage: {
+            select: { text: true },
+          },
         },
       },
       policyProfile: {
@@ -208,7 +218,12 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
       ? normalizeContainerPath(input.path)
       : input.path;
   const context = await loadSessionPolicyContext(sessionId);
-  const serverVerifiedCompiledTask = false;
+  const serverVerifiedCompiledTask = verifyInlineCompiledTask({
+    input,
+    ...(context.session.generationRun?.inputMessage.text !== undefined
+      ? { generationInputText: context.session.generationRun.inputMessage.text }
+      : {}),
+  });
   const entitlements = deriveConversationComputeEntitlements(
     context.audienceAuthorization,
   );
@@ -321,6 +336,45 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     serverVerifiedCompiledTask,
     sessionSubagentId,
   };
+}
+
+export function verifyInlineCompiledTask(input: {
+  input: ToolExecutionRequest;
+  generationInputText?: string | null;
+}) {
+  const request = input.input;
+  const metadata = request.compiledTask;
+  if (
+    request.capability !== "exec"
+    || !request.command
+    || !metadata
+    || metadata.compilerProvider !== "delegate-pi-runtime"
+    || !input.generationInputText
+  ) return false;
+  const source = decodeInlineProgram(request.command);
+  if (source === null) return false;
+  return metadata.instructionHash === sha256Text(input.generationInputText.trim())
+    && metadata.codeHash === sha256Text(source);
+}
+
+function decodeInlineProgram(command: string) {
+  const patterns = [
+    /^python -c "import base64;exec\(compile\(base64\.b64decode\('([A-Za-z0-9+/]+={0,2})'\),'<pi-agent>','exec'\)\)"$/u,
+    /^node -e "eval\(Buffer\.from\('([A-Za-z0-9+/]+={0,2})','base64'\)\.toString\('utf8'\)\)"$/u,
+    /^printf '%s' '([A-Za-z0-9+/]+={0,2})' \| base64 -d \| sh$/u,
+  ];
+  const encoded = patterns
+    .map((pattern) => command.match(pattern)?.[1])
+    .find((value): value is string => Boolean(value));
+  if (!encoded) return null;
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  return Buffer.from(decoded, "utf8").toString("base64") === encoded
+    ? decoded
+    : null;
+}
+
+function sha256Text(value: string) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 export function resolveServerVerifiedReadOnlyMcp(input: {

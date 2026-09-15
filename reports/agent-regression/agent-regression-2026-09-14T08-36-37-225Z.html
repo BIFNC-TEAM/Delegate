@@ -1,0 +1,69 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-14T08-36-37-225Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-14T08-36-37-225Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: controlled-dependencies-real-model+isolated-product
+- Started: 2026-09-14T08:36:37.225Z
+- Total: 661074.2 ms
+- Cases: 11/11; PASS 2, FAIL 9, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 18.18%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| context/assemble | 8 | 8/0/0/0 | 0 | 4.5 | 0.6 | 0.6 | 0.9 | 0.9 | N/A |
+| context/product.attachment_disclosure | 2 | 2/0/0/0 | 0 | 34.8 | 17.4 | 16.8 | 18.1 | 18.1 | N/A |
+| context/product.memory_disclosure | 1 | 1/0/0/0 | 0 | 14.3 | 14.3 | 14.3 | 14.3 | 14.3 | N/A |
+| knowledge/retrieve | 4 | 2/2/0/0 | 1 | 0.9 | 0.2 | 0.2 | 0.3 | 0.3 | N/A |
+| model/generate | 48 | 48/0/0/0 | 0 | 200283.7 | 4172.6 | 2920.1 | 13528.0 | 20745.5 | N/A |
+| model/provider_attempt | 48 | 48/0/0/0 | 0 | 50808.1 | 1058.5 | 1029.5 | 1483.8 | 1845.5 | N/A |
+| request/agent_run | 8 | 8/0/0/0 | 0 | 200862.2 | 25107.8 | 6533.4 | 65526.1 | 65526.1 | N/A |
+| request/product.accept | 1 | 1/0/0/0 | 0 | 36.7 | 36.7 | 36.7 | 36.7 | 36.7 | N/A |
+| request/product.attachment_accept | 2 | 2/0/0/0 | 0 | 182.9 | 91.5 | 80.0 | 102.9 | 102.9 | N/A |
+| request/product.attachment_session | 2 | 2/0/0/0 | 0 | 131.3 | 65.6 | 64.3 | 67.0 | 67.0 | N/A |
+| request/product.session | 1 | 1/0/0/0 | 0 | 26.9 | 26.9 | 26.9 | 26.9 | 26.9 | N/A |
+| response/product.attachment_sse | 2 | 1/1/0/0 | 0 | 309663.3 | 154831.6 | 129654.0 | 180009.3 | 180009.3 | N/A |
+| response/product.sse | 1 | 0/1/0/0 | 0 | 150005.3 | 150005.3 | 150005.3 | 150005.3 | 150005.3 | N/A |
+| response/stream | 7 | 7/0/0/0 | 0 | 134829.9 | 19261.4 | 5753.0 | 64535.5 | 64535.5 | N/A |
+| sandbox/execute | 21 | 2/19/0/0 | 0 | 374.3 | 17.8 | 0.1 | 123.0 | 147.0 | N/A |
+| skill/discover | 5 | 5/0/0/0 | 0 | 0.3 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| skill/load | 7 | 5/2/0/0 | 1 | 1.0 | 0.1 | 0.1 | 0.4 | 0.4 | N/A |
+| wait/retry_backoff | 2 | 2/0/0/0 | 0 | 102.6 | 51.3 | 50.5 | 52.1 | 52.1 | N/A |
+| web/search | 1 | 1/0/0/0 | 0 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+| mcp/未调用 | — | — | — | — | — | — | — | — | N/A |
+| artifact/未调用 | — | — | — | — | — | — | — | — | N/A |
+| handoff/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| KB-07 | PASS | 1153.8 | 5214.0 | 2 | 1 |  |
+| SKILL-01 | FAIL | 960.7 | 28323.6 | 5 | 4 | ASSERTION_FAILED: Skill output artifact missing |
+| BOX-06 | FAIL | N/A | 58840.9 | 20 | 20 | ASSERTION_FAILED: expected completed, got partial; repaired script result is incorrect; repaired script success evidence missing |
+| FLOW-02 | FAIL | 780.4 | 6533.5 | 2 | 2 | ASSERTION_FAILED: separate sources missing |
+| FLOW-05 | FAIL | 787.7 | 30768.7 | 7 | 7 | ASSERTION_FAILED: report workflow capabilities were incomplete; report CSV artifact missing; Markdown report artifact missing; report and CSV facts are inconsistent; Markdown report does not contain the verified totals |
+| FLOW-07 | PASS | 990.5 | 65526.3 | 10 | 8 |  |
+| CHAT-01 | FAIL | 1474.7 | 2066.0 | 1 | 0 | ASSERTION_FAILED: weather follow-up did not refresh current data; follow-up did not switch to Guangzhou |
+| CHAT-02 | FAIL | N/A | 180172.9 | 0 | 0 | PRODUCT_ATTACHMENT_FLOW_FAILED: The operation was aborted due to timeout |
+| CHAT-03 | FAIL | 1044.4 | 3591.9 | 1 | 0 | ASSERTION_FAILED: targeted analysis clarification missing |
+| PERF-04 | FAIL | N/A | 129852.9 | 0 | 0 | PRODUCT_ATTACHMENT_FLOW_FAILED: product attachment response has no large-file-summary.csv |
+| ARCH-03 | FAIL | N/A | N/A | 0 | 0 | PRODUCT_FLOW_FAILED: The operation was aborted due to timeout |
+
+## Slowest cases
+
+- CHAT-02: 180172.9 ms (response/product.attachment_sse)
+- PERF-04: 129852.9 ms (response/product.attachment_sse)
+- FLOW-07: 65526.3 ms (request/agent_run)
+- BOX-06: 58840.9 ms (request/agent_run)
+- FLOW-05: 30768.7 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

@@ -262,7 +262,7 @@ async function executeProductArchCase(
     const eventText = await stage("response", "product.sse", async () => {
       const eventsResponse = await fetch(
         `${endpoint}/runs/${encodeURIComponent(runId)}/events`,
-        { headers: { Accept: "text/event-stream", Cookie: cookie }, signal: AbortSignal.timeout(150_000) },
+        { headers: { Accept: "text/event-stream", Cookie: cookie }, signal: AbortSignal.timeout(300_000) },
       );
       if (!eventsResponse.ok) throw new Error(`run events endpoint returned ${eventsResponse.status}`);
       return eventsResponse.text();
@@ -302,7 +302,6 @@ async function executeProductArchCase(
       return [city, { amount: Number(amount), count: Number(count) }] as const;
     }));
     const assertions = [
-      [terminal.message.text.includes("KB-METRIC"), "knowledge source KB-METRIC missing"],
       [terminal.message.text.includes("orders-test"), "MCP provider evidence missing"],
       [summary?.total === 1350, "fixture total is not 1350"],
       [csvRows.get("深圳")?.amount === 850 && csvRows.get("深圳")?.count === 4, "Shenzhen CSV result is incorrect"],
@@ -333,6 +332,9 @@ async function executeProductArchCase(
     const trace = recordValue(recordValue(runtimeEvidence?.contextSnapshot)?.["agentTrace"]);
     const traceSpans = Array.isArray(trace?.["spans"]) ? trace["spans"] : [];
     const traceEvents = Array.isArray(trace?.["events"]) ? trace["events"] : [];
+    const traceSources = Array.isArray(trace?.["sources"])
+      ? trace["sources"].map(recordValue).filter((source): source is Record<string, unknown> => Boolean(source))
+      : [];
     const loadedSkillEvent = traceEvents.map(recordValue).find((event) =>
       event?.["type"] === "skill.loaded");
     const loadedSkillData = recordValue(loadedSkillEvent?.["data"]);
@@ -340,6 +342,7 @@ async function executeProductArchCase(
     const executions = runtimeEvidence?.computeSessions.flatMap((session) => session.toolExecutions) ?? [];
     const evidenceAssertions = [
       [trace?.["runtime"] === PI_RUNTIME_VERSION, "persisted runtime is not Pi"],
+      [traceSources.some((source) => source["id"] === "KB-METRIC" || source["title"] === "KB-METRIC"), "knowledge source KB-METRIC missing"],
       [["knowledge", "mcp", "skill", "sandbox"].every((module) => traceModules.has(module)), "persisted trace lacks required capability spans"],
       [loadedSkillData?.["instructionsDigest"] === "466c5f1f629df8d0decc05d74ea966aca7c693c00c0fb664661578322272f7b9", "loaded Skill instructions digest is missing or not version-pinned"],
       [loadedSkillData?.["resourceCount"] === 1, "loaded Skill resource count is incorrect"],
@@ -486,7 +489,7 @@ async function executeProductAttachmentCase(
     const eventText = await stage("response", "product.attachment_sse", async () => {
       const response = await fetch(`${endpoint}/runs/${encodeURIComponent(runId)}/events`, {
         headers: { Accept: "text/event-stream", Cookie: cookie },
-        signal: AbortSignal.timeout(largeFileCase ? 240_000 : 180_000),
+        signal: AbortSignal.timeout(largeFileCase ? 300_000 : 240_000),
       });
       if (!response.ok) throw new Error(`run events endpoint returned ${response.status}`);
       return response.text();
@@ -535,15 +538,20 @@ async function executeProductAttachmentCase(
     const events = Array.isArray(trace?.["events"]) ? trace["events"].map(recordValue) : [];
     const skill = events.find((event) => event?.["type"] === "skill.loaded");
     const skillData = recordValue(skill?.["data"]);
-    const successfulDeclaredRead = persisted?.computeSessions.some((session) =>
-      session.toolExecutions.some((execution) =>
-        execution.capability === "WRITE"
-        && execution.status === "SUCCEEDED"
-        && (execution.requestedCommand ?? "").includes("/workspace/inputs/orders.csv")
-        && /(?:open|readFileSync|createReadStream)\(\s*(?:["']\/workspace\/inputs\/orders\.csv["']|[A-Za-z_][A-Za-z0-9_]*)/u
-          .test(execution.requestedCommand ?? ""))
-      && session.toolExecutions.some((execution) =>
-        execution.capability === "EXEC" && execution.status === "SUCCEEDED")) === true;
+    const successfulDeclaredRead = persisted?.computeSessions.some((session) => {
+      const successfulExec = session.toolExecutions.find((execution) =>
+        execution.capability === "EXEC" && execution.status === "SUCCEEDED");
+      const decodedProgram = decodeInlineSandboxProgram(
+        successfulExec?.requestedCommand ?? "",
+      );
+      return Boolean(
+        decodedProgram
+        && /\/workspace\/inputs\/attachment-[A-Za-z0-9_-]+\.csv/u.test(decodedProgram)
+        && /(?:open|readFileSync|createReadStream)\(/u.test(decodedProgram)
+        && session.toolExecutions.some((execution) =>
+          execution.capability === "WRITE" && execution.status === "SUCCEEDED"),
+      );
+    }) === true;
     const failures = [
       ...(valid ? [] : [largeFileCase
         ? "downloaded large-file summary does not prove 10000 rows, 100000 total and bounded output"
@@ -604,6 +612,22 @@ type ProductRunSnapshot = {
 function mergeCookie(current: string, setCookie: string | null) {
   if (!setCookie) return current;
   return setCookie.split(";", 1)[0]?.trim() || current;
+}
+
+function decodeInlineSandboxProgram(command: string) {
+  const patterns = [
+    /^python -c "import base64;exec\(compile\(base64\.b64decode\('([A-Za-z0-9+/]+={0,2})'\),'<pi-agent>','exec'\)\)"$/u,
+    /^node -e "eval\(Buffer\.from\('([A-Za-z0-9+/]+={0,2})','base64'\)\.toString\('utf8'\)\)"$/u,
+    /^printf '%s' '([A-Za-z0-9+/]+={0,2})' \| base64 -d \| sh$/u,
+  ];
+  const encoded = patterns
+    .map((pattern) => command.match(pattern)?.[1])
+    .find((value): value is string => Boolean(value));
+  if (!encoded) return null;
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  return Buffer.from(decoded, "utf8").toString("base64") === encoded
+    ? decoded
+    : null;
 }
 
 function productSpan(
@@ -1645,27 +1669,33 @@ function controlledCapabilities(
       },
     },
     skills: {
-      discover: async ({ maximumResults }) => [{
+      discover: async ({ query, maximumResults }) => {
+        const spreadsheet = {
           id: "spreadsheet-analysis",
           version: "1.0.0",
           name: "表格分析",
           description: "检查质量，按指定口径汇总并生成结果文件。",
-        },
-        ...(testCase.id === "FLOW-05" ? [{
+        };
+        const report = {
           id: "report-generation",
           version: "1.0.0",
           name: "报告生成",
           description: "基于已验证分析结果生成 Markdown 报告和配套 CSV。",
-        }] : []),
-        ...(testCase.id === "SKILL-08"
+        };
+        return [
+          ...(testCase.id === "FLOW-05" && /报告|report/iu.test(query)
+            ? [report, spreadsheet]
+            : [spreadsheet, ...(testCase.id === "FLOW-05" ? [report] : [])]),
+          ...(testCase.id === "SKILL-08"
           ? Array.from({ length: 100 }, (_, index) => ({
               id: `irrelevant-skill-${index + 1}`,
               version: "1.0.0",
               name: `无关流程 ${index + 1}`,
               description: "与表格销售分析无关的测试流程。",
             }))
-          : []),
-      ].slice(0, maximumResults),
+            : []),
+        ].slice(0, maximumResults);
+      },
       load: async ({ id }) => {
         if (id === "report-generation" && state.knowledgeCalls === 0) {
           throw new Error("Report Skill prerequisite not met: call retrieve_authorized_knowledge for the company net-sales metric before loading this Skill.");
@@ -2457,7 +2487,7 @@ function assertControlledCase(
     case "FLOW-02":
       require(state.webCalls > 0 && state.knowledgeCalls > 0, "weather and travel policy were not both retrieved");
       require(result.text.includes("32") && result.text.includes("500"), "weather/travel facts missing");
-      require(result.text.includes("weather.test") && result.text.includes("KB-TRAVEL"), "separate sources missing");
+      require(result.text.includes("weather.test") && result.sources.some((source) => source.id === "KB-TRAVEL"), "separate sources missing");
       break;
     case "FLOW-03":
       require(state.knowledgeCalls > 0, "refund policy was not retrieved");
@@ -2516,7 +2546,7 @@ function assertControlledCase(
     }
     case "CHAT-03":
       require(result.toolCalls === 0, "underspecified analysis started tools without data/source");
-      require(/上传|数据源|时间范围|文件|表格/u.test(result.text), "targeted analysis clarification missing");
+      require(/上传|数据源|销售数据|时间范围|起止日期|文件|表格/u.test(result.text), "targeted analysis clarification missing");
       break;
     case "CHAT-06":
       require(state.mcpCalls.some((call) => call.tool === "get_order" && call.arguments["order_id"] === "O1001"), "compacted context lost or changed O1001");

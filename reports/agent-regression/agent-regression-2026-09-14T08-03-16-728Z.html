@@ -1,0 +1,155 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Agent regression agent-regression-2026-09-14T08-03-16-728Z</title><style>body{font-family:Avenir Next,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1280px;margin:32px auto;padding:0 24px;color:#111827;background:#fff}pre{white-space:pre-wrap;background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:20px;line-height:1.5}h1{color:#0d9488}</style></head><body><h1>Agent regression report</h1><pre># Agent regression report — agent-regression-2026-09-14T08-03-16-728Z
+
+- Suite: regression
+- Version: working-tree
+- Pi: 0.85.1
+- Model: agicto/qwen-plus
+- Mode: mixed-real-model+scripted-control+isolated-product
+- Started: 2026-09-14T08:03:16.728Z
+- Total: 1195401.8 ms
+- Cases: 90/90; PASS 79, FAIL 11, BLOCKED 0, SKIP 0, REVIEW 0
+- Strict pass rate: 87.78%
+- Functional: FAIL; Performance: NOT_DETERMINED
+
+## Module timings
+
+| Module/operation | Calls | OK/Error/Timeout/Cancel | Retries | Total ms | Avg ms | p50 | p95 | Max | Baseline |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| artifact/register | 2 | 0/2/0/0 | 1 | 0.2 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| context/assemble | 136 | 136/0/0/0 | 0 | 38.3 | 0.3 | 0.3 | 0.7 | 1.3 | N/A |
+| context/product.attachment_disclosure | 2 | 2/0/0/0 | 0 | 42.9 | 21.5 | 17.0 | 25.9 | 25.9 | N/A |
+| context/product.memory_disclosure | 1 | 1/0/0/0 | 0 | 14.0 | 14.0 | 14.0 | 14.0 | 14.0 | N/A |
+| handoff/cancel | 1 | 1/0/0/0 | 0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | N/A |
+| handoff/request | 7 | 7/0/0/0 | 0 | 0.5 | 0.1 | 0.0 | 0.2 | 0.2 | N/A |
+| knowledge/retrieve | 21 | 19/2/0/0 | 1 | 3.5 | 0.2 | 0.1 | 0.4 | 0.9 | N/A |
+| mcp/fault-test.invalid_schema | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| mcp/fault-test.oversized_result | 1 | 1/0/0/0 | 0 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | N/A |
+| mcp/orders-test.get_order | 11 | 10/1/0/0 | 1 | 1003.7 | 91.2 | 0.2 | 1002.1 | 1002.1 | N/A |
+| mcp/orders-test.list_orders | 2 | 2/0/0/0 | 0 | 1.1 | 0.5 | 0.5 | 0.6 | 0.6 | N/A |
+| mcp/orders-test.refund_order | 1 | 1/0/0/0 | 0 | 0.2 | 0.2 | 0.2 | 0.2 | 0.2 | N/A |
+| mcp/tickets-test.create_ticket | 9 | 8/0/1/0 | 1 | 2.1 | 0.2 | 0.2 | 0.5 | 0.5 | N/A |
+| mcp/weather-test.get_weather | 2 | 2/0/0/0 | 0 | 15.8 | 7.9 | 0.2 | 15.6 | 15.6 | N/A |
+| model/generate | 344 | 322/22/0/0 | 0 | 1129817.4 | 3284.4 | 2106.3 | 12827.5 | 21005.5 | N/A |
+| model/provider_attempt | 256 | 256/0/0/0 | 0 | 275413.5 | 1075.8 | 970.1 | 1549.6 | 11367.1 | N/A |
+| request/agent_run | 136 | 110/3/0/23 | 0 | 1145586.9 | 8423.4 | 2229.3 | 35234.9 | 195926.9 | N/A |
+| request/product.accept | 1 | 1/0/0/0 | 0 | 59.5 | 59.5 | 59.5 | 59.5 | 59.5 | N/A |
+| request/product.attachment_accept | 2 | 2/0/0/0 | 0 | 115.9 | 58.0 | 55.3 | 60.6 | 60.6 | N/A |
+| request/product.attachment_session | 2 | 2/0/0/0 | 0 | 152.9 | 76.5 | 73.6 | 79.3 | 79.3 | N/A |
+| request/product.session | 1 | 1/0/0/0 | 0 | 16.7 | 16.7 | 16.7 | 16.7 | 16.7 | N/A |
+| response/product.sse | 1 | 1/0/0/0 | 0 | 19389.0 | 19389.0 | 19389.0 | 19389.0 | 19389.0 | N/A |
+| response/product.ui_handoff_lifecycle | 1 | 1/0/0/0 | 0 | 27703.6 | 27703.6 | 27703.6 | 27703.6 | 27703.6 | N/A |
+| response/stream | 111 | 109/0/0/2 | 0 | 855335.0 | 7705.7 | 1170.5 | 34070.8 | 194997.5 | N/A |
+| sandbox/execute | 61 | 25/34/1/1 | 0 | 14051.3 | 230.3 | 92.6 | 156.9 | 8675.4 | N/A |
+| skill/discover | 20 | 20/0/0/0 | 0 | 2.2 | 0.1 | 0.1 | 0.3 | 0.5 | N/A |
+| skill/load | 23 | 21/2/0/0 | 1 | 3.2 | 0.1 | 0.1 | 0.6 | 0.7 | N/A |
+| wait/retry_backoff | 6 | 6/0/0/0 | 0 | 311.6 | 51.9 | 51.6 | 53.0 | 53.0 | N/A |
+| web/search | 11 | 9/2/0/0 | 1 | 1004.5 | 91.3 | 0.2 | 1002.0 | 1002.0 | N/A |
+| orchestration/未调用 | — | — | — | — | — | — | — | — | N/A |
+
+## Cases
+
+| Case | Status | First answer ms | Total ms | Model | Tools | Reason |
+|---|---|---:|---:|---:|---:|---|
+| BASIC-01 | PASS | 1167.8 | 1892.2 | 1 | 0 |  |
+| BASIC-02 | PASS | 1305.9 | 2064.8 | 1 | 0 |  |
+| BASIC-03 | PASS | 980.2 | 2386.1 | 1 | 0 |  |
+| BASIC-04 | PASS | 744.5 | 1220.4 | 1 | 0 |  |
+| BASIC-05 | PASS | 623.1 | 2238.7 | 1 | 0 |  |
+| BASIC-06 | PASS | 977.3 | 1510.8 | 1 | 0 |  |
+| BASIC-07 | PASS | 1483.5 | 5124.6 | 1 | 0 |  |
+| BASIC-08 | PASS | N/A | N/A | 0 | 0 |  |
+| KB-01 | PASS | 1029.9 | 4653.2 | 2 | 1 |  |
+| KB-02 | PASS | 660.6 | 4964.2 | 2 | 1 |  |
+| KB-03 | PASS | 1268.3 | 9495.0 | 3 | 1 |  |
+| KB-04 | PASS | 2754.4 | 5567.6 | 2 | 1 |  |
+| KB-05 | PASS | 733.4 | 5548.9 | 2 | 1 |  |
+| KB-06 | PASS | 913.1 | 6053.2 | 2 | 2 |  |
+| KB-07 | FAIL | 736.8 | 4914.6 | 2 | 1 | ASSERTION_FAILED: knowledge outage was not disclosed |
+| KB-08 | PASS | 998.2 | 2003.5 | 1 | 0 |  |
+| WEB-01 | PASS | 2743.8 | 3865.6 | 2 | 1 |  |
+| WEB-02 | PASS | 2607.3 | 3473.6 | 2 | 1 |  |
+| WEB-03 | PASS | 2419.5 | 3792.1 | 2 | 1 |  |
+| WEB-04 | PASS | 763.4 | 2549.3 | 1 | 0 |  |
+| WEB-05 | PASS | 803.5 | 6137.7 | 3 | 2 |  |
+| WEB-06 | PASS | 2631.3 | 4107.3 | 2 | 1 |  |
+| WEB-07 | PASS | 718.2 | 4980.2 | 2 | 1 |  |
+| WEB-08 | PASS | 605.6 | 5350.2 | 2 | 1 |  |
+| SKILL-01 | FAIL | 787.9 | 172002.4 | 14 | 13 | ASSERTION_FAILED: expected completed, got cancelled; Skill totals/count missing; Skill output artifact missing |
+| SKILL-02 | PASS | 1192.5 | 24451.7 | 5 | 4 |  |
+| SKILL-03 | PASS | 1134.4 | 35205.4 | 7 | 5 |  |
+| SKILL-04 | PASS | 37904.8 | 42386.1 | 6 | 5 |  |
+| SKILL-05 | PASS | 1049.2 | 17146.4 | 5 | 4 |  |
+| SKILL-06 | PASS | 972.4 | 29875.2 | 7 | 5 |  |
+| SKILL-07 | PASS | 1580.3 | 19093.5 | 3 | 2 |  |
+| SKILL-08 | PASS | 1009.4 | 50248.3 | 6 | 5 |  |
+| BOX-01 | PASS | 3689.3 | 4768.5 | 2 | 1 |  |
+| BOX-02 | PASS | 954.4 | 21409.9 | 5 | 4 |  |
+| BOX-03 | PASS | 20506.0 | 23735.9 | 5 | 4 |  |
+| BOX-04 | PASS | 8329.0 | 10610.0 | 3 | 2 |  |
+| BOX-05 | PASS | 1156.3 | 35235.0 | 5 | 4 |  |
+| BOX-06 | FAIL | N/A | 60071.5 | 20 | 20 | ASSERTION_FAILED: expected completed, got partial; repaired script result is incorrect; repaired script success evidence missing |
+| BOX-07 | PASS | 2915.4 | 14588.7 | 6 | 4 |  |
+| BOX-08 | PASS | 4297.3 | 7239.0 | 2 | 1 |  |
+| MCP-01 | PASS | 2497.0 | 3186.1 | 2 | 1 |  |
+| MCP-02 | PASS | 2946.1 | 4258.2 | 2 | 1 |  |
+| MCP-03 | PASS | 908.3 | 2006.2 | 1 | 0 |  |
+| MCP-04 | PASS | 3824.2 | 4943.0 | 2 | 1 |  |
+| MCP-05 | PASS | 2656.7 | 3764.7 | 2 | 1 |  |
+| MCP-06 | PASS | 2854.8 | 3683.9 | 2 | 1 |  |
+| MCP-07 | PASS | 3649.7 | 4755.8 | 2 | 1 |  |
+| MCP-08 | PASS | 2928.0 | 3812.6 | 2 | 1 |  |
+| HUMAN-01 | PASS | 2873.9 | 3593.3 | 2 | 1 |  |
+| HUMAN-02 | PASS | 2773.1 | 4122.1 | 2 | 1 |  |
+| HUMAN-03 | PASS | 2374.6 | 3330.2 | 2 | 1 |  |
+| HUMAN-04 | PASS | 2855.2 | 4788.4 | 2 | 1 |  |
+| HUMAN-05 | PASS | 3059.9 | 4230.5 | 2 | 1 |  |
+| HUMAN-06 | PASS | 3130.1 | 4022.6 | 2 | 1 |  |
+| HUMAN-07 | PASS | 2119.7 | 2652.1 | 2 | 1 |  |
+| HUMAN-08 | PASS | 2581.2 | 6990.8 | 3 | 2 |  |
+| FLOW-01 | PASS | 710.6 | 24412.2 | 4 | 5 |  |
+| FLOW-02 | FAIL | 1386.9 | 5799.6 | 2 | 2 | ASSERTION_FAILED: separate sources missing |
+| FLOW-03 | PASS | 743.6 | 12587.2 | 5 | 3 |  |
+| FLOW-04 | PASS | 18257.0 | 25045.1 | 5 | 4 |  |
+| FLOW-05 | FAIL | 929.4 | 195927.5 | 20 | 21 | ASSERTION_FAILED: expected completed, got cancelled; report workflow capabilities were incomplete; report CSV artifact missing; Markdown report artifact missing; report and CSV facts are inconsistent; Markdown report does not contain the verified totals |
+| FLOW-06 | PASS | 1093.2 | 6503.5 | 2 | 3 |  |
+| FLOW-07 | FAIL | 701.3 | 40389.6 | 5 | 4 | ASSERTION_FAILED: CSV success plus chart failure path was not exercised; partial completion was not accurately disclosed |
+| FLOW-08 | PASS | 1178.2 | 17325.6 | 6 | 5 |  |
+| CHAT-01 | FAIL | 868.2 | 1547.9 | 1 | 0 | ASSERTION_FAILED: weather follow-up did not refresh current data; follow-up did not switch to Guangzhou |
+| CHAT-02 | FAIL | N/A | 164.7 | 0 | 0 | PRODUCT_ATTACHMENT_FLOW_FAILED: product did not queue attachment run: Failed to accept chat message. |
+| CHAT-03 | FAIL | 628.5 | 3462.6 | 1 | 0 | ASSERTION_FAILED: targeted analysis clarification missing |
+| CHAT-04 | PASS | N/A | 2229.3 | 2 | 1 |  |
+| CHAT-05 | PASS | N/A | 23.4 | 3 | 2 |  |
+| CHAT-06 | PASS | 908.5 | 3580.8 | 2 | 1 |  |
+| CHAT-07 | PASS | N/A | 4.1 | 4 | 2 |  |
+| CHAT-08 | PASS | N/A | 6.2 | 4 | 2 |  |
+| ERROR-01 | PASS | N/A | 2.5 | 1 | 0 |  |
+| ERROR-02 | PASS | 2078.6 | 5209.0 | 2 | 1 |  |
+| ERROR-03 | PASS | 13281.7 | 13683.4 | 2 | 1 |  |
+| ERROR-04 | PASS | N/A | 18.9 | 5 | 5 |  |
+| ERROR-05 | PASS | 1506.1 | 15961.0 | 4 | 4 |  |
+| ERROR-06 | PASS | N/A | 71.2 | 3 | 2 |  |
+| ERROR-07 | PASS | N/A | 7.9 | 2 | 2 |  |
+| ERROR-08 | PASS | 3282.6 | 4371.5 | 2 | 1 |  |
+| PERF-01 | PASS | 889.2 | 40024.5 | 20 | 0 |  |
+| PERF-02 | PASS | N/A | 19.7 | 8 | 6 |  |
+| PERF-03 | PASS | N/A | 1009.8 | 2 | 2 |  |
+| PERF-04 | FAIL | N/A | 162.2 | 0 | 0 | PRODUCT_ATTACHMENT_FLOW_FAILED: product did not queue attachment run: Failed to accept chat message. |
+| PERF-05 | PASS | N/A | 2.8 | 10 | 0 |  |
+| PERF-06 | PASS | N/A | 13.6 | 40 | 20 |  |
+| ARCH-01 | PASS | N/A | 5.3 | 5 | 2 |  |
+| ARCH-02 | PASS | N/A | N/A | 0 | 0 |  |
+| ARCH-03 | FAIL | N/A | N/A | 0 | 0 | PRODUCT_FLOW_FAILED: product run did not complete: waiting_approval |
+| ARCH-04 | PASS | N/A | 27703.6 | 0 | 0 |  |
+
+## Slowest cases
+
+- FLOW-05: 195927.5 ms (request/agent_run)
+- SKILL-01: 172002.4 ms (request/agent_run)
+- BOX-06: 60071.5 ms (request/agent_run)
+- SKILL-08: 50248.3 ms (request/agent_run)
+- SKILL-04: 42386.1 ms (request/agent_run)
+
+## Optimization evidence
+
+- No comparable baseline; collect a matching run before claiming improvement or regression.
+</pre></body></html>

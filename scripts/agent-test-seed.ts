@@ -153,10 +153,6 @@ await prisma.$transaction([
       computeNetworkAllowlist: ["agent-test-mcp"],
       computeFilesystemMode: "EPHEMERAL_FULL",
       sandboxTestEligible: true,
-      delegationEnabled: true,
-      delegationNaturalLanguageEnabled: true,
-      delegationMaxSteps: 16,
-      delegationKnowledgeScope: "PUBLIC_KNOWLEDGE",
     },
   }),
   prisma.capabilityPolicyProfile.updateMany({
@@ -265,14 +261,6 @@ if (!existingAgentTestVersion) {
           browser: "allow",
           mcp: "allow",
         },
-      },
-      delegation: {
-        enabled: true,
-        naturalLanguageEnabled: true,
-        explicitComputeEnabled: true,
-        maxSteps: 16,
-        maxEstimatedTokens: 0,
-        knowledgeScope: "public_knowledge",
       },
       skills: [
         ...skills.filter((entry) => (entry as Prisma.JsonObject).slug !== "spreadsheet-analysis"),

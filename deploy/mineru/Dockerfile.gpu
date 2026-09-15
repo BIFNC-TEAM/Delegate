@@ -1,0 +1,42 @@
+# Reuse the immutable CUDA 13 / PyTorch base already cached on 7567-server.
+# The digest prevents a mutable local tag from changing this build implicitly.
+FROM vllm/vllm-openai@sha256:673080907c88570baa34404f53007c1c3225cc0726a0aa804e82aa8aebbd4a50
+
+ARG MINERU_VERSION=3.4.5
+
+LABEL org.opencontainers.image.title="Delegate MinerU API"
+LABEL org.opencontainers.image.version="${MINERU_VERSION}"
+LABEL org.opencontainers.image.source="https://github.com/opendatalab/MinerU"
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    fontconfig \
+    fonts-noto-cjk \
+    fonts-noto-core \
+    libgl1 \
+  && fc-cache -f \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir --upgrade \
+    "mineru[core]==${MINERU_VERSION}" \
+    --index-url https://mirrors.aliyun.com/pypi/simple \
+  && mineru-models-download -s modelscope -m pipeline \
+  && python3 -m pip cache purge
+
+ENV MINERU_MODEL_SOURCE=local \
+    MINERU_API_OUTPUT_ROOT=/srv/mineru/output \
+    MINERU_API_MAX_CONCURRENT_REQUESTS=1 \
+    PYTHONUNBUFFERED=1 \
+    TORCH_CUDNN_V8_API_DISABLED=1
+
+WORKDIR /srv/mineru
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=12 \
+  CMD curl --fail --silent http://127.0.0.1:8000/health >/dev/null || exit 1
+
+ENTRYPOINT ["mineru-api"]
+CMD ["--host", "0.0.0.0", "--port", "8000", "--gpu-memory-utilization", "0.20"]

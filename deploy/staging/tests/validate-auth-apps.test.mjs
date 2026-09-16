@@ -10,6 +10,10 @@ import {
   validateAuthApps,
 } from "../validate-auth-apps.mjs";
 import { verifyLogtoManagement } from "../verify-logto-management.mjs";
+import {
+  migrateUriList,
+  replaceKnownOrigin,
+} from "../update-logto-origins.mjs";
 
 const serverDeploy = readFileSync(
   fileURLToPath(new URL("../server-deploy.sh", import.meta.url)),
@@ -22,6 +26,13 @@ const prepareEnv = readFileSync(
 const appEnvBlock = prepareEnv.match(
   /const appEnv = \{[\s\S]*?writeEnv\(`\$\{values\.output\}\/app\.env`, appEnv\);/u,
 )?.[0] ?? "";
+const legacyPlannerRemovalMigration = readFileSync(
+  fileURLToPath(new URL(
+    "../../../prisma/migrations/20260910100000_remove_legacy_planner/migration.sql",
+    import.meta.url,
+  )),
+  "utf8",
+);
 
 test("accepts a complete Logto application bootstrap without exposing values", () => {
   const source = requiredAuthAppKeys
@@ -130,5 +141,73 @@ test("staging payment collection is an explicit persistent source flag", () => {
   assert.match(
     prepareEnv,
     /DELEGATE_WECHAT_PAY_COLLECTION_ENABLED=true requires/u,
+  );
+});
+
+test("production Logto callback origins migrate from bonary.xyz to rag8.cn", () => {
+  assert.equal(
+    replaceKnownOrigin("https://dashboard.bonary.xyz/auth/callback?flow=sign_in"),
+    "https://dashboard.rag8.cn/auth/callback?flow=sign_in",
+  );
+  assert.equal(
+    replaceKnownOrigin("https://delegate.bonary.xyz/reps/demo"),
+    "https://delegate.rag8.cn/reps/demo",
+  );
+  assert.deepEqual(
+    migrateUriList(
+      [
+        "https://dashboard.bonary.xyz/auth/callback",
+        "https://dashboard.rag8.cn/auth/callback",
+      ],
+      ["https://dashboard.rag8.cn/auth/callback"],
+    ),
+    ["https://dashboard.rag8.cn/auth/callback"],
+  );
+});
+
+test("staging emits the direct rag8.cn public origins", () => {
+  for (const origin of [
+    "https://home.rag8.cn",
+    "https://dashboard.rag8.cn",
+    "https://delegate.rag8.cn",
+    "https://login.rag8.cn",
+    "https://login-admin.rag8.cn",
+    "https://delegate-pay.rag8.cn",
+    "https://openviking.rag8.cn",
+  ]) {
+    assert.match(prepareEnv, new RegExp(origin.replaceAll(".", "\\."), "u"));
+  }
+});
+
+test("staging fails fast unless production cloud sandbox routing is supplied", () => {
+  assert.match(prepareEnv, /const sandboxProvider = sourceValue\("SANDBOX_PROVIDER"\)/u);
+  assert.match(prepareEnv, /sandboxRoutingMode !== "manual_poc"/u);
+  assert.match(prepareEnv, /SANDBOX_PROVIDER_ROUTING_JSON/u);
+  assert.match(prepareEnv, /TENCENT_AGS_API_KEY/u);
+  assert.match(prepareEnv, /DAYTONA_API_KEY/u);
+  assert.doesNotMatch(prepareEnv, /SANDBOX_PROVIDER: "docker"/u);
+});
+
+test("legacy planner removal drains only inert drafts before enforcing guards", () => {
+  assert.match(legacyPlannerRemovalMigration, /WITH cancelable_plans AS/u);
+  assert.match(
+    legacyPlannerRemovalMigration,
+    /plan\."status" IN \('PROPOSED', 'VALIDATED'\)/u,
+  );
+  assert.match(
+    legacyPlannerRemovalMigration,
+    /action\."status" NOT IN \('PLANNED', 'CANCELED', 'SKIPPED', 'SUCCEEDED', 'FAILED'\)/u,
+  );
+  assert.match(
+    legacyPlannerRemovalMigration,
+    /execution\."status" IN \('QUEUED', 'RUNNING', 'BLOCKED'\)/u,
+  );
+  assert.match(
+    legacyPlannerRemovalMigration,
+    /workflow\."status" IN \('QUEUED', 'RUNNING'\)/u,
+  );
+  assert.match(
+    legacyPlannerRemovalMigration,
+    /legacy planner removal blocked: active ConversationTurnPlan rows remain/u,
   );
 });

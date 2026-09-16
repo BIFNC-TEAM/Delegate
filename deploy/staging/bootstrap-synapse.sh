@@ -74,11 +74,11 @@ app_service_config_files:
 EOF
 fi
 
-# The Matrix server name is immutable; the public base URL may be safely
-# normalized before first traffic and on subsequent idempotent deploys.
+# The existing Matrix server name is immutable and intentionally remains
+# matrix.bonary.xyz. Only the public client/federation endpoint is moved.
 sed -i '/^public_baseurl:/d' "$HOMESERVER"
 cat >>"$HOMESERVER" <<'EOF'
-public_baseurl: https://matrix.bonary.xyz/
+public_baseurl: https://delegate-matrix.rag8.cn/
 EOF
 
 chmod 600 "$HOMESERVER" "$REGISTRATION"

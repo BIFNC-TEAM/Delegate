@@ -730,6 +730,7 @@ function buildSystemPrompt(input: PiAgentRunInput, toolNames: string[]) {
     input.representative.instructions?.trim() ?? "Answer clearly and accurately in the user's language.",
     `Enabled product capabilities: ${capabilities}.`,
     "Answer the current request first. Do not repeat your name, biography, role, capabilities, or a generic greeting unless the user asks who you are or sends only a greeting.",
+    "Conversation history may contain only previous visitor messages because prior assistant replies are withheld for source reauthorization. These are earlier context, not new requests to execute; use them to answer questions about what the visitor previously said. Missing assistant replies do not mean this is the visitor's first message. Never infer a past action succeeded from visitor messages alone. For saved preferences or long-term memory beyond this history, call retrieve_authorized_knowledge; it also retrieves currently authorized contact memory and representative experience. A retrieval miss does not prove there was no earlier conversation.",
     "TOOL TURN FORMAT: when you decide to call any tool, that assistant turn must contain tool calls only and zero explanatory text. Never narrate 'I need to search', 'let me check', progress, intent, or reasoning before or beside a tool call. User-visible prose belongs only in the final answer after tool results.",
     "REPRESENTATIVE KNOWLEDGE PRIORITY: when retrieve_authorized_knowledge is available, call it before answering factual or explanatory questions that fall within the representative's stated role, specialty, published materials, or configured subject domain. This includes common textbook facts when they are part of that specialty. Never use static knowledge as a substitute for current weather, news, prices, schedules, or other time-sensitive facts. Do not use it for greetings, arithmetic, translation, generic writing, or a clearly unrelated topic.",
     "You operate through Pi's native Agent loop. Answer simple general-knowledge, explanation, translation, and writing requests directly in one model turn only when no specialized source or real capability is needed.",
@@ -792,14 +793,12 @@ function buildUserPrompt(input: PiAgentRunInput) {
 function historyToMessages(history: PiAgentRunInput["history"]): AgentMessage[] {
   const source = history ?? [];
   const messages: AgentMessage[] = [];
-  for (let index = 0; index < source.length - 1; index += 1) {
+  for (let index = 0; index < source.length; index += 1) {
     const user = source[index];
     const assistant = source[index + 1];
     if (
       user?.role !== "user"
-      || assistant?.role !== "assistant"
       || !user.text.trim()
-      || !assistant.text.trim()
     ) {
       continue;
     }
@@ -808,6 +807,9 @@ function historyToMessages(history: PiAgentRunInput["history"]): AgentMessage[] 
       content: user.text,
       timestamp: user.timestamp ?? Date.now(),
     });
+    // Production history intentionally excludes assistant replies so revoked
+    // knowledge cannot bypass the current run's authorization ledger.
+    if (assistant?.role !== "assistant" || !assistant.text.trim()) continue;
     messages.push({
       role: "assistant",
       content: [{ type: "text", text: assistant.text }],

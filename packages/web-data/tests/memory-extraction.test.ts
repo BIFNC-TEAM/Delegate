@@ -948,6 +948,22 @@ describe("memory extraction worker retry semantics", () => {
 });
 
 describe("memory extraction processor", () => {
+  it("does not write queued long-term memory after the policy is disabled", async () => {
+    const { tx, candidateCreates, versions, projections } = buildProcessorTransaction({
+      channel: "web",
+      text: "I prefer concise replies",
+      scope: MemoryScope.CONTACT_CHANNEL,
+      trigger: MemoryExtractionTrigger.CHANNEL_MESSAGE,
+      policy: { longTermMemoryEnabled: false },
+    });
+
+    await expect(processMemoryExtractionRunInTransaction(tx, { runId: "run-1" }))
+      .resolves.toMatchObject({ status: "CANCELED", reasonCode: "long_term_memory_disabled" });
+    expect(candidateCreates).toHaveLength(0);
+    expect(versions).toHaveLength(0);
+    expect(projections).toHaveLength(0);
+  });
+
   it.each(["web"] as const)(
     "automatically activates a low-risk local candidate for %s",
     async (channel) => {

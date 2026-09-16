@@ -1271,7 +1271,7 @@ function buildPiAdapters(input: {
           sourceChannel: input.item.channel,
           generationRunId: input.item.runId,
           queryText: retrievalQuery,
-          allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
+          allowedSourceKinds: ["PUBLIC_KNOWLEDGE", "CONTACT_MEMORY", "REPRESENTATIVE_EXPERIENCE"],
         }).catch(() => ({ items: [], citations: [], memoryUseRunId: undefined }));
         input.onMemoryUse(
           recalled.memoryUseRunId,

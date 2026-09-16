@@ -39,6 +39,66 @@ const representative = {
 };
 
 describe("Delegate Pi Agent runtime", () => {
+  it.each(["我前面问了什么", "我上面问了什么问题？"])(
+    "preserves audience-only history in the provider request for %s",
+    async (userText) => {
+      let receivedMessages: unknown;
+      const model = modelBinding([
+        (context) => {
+          receivedMessages = context.messages;
+          return fauxAssistantMessage("你之前问了等温线是什么。");
+        },
+      ]);
+      const result = await new DelegatePiAgentRuntime().run({
+        runId: "audience-history",
+        sessionId: "session-audience-history",
+        userText,
+        representative,
+        model: model.binding,
+        history: [
+          { role: "user", text: "等温线是什么", timestamp: 1 },
+          { role: "user", text: "请举个例子", timestamp: 2 },
+        ],
+      });
+
+      expect(result.status).toBe("completed");
+      expect(receivedMessages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ role: "user", content: "等温线是什么", timestamp: 1 }),
+        expect.objectContaining({ role: "user", content: "请举个例子", timestamp: 2 }),
+      ]));
+      expect((receivedMessages as Array<{ role: string }>).map((message) => message.role))
+        .toEqual(["user", "user", "user"]);
+    },
+  );
+
+  it("keeps paired history and a trailing user while ignoring empty and orphan assistant entries", async () => {
+    let receivedMessages: unknown;
+    const model = modelBinding([(context) => {
+      receivedMessages = context.messages;
+      return fauxAssistantMessage("收到。");
+    }]);
+    await new DelegatePiAgentRuntime().run({
+      runId: "mixed-history",
+      sessionId: "session-mixed-history",
+      userText: "谢谢",
+      representative,
+      model: model.binding,
+      history: [
+        { role: "assistant", text: "orphan" },
+        { role: "user", text: " " },
+        { role: "user", text: "first" },
+        { role: "assistant", text: "reply" },
+        { role: "user", text: "last" },
+      ],
+    });
+    expect(JSON.stringify(receivedMessages)).not.toContain("orphan");
+    expect((receivedMessages as Array<{ role: string }>).map((message) => message.role))
+      .toEqual(["user", "assistant", "user", "user"]);
+    expect(receivedMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: "last" }),
+    ]));
+  });
+
   it.each([
     ["真人转接", "request"],
     ["帮我找个人聊聊", "request"],
@@ -437,12 +497,12 @@ describe("Delegate Pi Agent runtime", () => {
     expect(calls).toBe(1);
   });
 
-  it("prioritizes representative-domain knowledge and drops unpaired standalone history", async () => {
+  it("prioritizes representative-domain knowledge while retaining audience history", async () => {
     const model = modelBinding([
       (context) => {
         const messages = JSON.stringify(context.messages);
         expect(messages).toContain("世界上面积最大的大洲是什么？");
-        expect(messages).not.toContain("等温线是什么");
+        expect(messages).toContain("等温线是什么");
         expect(context.systemPrompt).toContain(
           "REPRESENTATIVE KNOWLEDGE PRIORITY",
         );

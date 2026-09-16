@@ -579,6 +579,109 @@ describe("production Pi conversation processor", () => {
     }));
   });
 
+  it("passes persisted audience turns to Pi in order within the current message boundary", async () => {
+    mocks.claimGeneration.mockResolvedValueOnce(generationItem({ userText: "我上面问了什么问题？" }));
+    mocks.loadTurns.mockResolvedValueOnce([
+      { id: "prior-1", direction: "inbound", messageText: "等温线是什么" },
+      { id: "prior-2", direction: "inbound", messageText: "请举个例子" },
+    ]);
+
+    await expect(processNextPiConversationWork(config)).resolves.toMatchObject({ status: "completed" });
+    expect(mocks.loadTurns).toHaveBeenCalledWith({
+      representativeId: "rep-1",
+      conversationId: "conversation-pi",
+      beforeMessageId: "message-pi",
+    });
+    expect(mocks.piRun).toHaveBeenCalledWith(expect.objectContaining({
+      history: [
+        { role: "user", text: "等温线是什么" },
+        { role: "user", text: "请举个例子" },
+      ],
+    }));
+  });
+
+  it("fails the generation instead of silently losing history when its store is unavailable", async () => {
+    mocks.claimGeneration.mockResolvedValueOnce(generationItem());
+    mocks.loadTurns.mockRejectedValueOnce(new Error("history store unavailable"));
+    await expect(processNextPiConversationWork(config)).resolves.toMatchObject({ status: "failed" });
+    expect(mocks.piRun).not.toHaveBeenCalled();
+    expect(mocks.failGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      errorMessage: "history store unavailable",
+    }));
+  });
+
+  it.each(["empty", "network_failure"])(
+    "does not invent memory or citations for %s recall",
+    async (scenario) => {
+      mocks.claimGeneration.mockResolvedValueOnce(generationItem());
+      if (scenario === "network_failure") {
+        mocks.recallContext.mockRejectedValueOnce(new Error("provider unavailable"));
+      } else {
+        mocks.recallContext.mockResolvedValueOnce({ items: [], citations: [], memoryUseRunId: "empty-use" });
+      }
+      const baseResult = await mocks.piRun.getMockImplementation()!();
+      let retrieved: unknown;
+      mocks.piRun.mockImplementationOnce(async (input) => {
+        retrieved = await input.capabilities.knowledge.retrieve({ query: "我的回复偏好" });
+        return baseResult;
+      });
+      await expect(processNextPiConversationWork(config)).resolves.toMatchObject({ status: "completed" });
+      expect(retrieved).toMatchObject({
+        status: scenario === "empty" ? "not_found" : "unavailable",
+        sources: [],
+      });
+      const completion = mocks.completeInline.mock.calls[0]![0];
+      if (scenario === "empty") {
+        expect(completion.memoryUse).toMatchObject({ injectedItemIds: [], citedItemIds: [] });
+      } else {
+        expect(completion.memoryUse).toBeUndefined();
+      }
+    },
+  );
+
+  it.each(["CONTACT_MEMORY", "REPRESENTATIVE_EXPERIENCE"])(
+    "retrieves authorized %s and persists its memory-use ledger",
+    async (sourceKind) => {
+      mocks.claimGeneration.mockResolvedValueOnce(generationItem({ userText: "我偏好什么样的回复？" }));
+      const baseResult = await mocks.piRun.getMockImplementation()!();
+      mocks.recallContext.mockImplementationOnce(async (input) => ({
+        memoryUseRunId: "memory-use-1",
+        items: input.allowedSourceKinds.includes(sourceKind) ? [{
+          memoryUseItemId: "memory-item-1",
+          abstract: "Preference: reply_length=concise",
+          internalSource: { sourceKind, publicTitle: "已授权记忆" },
+        }] : [],
+        citations: [],
+      }));
+      let retrieved: { text: string } | undefined;
+      mocks.piRun.mockImplementationOnce(async (input) => {
+        retrieved = await input.capabilities.knowledge.retrieve({ query: input.userText });
+        return {
+          ...baseResult,
+          sources: [{ id: "memory-item-1", title: "已授权记忆", channel: "knowledge" }],
+        };
+      });
+
+      await expect(processNextPiConversationWork(config)).resolves.toMatchObject({ status: "completed" });
+      expect(retrieved?.text).toContain("reply_length=concise");
+      expect(mocks.recallContext).toHaveBeenCalledWith(expect.objectContaining({
+        conversationId: "conversation-pi",
+        contactId: "contact-pi",
+        generationRunId: "run-pi",
+        sourceChannel: "web",
+        allowedSourceKinds: ["PUBLIC_KNOWLEDGE", "CONTACT_MEMORY", "REPRESENTATIVE_EXPERIENCE"],
+      }));
+      expect(mocks.completeInline).toHaveBeenCalledWith(expect.objectContaining({
+        memoryUse: {
+          runId: "memory-use-1",
+          outcome: "completed",
+          injectedItemIds: ["memory-item-1"],
+          citedItemIds: ["memory-item-1"],
+        },
+      }));
+    },
+  );
+
   it("never submits snapshot knowledge ids as MemoryUseItem citation ids", async () => {
     mocks.claimGeneration.mockResolvedValueOnce(generationItem({
       userText: "分析附件",

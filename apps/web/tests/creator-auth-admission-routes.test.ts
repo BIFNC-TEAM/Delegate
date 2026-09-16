@@ -353,6 +353,37 @@ describe("creator admission auth routes", () => {
     );
   });
 
+  it("fails closed without exposing internal callback errors", async () => {
+    mocks.resolveOwnerForAuth.mockRejectedValue(
+      new Error(
+        "Invalid prisma.owner.create() invocation: Unique constraint failed",
+      ),
+    );
+    mocks.isCreatorAdmissionRequiredError.mockReturnValue(false);
+    mocks.isCreatorRegistrationRequiredError.mockReturnValue(false);
+
+    const response = await completeCreatorLogin(
+      new Request(
+        "https://dashboard.example.com/auth/callback?code=code-1&state=state-1",
+      ),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe(
+      "https://dashboard.example.com/auth/error?reason=login_failed",
+    );
+    expect(await response.text()).not.toContain("prisma.owner.create");
+    expect(response.headers.get("set-cookie")).toContain(
+      "delegate_owner_auth_state=",
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "delegate_owner_auth_session=",
+    );
+    expect(
+      response.cookies.get("delegate_dashboard_session_v2")?.value,
+    ).toBe("");
+  });
+
   it("lets an already-issued v1 callback finish without a verifier", async () => {
     mocks.verifyDelegateAuthState.mockReturnValue({
       version: 1,

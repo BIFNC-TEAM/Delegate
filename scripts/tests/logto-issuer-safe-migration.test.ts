@@ -28,6 +28,13 @@ const backfillSql = readFileSync(
   ),
   "utf8",
 );
+const cutoverSql = readFileSync(
+  resolve(
+    process.cwd(),
+    "prisma/backfill/logto-issuer-cutover.sql",
+  ),
+  "utf8",
+);
 
 describe("issuer-safe legacy identity migration", () => {
   it("expands OwnerIdentityLink without forcing an invented issuer", () => {
@@ -73,6 +80,30 @@ describe("issuer-safe legacy identity migration", () => {
     );
     expect(indexMigrationSql).not.toMatch(
       /DROP INDEX "IdentityLink_provider_providerSubject_key"/u,
+    );
+  });
+
+  it("cuts over a verified Logto tenant atomically without merging principals", () => {
+    expect(cutoverSql).toContain(
+      "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;",
+    );
+    expect(cutoverSql).toContain("pg_advisory_xact_lock");
+    expect(cutoverSql).toContain("IN SHARE ROW EXCLUSIVE MODE;");
+    expect(cutoverSql).toContain("expected_owner_count");
+    expect(cutoverSql).toContain("expected_audience_count");
+    expect(cutoverSql).toContain("expected_auth_identity_count");
+    expect(cutoverSql).toContain(
+      "Target issuer already contains a conflicting principal.",
+    );
+    expect(cutoverSql).toContain(
+      "Stored issuer and verified metadata issuer do not match.",
+    );
+    expect(cutoverSql).toContain('UPDATE "OwnerIdentityLink" AS link');
+    expect(cutoverSql).toContain('UPDATE "IdentityLink" AS link');
+    expect(cutoverSql).toContain('UPDATE "AuthIdentity" AS identity');
+    expect(cutoverSql.match(/jsonb_set\(/gu)).toHaveLength(2);
+    expect(cutoverSql).toContain(
+      "Issuer cutover verification failed; transaction will roll back.",
     );
   });
 });

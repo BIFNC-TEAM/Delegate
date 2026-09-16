@@ -179,6 +179,17 @@ test("staging emits the direct rag8.cn public origins", () => {
   }
 });
 
+test("staging budgets PostgreSQL connections across Prisma and Temporal", () => {
+  assert.match(
+    prepareEnv,
+    /postgresql:\/\/delegate:.*\/delegate\?connection_limit=5&pool_timeout=10/u,
+  );
+  assert.match(prepareEnv, /SQL_MAX_CONNS: "10"/u);
+  assert.match(prepareEnv, /SQL_MAX_IDLE_CONNS: "10"/u);
+  assert.match(prepareEnv, /SQL_VIS_MAX_CONNS: "5"/u);
+  assert.match(prepareEnv, /SQL_VIS_MAX_IDLE_CONNS: "5"/u);
+});
+
 test("staging fails fast unless production cloud sandbox routing is supplied", () => {
   assert.match(prepareEnv, /const sandboxProvider = sourceValue\("SANDBOX_PROVIDER"\)/u);
   assert.match(prepareEnv, /sandboxRoutingMode !== "manual_poc"/u);

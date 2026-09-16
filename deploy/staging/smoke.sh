@@ -24,6 +24,13 @@ ssh "$REMOTE_HOST" '
   check https://delegate.rag8.cn/health 200
   check https://delegate.rag8.cn/ready 200
   check "https://delegate.rag8.cn/reps/lin-founder-rep/auth/login?returnTo=%2Freps%2Flin-founder-rep" 307
+  representative_body="$(curl -fsSL --connect-timeout 5 --max-time 20 https://delegate.rag8.cn/reps/lin-founder-rep)"
+  printf "200 %s\n" "https://delegate.rag8.cn/reps/lin-founder-rep"
+  printf "%s" "$representative_body" | grep -Fq "Lin 的网页 AI 接待代表"
+  if printf "%s" "$representative_body" | grep -Eq "A server error occurred|This page couldn.t load"; then
+    printf "Representative page rendered a server error shell\n" >&2
+    exit 1
+  fi
   check https://login.rag8.cn/oidc/.well-known/openid-configuration 200
   check https://delegate-matrix.rag8.cn/_matrix/client/versions 200
   check https://delegate-api.rag8.cn/health 200

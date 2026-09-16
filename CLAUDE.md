@@ -5,10 +5,10 @@ Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match `DESIGN.md`.
 
 ## Deploy Configuration (configured by /setup-deploy)
-- Platform: Delegate Docker Swarm origin via `ssh 8170-server`, fronted by SWAG on `ssh delegate-server`
-- Production URL: https://www.bonary.xyz
+- Platform: Delegate Docker Swarm on `ssh 8170-server`, with public TLS and routing terminated directly by the shared Traefik service
+- Production URL: https://home.rag8.cn
 - Deploy workflow: Manual commit-pinned release using `deploy/staging/publish.sh`
-- Deploy status command: `bash deploy/staging/status.sh 8170-server` plus `docker service ls --filter name=nginx-system_swag` on `delegate-server`
+- Deploy status command: `bash deploy/staging/status.sh 8170-server`
 - Merge method: No implicit merge; deploy the current approved commit
 - Project type: Multi-service web application and background runtime
 - Post-deploy health check: `bash deploy/staging/smoke.sh 8170-server`

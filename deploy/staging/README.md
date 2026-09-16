@@ -5,31 +5,30 @@ This deployment targets the existing single-node Docker Swarm on
 and keeps every data/runtime service on the attachable `delegate-internal`
 overlay network.
 
-Public traffic terminates on the Hong Kong `delegate-server` SWAG service at
-`47.76.192.252`. The checked-in `hk-swag.subdomain.conf` forwards HTTPS to the
-mainland origin with `tsd.rag8.cn` as TLS SNI and preserves each original
-`bonary.xyz` Host header for Traefik routing. This avoids the mainland 80/443
-policy block while keeping data services private.
+Public traffic terminates directly on the shared Traefik service at
+`8170-server` (`81.70.105.92`). Every public hostname uses the `lehttp`
+HTTP-01 resolver. The retired Hong Kong `delegate-server` SWAG hop is not part
+of this deployment.
 
 ## Public routes
 
-- `www.bonary.xyz` -> marketing site
-- `dashboard.bonary.xyz` -> owner dashboard
-- `delegate.bonary.xyz` -> public representatives
-- `login.bonary.xyz` -> Logto core
-- `login-admin.bonary.xyz` -> Logto Admin Console using Logto administrator authentication
-- `matrix.bonary.xyz` -> Synapse Client/Federation API
-- `openviking.bonary.xyz` -> OpenViking Studio/API behind Basic Auth
-- `pay.bonary.xyz` -> only the two WeChat Pay notification paths
-- `api.bonary.xyz` -> only `/health` and `/ready`
+- `home.rag8.cn` -> marketing site
+- `dashboard.rag8.cn` -> owner dashboard
+- `delegate.rag8.cn` -> public representatives
+- `login.rag8.cn` -> Logto core
+- `login-admin.rag8.cn` -> Logto Admin Console using Logto administrator authentication
+- `delegate-matrix.rag8.cn` -> Synapse Client/Federation API
+- `openviking.rag8.cn` -> OpenViking Studio/API behind Basic Auth
+- `delegate-pay.rag8.cn` -> only the two WeChat Pay notification paths
+- `delegate-api.rag8.cn` -> only `/health` and `/ready`
 
 PostgreSQL, MinIO, Temporal, workers, Matrix Application Service, and Compute
 Broker publish no host ports.
 
-All nine `bonary.xyz` A records point to `47.76.192.252`. SWAG's existing
-`matrix.rag8.cn` ECDSA certificate is expanded to include all public Delegate
-domains and renews through standalone HTTP-01. The previous callback-only
-`pay.subdomain.conf` is retained as a dated backup on the SWAG volume.
+All nine public A records point to `81.70.105.92`. Traefik obtains and renews
+their certificates through HTTP-01. Synapse keeps its immutable historical
+server identity (`matrix.bonary.xyz`) to preserve existing users and rooms,
+while its public base URL and ingress use `delegate-matrix.rag8.cn`.
 
 ## Publish
 
@@ -64,11 +63,11 @@ Do not paste that file into logs or chat.
 After the first Logto administrator is created, create two Traditional Web
 applications and one Management API machine-to-machine application. Register:
 
-- Dashboard redirect: `https://dashboard.bonary.xyz/auth/callback`
-- Dashboard post-sign-out: `https://dashboard.bonary.xyz/auth/logout/callback`
-- Representatives redirect: `https://delegate.bonary.xyz/auth/callback`
+- Dashboard redirect: `https://dashboard.rag8.cn/auth/callback`
+- Dashboard post-sign-out: `https://dashboard.rag8.cn/auth/logout/callback`
+- Representatives redirect: `https://delegate.rag8.cn/auth/callback`
 - Representatives post-sign-out:
-  `https://delegate.bonary.xyz/reps/lin-founder-rep`
+  `https://delegate.rag8.cn/reps/lin-founder-rep`
 
 Write the application credentials and webhook signing key to the existing
 server file:
@@ -77,7 +76,9 @@ server file:
 /home/ubuntu/delegate/shared/env/auth-apps.env
 ```
 
-Redeploy the stack after updating that file. SMTP is intentionally deferred.
+Redeploy the stack after updating that file. Each deployment idempotently
+migrates the two application callback origins and any Delegate webhook URL
+from the retired `bonary.xyz` origins. SMTP is intentionally deferred.
 
 ## Rollback
 

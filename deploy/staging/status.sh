@@ -12,13 +12,13 @@ ssh "$REMOTE_HOST" '
     --format "{{.Name}} {{.CurrentState}} {{.Error}}" | sed -n "1,80p"
   echo PUBLIC_HEALTH
   for url in \
-    https://www.bonary.xyz \
-    https://dashboard.bonary.xyz/health \
-    https://delegate.bonary.xyz/health \
-    https://delegate.bonary.xyz/ready \
-    https://login.bonary.xyz/oidc/.well-known/openid-configuration \
-    https://matrix.bonary.xyz/_matrix/client/versions \
-    https://api.bonary.xyz/health; do
+    https://home.rag8.cn \
+    https://dashboard.rag8.cn/health \
+    https://delegate.rag8.cn/health \
+    https://delegate.rag8.cn/ready \
+    https://login.rag8.cn/oidc/.well-known/openid-configuration \
+    https://delegate-matrix.rag8.cn/_matrix/client/versions \
+    https://delegate-api.rag8.cn/health; do
     printf "%s " "$url"
     curl -sS -o /dev/null -w "%{http_code}\n" --connect-timeout 5 --max-time 15 "$url" || true
   done

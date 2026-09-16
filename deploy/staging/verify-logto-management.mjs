@@ -46,7 +46,7 @@ const isMain = process.argv[1]
 if (isMain) {
   const envPath = process.argv[2]
     ?? "/home/ubuntu/delegate/shared/env/auth-apps.env";
-  const endpoint = process.argv[3] ?? "https://login.bonary.xyz";
+  const endpoint = process.argv[3] ?? "https://login.rag8.cn";
   const result = await verifyLogtoManagement({
     endpoint,
     authApps: validateAuthApps(readFileSync(envPath, "utf8")),

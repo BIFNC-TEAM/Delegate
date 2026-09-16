@@ -49,6 +49,19 @@ const hasOpenVikingModelCredentials = Boolean(
     ? sourceValue("ARK_API_KEY")
     : sourceValue("OPENAI_API_KEY")),
 );
+const sandboxProvider = sourceValue("SANDBOX_PROVIDER");
+const sandboxRoutingMode = sourceValue("SANDBOX_ROUTING_MODE");
+const sandboxProviderRoutingJson = sourceValue("SANDBOX_PROVIDER_ROUTING_JSON");
+if (
+  !["daytona", "tencent"].includes(sandboxProvider)
+  || sandboxRoutingMode !== "manual_poc"
+  || !sandboxProviderRoutingJson
+) {
+  throw new Error(
+    "Production staging requires SANDBOX_PROVIDER=daytona|tencent, "
+    + "SANDBOX_ROUTING_MODE=manual_poc, and SANDBOX_PROVIDER_ROUTING_JSON.",
+  );
+}
 
 const state = {
   POSTGRES_PASSWORD: secret("POSTGRES_PASSWORD", () => base64(36)),
@@ -115,9 +128,9 @@ const modelKeys = [
 
 const siteEnv = {
   NODE_ENV: "production",
-  NEXT_PUBLIC_SITE_URL: "https://www.bonary.xyz",
-  NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.bonary.xyz",
-  NEXT_PUBLIC_REPRESENTATIVE_URL: "https://delegate.bonary.xyz",
+  NEXT_PUBLIC_SITE_URL: "https://home.rag8.cn",
+  NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.rag8.cn",
+  NEXT_PUBLIC_REPRESENTATIVE_URL: "https://delegate.rag8.cn",
   NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS: "false",
 };
 writeEnv(`${values.output}/site.env`, siteEnv);
@@ -134,7 +147,7 @@ const appEnv = {
   PUBLIC_CHAT_AUDIENCE_REQUESTS_PER_MINUTE: "12",
   PUBLIC_CHAT_REPRESENTATIVE_REQUESTS_PER_DAY: "5000",
   PUBLIC_MATERIAL_LINK_SECRET: state.PUBLIC_MATERIAL_LINK_SECRET,
-  LOGTO_ENDPOINT: "https://login.bonary.xyz",
+  LOGTO_ENDPOINT: "https://login.rag8.cn",
   LOGTO_BACKCHANNEL_ENDPOINT: "http://logto:3001",
   LOGTO_SCOPES: "openid profile email phone",
   LOGTO_ACCOUNT_CENTER_URL: "",
@@ -185,7 +198,7 @@ const appEnv = {
   OPENVIKING_API_KEY: state.OPENVIKING_ROOT_API_KEY,
   OPENVIKING_ROOT_API_KEY: state.OPENVIKING_ROOT_API_KEY,
   OPENVIKING_TIMEOUT_MS: "8000",
-  OPENVIKING_CONSOLE_URL: "https://openviking.bonary.xyz/studio",
+  OPENVIKING_CONSOLE_URL: "https://openviking.rag8.cn/studio",
   OPENVIKING_AGENT_ID_PREFIX: "delegate-rep",
   OPENVIKING_RESOURCE_SYNC_ENABLED: "true",
   OPENVIKING_AUTO_RECALL_DEFAULT: "true",
@@ -246,8 +259,8 @@ const paymentEnv = {
   DELEGATE_WECHAT_PAY_ENABLED: "false",
   DELEGATE_WECHAT_PAY_COLLECTION_ENABLED: weChatCollectionEnabled,
   DELEGATE_WECHAT_PAY_PROCESSING_ENABLED: weChatProcessingEnabled,
-  WECHAT_PAY_NOTIFY_URL: "https://pay.bonary.xyz/api/payments/wechat/notify",
-  WECHAT_PAY_REFUND_NOTIFY_URL: "https://pay.bonary.xyz/api/payments/wechat/refund-notify",
+  WECHAT_PAY_NOTIFY_URL: "https://delegate-pay.rag8.cn/api/payments/wechat/notify",
+  WECHAT_PAY_REFUND_NOTIFY_URL: "https://delegate-pay.rag8.cn/api/payments/wechat/refund-notify",
   ...sourceSubset(weChatKeys),
 };
 
@@ -280,7 +293,7 @@ writeEnv(`${values.output}/bot.env`, {
   TELEGRAM_BOT_ID: sourceValue("TELEGRAM_BOT_ID"),
   TELEGRAM_BOT_USERNAME: sourceValue("TELEGRAM_BOT_USERNAME"),
   TELEGRAM_WEBHOOK_SECRET: sourceValue("TELEGRAM_WEBHOOK_SECRET"),
-  TELEGRAM_WEB_RECHARGE_BASE_URL: "https://delegate.bonary.xyz",
+  TELEGRAM_WEB_RECHARGE_BASE_URL: "https://delegate.rag8.cn",
   TELEGRAM_RUNTIME_RECONCILE_MS: "5000",
   TELEGRAM_RUNTIME_LEASE_MS: "120000",
   TELEGRAM_RUNTIME_LEASE_RENEW_MS: "20000",
@@ -288,6 +301,17 @@ writeEnv(`${values.output}/bot.env`, {
 });
 
 const computeKeys = [
+  "DAYTONA_API_KEY",
+  "DAYTONA_API_URL",
+  "DAYTONA_TARGET",
+  "DAYTONA_SANDBOX_CPU",
+  "DAYTONA_SANDBOX_MEMORY_GIB",
+  "DAYTONA_SANDBOX_DISK_GIB",
+  "DAYTONA_SANDBOX_TTL_MINUTES",
+  "TENCENT_AGS_API_KEY",
+  "TENCENT_AGS_DOMAIN",
+  "TENCENT_AGS_REGION",
+  "TENCENT_AGS_CODE_TOOL",
   "COMPUTE_NATIVE_OPENAI_ENABLED",
   "COMPUTE_NATIVE_OPENAI_BASE_URL",
   "COMPUTE_NATIVE_OPENAI_MODEL",
@@ -304,7 +328,9 @@ writeEnv(`${values.output}/compute.env`, {
   PORT: "4010",
   COMPUTE_BROKER_INTERNAL_TOKEN: state.COMPUTE_BROKER_INTERNAL_TOKEN,
   COMPUTE_RUNNER_TYPE: "docker",
-  SANDBOX_PROVIDER: "docker",
+  SANDBOX_PROVIDER: sandboxProvider,
+  SANDBOX_ROUTING_MODE: sandboxRoutingMode,
+  SANDBOX_PROVIDER_ROUTING_JSON: sandboxProviderRoutingJson,
   COMPUTE_RUNNER_IMAGE: "debian:bookworm-slim",
   COMPUTE_BROWSER_IMAGE: "mcr.microsoft.com/playwright:v1.58.2-noble",
   COMPUTE_BROWSER_PLAYWRIGHT_VERSION: "1.58.2",
@@ -351,8 +377,8 @@ writeEnv(`${values.output}/logto.env`, {
   NODE_ENV: "production",
   DB_URL: logtoDbUrl,
   DATABASE_STATEMENT_TIMEOUT: "30000",
-  ENDPOINT: "https://login.bonary.xyz",
-  ADMIN_ENDPOINT: "https://login-admin.bonary.xyz",
+  ENDPOINT: "https://login.rag8.cn",
+  ADMIN_ENDPOINT: "https://login-admin.rag8.cn",
   TRUST_PROXY_HEADER: "1",
   SECRET_VAULT_KEK: state.LOGTO_SECRET_VAULT_KEK,
   PRIVATE_KEY_ROTATION_GRACE_PERIOD: "0",

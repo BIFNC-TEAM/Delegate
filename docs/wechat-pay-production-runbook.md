@@ -183,10 +183,10 @@ the same callback-only boundary:
 3. If the HTTPS gateway runs in a container that cannot reach host loopback,
    run `scripts/wechat-pay-private-bridge.mjs` on an RFC 1918 host address and
    point it only at server loopback port `4302`.
-4. Configure the HTTPS gateway from
-   `deploy/wechat/pay.bonary.xyz.subdomain.conf`, or an equivalent
-   environment-specific file, so only the two exact POST callback paths reach
-   that private bridge.
+4. Configure an environment-specific HTTPS gateway so only the two exact POST
+   callback paths reach that private bridge. The deployed staging environment
+   instead exposes those paths directly through the callback-only Traefik
+   router at `delegate-pay.rag8.cn`.
 
 The callback proxy, reverse SSH tunnel, and private bridge must all remain
 alive for the canary. The private bridge rejects public bind addresses and

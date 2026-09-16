@@ -256,6 +256,13 @@ for service in "${services[@]}"; do
   wait_for_service "$service"
 done
 
+echo "Migrating Logto application and webhook origins."
+docker run --rm --network delegate-internal \
+  --env-file "$ENV_ROOT/app.env" \
+  --env-file "$ENV_ROOT/auth-apps.env" \
+  "$DELEGATE_APP_IMAGE" \
+  node deploy/staging/update-logto-origins.mjs
+
 backup_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="$STATE_ROOT/backups/$backup_stamp"
 mkdir -p "$backup_dir"

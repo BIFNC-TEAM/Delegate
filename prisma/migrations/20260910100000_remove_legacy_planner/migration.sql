@@ -1,5 +1,65 @@
 BEGIN;
 
+-- The Pi runtime cannot resume planner drafts. Cancel only plans that have
+-- never entered an executable/approval state and have no live downstream
+-- effects. Any genuinely active legacy work continues to fail closed below.
+WITH cancelable_plans AS (
+  SELECT plan."id"
+  FROM "ConversationTurnPlan" AS plan
+  WHERE plan."status" IN ('PROPOSED', 'VALIDATED')
+    AND NOT EXISTS (
+      SELECT 1
+      FROM "ConversationPlanAction" AS action
+      WHERE action."turnPlanId" = plan."id"
+        AND action."status" NOT IN ('PLANNED', 'CANCELED', 'SKIPPED', 'SUCCEEDED', 'FAILED')
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM "ConversationPlanAction" AS action
+      JOIN "ToolExecution" AS execution
+        ON execution."planActionId" = action."id"
+      WHERE action."turnPlanId" = plan."id"
+        AND execution."status" IN ('QUEUED', 'RUNNING', 'BLOCKED')
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM "WorkflowRun" AS workflow
+      WHERE workflow."turnPlanId" = plan."id"
+        AND workflow."status" IN ('QUEUED', 'RUNNING')
+    )
+)
+UPDATE "ConversationPlanAction" AS action
+SET "status" = 'CANCELED',
+    "updatedAt" = CURRENT_TIMESTAMP
+FROM cancelable_plans
+WHERE action."turnPlanId" = cancelable_plans."id"
+  AND action."status" = 'PLANNED';
+
+UPDATE "ConversationTurnPlan" AS plan
+SET "status" = 'CANCELED',
+    "updatedAt" = CURRENT_TIMESTAMP
+WHERE plan."status" IN ('PROPOSED', 'VALIDATED')
+  AND NOT EXISTS (
+    SELECT 1
+    FROM "ConversationPlanAction" AS action
+    WHERE action."turnPlanId" = plan."id"
+      AND action."status" NOT IN ('CANCELED', 'SKIPPED', 'SUCCEEDED', 'FAILED')
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM "ConversationPlanAction" AS action
+    JOIN "ToolExecution" AS execution
+      ON execution."planActionId" = action."id"
+    WHERE action."turnPlanId" = plan."id"
+      AND execution."status" IN ('QUEUED', 'RUNNING', 'BLOCKED')
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM "WorkflowRun" AS workflow
+    WHERE workflow."turnPlanId" = plan."id"
+      AND workflow."status" IN ('QUEUED', 'RUNNING')
+  );
+
 -- Refuse to remove the legacy planner while it can still own live work.
 DO $$
 BEGIN

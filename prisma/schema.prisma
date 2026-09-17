@@ -2290,7 +2290,7 @@ model Representative {
   handoffPrompt                         String
   allowedSkills                         Json
   actionGate                            Json
-  openvikingEnabled                     Boolean                                @default(false)
+  openvikingEnabled                     Boolean                                @default(true)
   openvikingAgentId                     String?
   openvikingAutoRecall                  Boolean                                @default(true)
   openvikingAutoCapture                 Boolean                                @default(false)

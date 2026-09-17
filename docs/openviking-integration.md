@@ -157,6 +157,10 @@ the internal caller without granting ROOT access to tenant data APIs.
 
 OpenViking is a rebuildable projection, not an Owner-editable source of truth. The Dashboard exposes memory controls only through **Digital Representatives → Configuration → Memory**:
 
+New representatives start with OpenViking participation enabled. Owners may
+disable it explicitly; the database migration changes only the default for new
+records and preserves every existing representative's current choice.
+
 - governed Contact Memory and Representative Experience policy;
 - independently configurable Web, Matrix, and Telegram channel-local recall/extraction capability;
 - fail-closed private-channel disclosure, verified binding, first-message exclusion, edit/redaction, and deletion diagnostics;

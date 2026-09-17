@@ -541,6 +541,8 @@ Delegate 使用 [DESIGN.md](./DESIGN.md) 中定义的 **Dispatch Editorial** 方
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model、outbox、timer、cancellation 和 dashboard semantics。
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute 和 browser isolation model。
 - [OpenViking integration](./docs/openviking-integration.md): public memory 和 recall integration。
+- [Knowledge ingestion](./docs/knowledge-ingestion.md): 对象存储、MinerU 解析、OpenViking 索引和私网部署说明。
+- [MinerU GPU deployment](./deploy/mineru/README.md): GPU 服务、WireGuard 拓扑和加固后的私网代理运维。
 - [Roadmap](./docs/roadmap.md): 分阶段产品和平台方向。
 - [Gap analysis](./docs/gap-analysis.md): 剩余产品和架构缺口。
 - [Design system](./DESIGN.md): 视觉方向和 implementation notes。

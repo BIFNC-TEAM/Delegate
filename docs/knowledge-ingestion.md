@@ -43,6 +43,8 @@ MINERU_BACKEND=""
 
 `MINERU_DOCKER_API_BASE_URL` is forwarded only to the Dashboard container and takes precedence there; it is useful when MinerU runs on the host. Keep `MINERU_API_TOKEN` blank for an unprotected private service, or set it when a trusted reverse proxy requires a Bearer token. Leaving `MINERU_BACKEND` blank lets the MinerU server select its configured default. Uploaded files may contain private Owner knowledge, so the configured endpoint must be trusted and transport security must match the deployment boundary.
 
+For the staging deployment, set `MINERU_STAGING_API_BASE_URL` and optionally `MINERU_STAGING_API_TOKEN` in the private source environment. The staging environment generator maps them to the Dashboard runtime variables and defaults `MINERU_BACKEND` to `pipeline`. See the [MinerU GPU deployment runbook](../deploy/mineru/README.md) for the WireGuard topology and proxy hardening requirements.
+
 MinerU's official GPU Docker deployment is intended for Linux/WSL2, not Docker Desktop on macOS. On Apple Silicon, run the native MinerU CLI/API on the host or use a remote Linux MinerU service, then point the Dashboard container at `host.docker.internal` or the remote HTTPS origin.
 
 Archive removes the asset's workspace and representative OpenViking resources before marking the row archived. Restore rebuilds the vector index. Permanent deletion is allowed only after archive and removes both the source object and database row.

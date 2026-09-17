@@ -721,6 +721,8 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.
 - [OpenViking integration](./docs/openviking-integration.md): public memory and recall integration.
+- [Knowledge ingestion](./docs/knowledge-ingestion.md): object storage, MinerU parsing, OpenViking indexing, and private-network deployment guidance.
+- [MinerU GPU deployment](./deploy/mineru/README.md): GPU service, WireGuard topology, and hardened private proxy operations.
 - [WeChat Pay production runbook](./docs/wechat-pay-production-runbook.md): split release controls, callback and refund recovery, readiness, incidents, and the live merchant canary.
 - [Roadmap](./docs/roadmap.md): staged product and platform direction.
 - [Gap analysis](./docs/gap-analysis.md): remaining product and architecture gaps.

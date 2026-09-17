@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parseEnv } from "node:util";
 
 import {
   parseAuthApps,
@@ -19,12 +28,13 @@ const serverDeploy = readFileSync(
   fileURLToPath(new URL("../server-deploy.sh", import.meta.url)),
   "utf8",
 );
-const prepareEnv = readFileSync(
-  fileURLToPath(new URL("../prepare-env.mjs", import.meta.url)),
-  "utf8",
-);
+const prepareEnvPath = fileURLToPath(new URL("../prepare-env.mjs", import.meta.url));
+const prepareEnv = readFileSync(prepareEnvPath, "utf8");
 const appEnvBlock = prepareEnv.match(
   /const appEnv = \{[\s\S]*?writeEnv\(`\$\{values\.output\}\/app\.env`, appEnv\);/u,
+)?.[0] ?? "";
+const dashboardEnvBlock = prepareEnv.match(
+  /writeEnv\(`\$\{values\.output\}\/dashboard\.env`, \{[\s\S]*?\}\);/u,
 )?.[0] ?? "";
 const legacyPlannerRemovalMigration = readFileSync(
   fileURLToPath(new URL(
@@ -118,6 +128,42 @@ test("staging advertises OpenViking model capability without copying its secret"
   assert.match(prepareEnv, /openVikingProvider === "volcengine"/u);
   assert.match(appEnvBlock, /OPENVIKING_MODEL_CREDENTIALS_CONFIGURED:/u);
   assert.doesNotMatch(appEnvBlock, /OPENVIKING_MODEL_API_KEY:/u);
+});
+
+test("staging emits MinerU settings only from the private-network staging endpoint", () => {
+  assert.match(prepareEnv, /sourceValue\("MINERU_STAGING_API_BASE_URL"\)/u);
+  assert.match(prepareEnv, /MINERU_API_BASE_URL: minerUApiBaseUrl/u);
+  assert.match(prepareEnv, /MINERU_BACKEND: sourceValue\("MINERU_BACKEND", "pipeline"\)/u);
+  assert.match(dashboardEnvBlock, /\.\.\.minerUEnv/u);
+});
+
+test("staging generates the Dashboard MinerU runtime contract", () => {
+  const withoutEndpoint = prepareDashboardEnv();
+  assert.equal(withoutEndpoint.MINERU_API_BASE_URL, undefined);
+
+  const withEndpoint = prepareDashboardEnv({
+    MINERU_STAGING_API_BASE_URL: "http://10.77.0.2:8000",
+    MINERU_STAGING_API_TOKEN: "private-network-token",
+    MINERU_API_TIMEOUT_MS: "700000",
+    MINERU_API_POLL_INTERVAL_MS: "1500",
+    MINERU_PARSE_METHOD: "ocr",
+    MINERU_LANGUAGE: "en",
+    MINERU_BACKEND: "pipeline",
+  });
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(withEndpoint).filter(([name]) => name.startsWith("MINERU_")),
+    ),
+    {
+      MINERU_API_BASE_URL: "http://10.77.0.2:8000",
+      MINERU_API_TOKEN: "private-network-token",
+      MINERU_API_TIMEOUT_MS: "700000",
+      MINERU_API_POLL_INTERVAL_MS: "1500",
+      MINERU_PARSE_METHOD: "ocr",
+      MINERU_LANGUAGE: "en",
+      MINERU_BACKEND: "pipeline",
+    },
+  );
 });
 
 test("staging does not emit retired Agent planner configuration", () => {
@@ -234,3 +280,28 @@ test("legacy planner removal drains only inert drafts before enforcing guards", 
     /legacy planner removal blocked: active ConversationTurnPlan rows remain/u,
   );
 });
+
+function prepareDashboardEnv(extra = {}) {
+  const root = mkdtempSync(join(tmpdir(), "delegate-staging-env-"));
+  const sourcePath = join(root, "source.env");
+  const outputPath = join(root, "output");
+  try {
+    writeFileSync(sourcePath, [
+      "SANDBOX_PROVIDER=daytona",
+      "SANDBOX_ROUTING_MODE=manual_poc",
+      "SANDBOX_PROVIDER_ROUTING_JSON={}",
+      ...Object.entries(extra).map(([name, value]) => `${name}=${value}`),
+      "",
+    ].join("\n"));
+    execFileSync(process.execPath, [
+      prepareEnvPath,
+      "--source",
+      sourcePath,
+      "--output",
+      outputPath,
+    ]);
+    return parseEnv(readFileSync(join(outputPath, "dashboard.env"), "utf8"));
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+}

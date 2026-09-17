@@ -16,6 +16,20 @@ The service initially binds only to `127.0.0.1:8000`. Delegate must reach it
 through an authenticated encrypted tunnel or a separately reviewed HTTPS
 reverse proxy. Do not publish the native MinerU API directly to the internet.
 
+The staging topology uses WireGuard between the application host and the GPU
+host:
+
+- `8170-server`: `10.77.0.1/30`
+- `7567-server`: `10.77.0.2/30`, UDP listener on `51820`
+- MinerU remains bound to `127.0.0.1:8000` on `7567-server`
+- `run-wg-proxy.sh` exposes a capability-free TCP sidecar only on
+  `10.77.0.2:8000`
+
+Set `MINERU_STAGING_API_BASE_URL=http://10.77.0.2:8000` in the private staging
+source environment. `prepare-env.mjs` writes the corresponding Dashboard
+runtime settings with `MINERU_BACKEND=pipeline` by default. WireGuard private
+keys and host configuration must remain outside this repository.
+
 Build and start:
 
 ```bash
@@ -25,6 +39,7 @@ docker build \
   .
 
 bash run-gpu1.sh
+bash run-wg-proxy.sh
 ```
 
 Verify without sending a document:

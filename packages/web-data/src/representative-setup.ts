@@ -635,7 +635,7 @@ export async function createRepresentative(
           handoffPrompt: template.handoffPrompt,
           allowedSkills: template.skills,
           actionGate: {},
-          openvikingEnabled: false,
+          openvikingEnabled: true,
           openvikingAgentId: buildOpenVikingAgentId(slug, openVikingEnv),
           openvikingAutoRecall: openVikingEnv.autoRecallDefault,
           openvikingAutoCapture: false,

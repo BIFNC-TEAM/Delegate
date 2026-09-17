@@ -1,3 +1,10 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
 import { EventType } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
@@ -10,6 +17,8 @@ import {
 import { prisma } from "../src/prisma";
 import { resolveOwnerForAuth, resolveOwnerForRegistration } from "../src/auth-identities";
 import { buildExternalAuthProfileFromLogtoIdToken } from "../src/auth-session";
+import { issueAccountSessionShadow } from "../src/account-session-shadow";
+import { applyOwnerNameRepair, previewOwnerNameRepair } from "../src/owner-name-repair";
 import { getWorkspaceAuditSnapshot } from "../src/workspace-audit";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
@@ -21,6 +30,133 @@ if (process.env.DELEGATE_POSTGRES_E2E === "1") {
 }
 
 describePostgres("owner settings PostgreSQL concurrency", () => {
+  it("runs the preview/apply CLI with a private plan and refuses to overwrite it", async () => {
+    const profile = { provider: "logto" as const, issuer: "https://auth.example.com/oidc", subject: `cli-name-${Date.now()}` };
+    const { owner } = await resolveOwnerForRegistration(profile, undefined, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    const directory = await mkdtemp(join(tmpdir(), "delegate-owner-name-repair-"));
+    try {
+      const targetPath = join(directory, "target.json");
+      const planPath = join(directory, "plan.json");
+      await writeFile(targetPath, JSON.stringify({
+        ownerId: owner.id, issuer: profile.issuer, subject: profile.subject, displayName: "registered_user",
+      }), { mode: 0o600 });
+      const cli = fileURLToPath(new URL("../../../scripts/repair-owner-name.ts", import.meta.url));
+      const run = (args: string[]) => promisify(execFile)(process.execPath, ["--import", "tsx", cli, ...args], { env: process.env });
+      await run(["preview", targetPath, planPath]);
+      const planText = await readFile(planPath, "utf8");
+      expect((await stat(planPath)).mode & 0o777).toBe(0o600);
+      expect((await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } })).displayName).toBe(owner.displayName);
+      await expect(run(["preview", targetPath, planPath])).rejects.toMatchObject({ code: 1 });
+      expect(await readFile(planPath, "utf8")).toBe(planText);
+      expect(JSON.parse((await run(["apply", planPath])).stdout)).toMatchObject({ status: "applied" });
+      expect(JSON.parse((await run(["apply", planPath])).stdout)).toMatchObject({ status: "already_applied" });
+      expect((await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } })).displayName).toBe("registered_user");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await prisma.eventAudit.deleteMany({ where: { ownerId: owner.id } });
+      await prisma.owner.delete({ where: { id: owner.id } });
+    }
+  });
+
+  it.each([null, "My chosen nickname"])("repairs a reviewed session-bound legacy Owner while preserving nickname %j", async (nickname) => {
+    const profile = {
+      provider: "logto" as const,
+      issuer: "https://auth.example.com/oidc",
+      subject: `reviewed-name-${Date.now()}`,
+    };
+    const { owner } = await resolveOwnerForRegistration(profile, undefined, {
+      DELEGATE_CREATOR_ADMISSION_MODE: "self_service",
+    });
+    let accountId: string | undefined;
+    try {
+      const session = await issueAccountSessionShadow({
+        principal: { ...profile, verifiedAt: new Date() },
+        persona: { kind: "owner", ownerId: owner.id },
+        application: "DASHBOARD",
+      });
+      accountId = session.account.id;
+      const bound = await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } });
+      expect(bound.updatedAt.getTime()).toBeGreaterThan(bound.createdAt.getTime());
+      // Reproduce the remaining case: login-time repair deliberately cannot
+      // decide whether the timestamp changed because of a custom name edit.
+      const login = await resolveOwnerForAuth({ ...profile, name: "registered_user" });
+      expect(login.owner.displayName).toBe(owner.displayName);
+      if (nickname) {
+        await updateOwnerProfileSettings({
+          ownerId: owner.id,
+          requestId: "reviewed-name-nickname",
+          idempotencyKey: "reviewed-name-nickname",
+          profile: { displayName: nickname, timezone: "UTC", preferredLocale: "en", expectedVersion: 0 },
+        });
+      }
+      const target = { ownerId: owner.id, issuer: profile.issuer, subject: profile.subject, displayName: "registered_user" };
+      const plan = await previewOwnerNameRepair(target, "isolated-postgres");
+      expect(await applyOwnerNameRepair(plan, "isolated-postgres")).toMatchObject({ status: "applied" });
+      expect(await applyOwnerNameRepair(plan, "isolated-postgres")).toMatchObject({ status: "already_applied" });
+      expect(await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } })).toMatchObject({
+        displayName: "registered_user", accountDisplayName: nickname, accountId,
+        settingsVersion: plan.expected.settingsVersion + 1,
+      });
+      expect((await getOwnerSettingsSnapshot({ ownerId: owner.id })).profile)
+        .toMatchObject({ displayName: nickname ?? "registered_user" });
+      expect(await prisma.eventAudit.count({ where: { ownerId: owner.id, idempotencyKey: `owner-name-repair:${plan.repairId}` } })).toBe(1);
+      expect(await prisma.appSession.count({ where: { accountId } })).toBe(1);
+    } finally {
+      await prisma.eventAudit.deleteMany({ where: { ownerId: owner.id } });
+      await prisma.owner.delete({ where: { id: owner.id } });
+      if (accountId) {
+        await prisma.appSession.deleteMany({ where: { accountId } });
+        await prisma.authIdentity.deleteMany({ where: { accountId } });
+        await prisma.account.delete({ where: { id: accountId } });
+      }
+    }
+  });
+
+  it("rejects a reviewed repair if the user saves a nickname after preview", async () => {
+    const profile = { provider: "logto" as const, issuer: "https://auth.example.com/oidc", subject: `stale-plan-${Date.now()}` };
+    const { owner } = await resolveOwnerForRegistration(profile, undefined, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    try {
+      const plan = await previewOwnerNameRepair({ ownerId: owner.id, issuer: profile.issuer, subject: profile.subject, displayName: "registered_user" }, "isolated-postgres");
+      await updateOwnerProfileSettings({
+        ownerId: owner.id, requestId: "repair-concurrent-choice", idempotencyKey: "repair-concurrent-choice",
+        profile: { displayName: "Concurrent choice", timezone: "UTC", preferredLocale: "en", expectedVersion: 0 },
+      });
+      await expect(applyOwnerNameRepair(plan, "isolated-postgres")).rejects.toThrow("snapshot_conflict");
+      expect(await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } })).toMatchObject({
+        displayName: owner.displayName, accountDisplayName: "Concurrent choice", settingsVersion: 1,
+      });
+      expect(await prisma.eventAudit.count({ where: { ownerId: owner.id, idempotencyKey: `owner-name-repair:${plan.repairId}` } })).toBe(0);
+    } finally {
+      await prisma.eventAudit.deleteMany({ where: { ownerId: owner.id } });
+      await prisma.owner.delete({ where: { id: owner.id } });
+    }
+  });
+
+  it("rolls back the reviewed name repair if its audit cannot be persisted", async () => {
+    const profile = { provider: "logto" as const, issuer: "https://auth.example.com/oidc", subject: `audit-failure-${Date.now()}` };
+    const { owner } = await resolveOwnerForRegistration(profile, undefined, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    try {
+      const plan = await previewOwnerNameRepair({ ownerId: owner.id, issuer: profile.issuer, subject: profile.subject, displayName: "registered_user" }, "isolated-postgres");
+      const failingAuditClient = {
+        owner: prisma.owner,
+        $transaction: (operation: (tx: unknown) => Promise<unknown>) => prisma.$transaction((tx) => operation({
+          ...tx,
+          eventAudit: {
+            ...tx.eventAudit,
+            create: async () => { throw new Error("audit unavailable"); },
+          },
+        })),
+      } as unknown as typeof prisma;
+      await expect(applyOwnerNameRepair(plan, "isolated-postgres", failingAuditClient)).rejects.toThrow("audit unavailable");
+      expect(await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } })).toMatchObject({
+        displayName: owner.displayName, settingsVersion: 0,
+      });
+    } finally {
+      await prisma.eventAudit.deleteMany({ where: { ownerId: owner.id } });
+      await prisma.owner.delete({ where: { id: owner.id } });
+    }
+  });
+
   it("persists username-only registration and preserves an explicitly chosen nickname on later login", async () => {
     const claims = {
       iss: "https://auth.example.com/oidc",

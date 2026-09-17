@@ -101,6 +101,18 @@ test("deployment waits for the replacement task and Swarm update to finish", () 
   assert.match(serverDeploy, /update_state.*== "completed"/u);
 });
 
+test("deployment drains services before closing only their idle database sessions", () => {
+  assert.match(serverDeploy, /wait_for_scaled_down_service/u);
+  assert.match(serverDeploy, /replicas.*== "0\/0"/u);
+  assert.match(serverDeploy, /pg_terminate_backend\(pid\)/u);
+  assert.match(serverDeploy, /state = 'idle'/u);
+  assert.match(
+    serverDeploy,
+    /datname IN \('delegate', 'delegate_temporal', 'temporal', 'temporal_visibility'\)/u,
+  );
+  assert.match(serverDeploy, /pid <> pg_backend_pid\(\)/u);
+});
+
 test("staging advertises OpenViking model capability without copying its secret", () => {
   assert.match(prepareEnv, /const hasOpenVikingModelCredentials = Boolean/u);
   assert.match(prepareEnv, /openVikingProvider === "volcengine"/u);
@@ -177,6 +189,17 @@ test("staging emits the direct rag8.cn public origins", () => {
   ]) {
     assert.match(prepareEnv, new RegExp(origin.replaceAll(".", "\\."), "u"));
   }
+});
+
+test("staging budgets PostgreSQL connections across Prisma and Temporal", () => {
+  assert.match(
+    prepareEnv,
+    /postgresql:\/\/delegate:.*\/delegate\?connection_limit=5&pool_timeout=10/u,
+  );
+  assert.match(prepareEnv, /SQL_MAX_CONNS: "10"/u);
+  assert.match(prepareEnv, /SQL_MAX_IDLE_CONNS: "10"/u);
+  assert.match(prepareEnv, /SQL_VIS_MAX_CONNS: "5"/u);
+  assert.match(prepareEnv, /SQL_VIS_MAX_IDLE_CONNS: "5"/u);
 });
 
 test("staging fails fast unless production cloud sandbox routing is supplied", () => {

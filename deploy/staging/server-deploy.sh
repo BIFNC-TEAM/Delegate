@@ -126,6 +126,43 @@ APP_REPLICAS=0 CONTROL_REPLICAS=0 docker stack deploy \
   --resolve-image never \
   "$STACK_NAME"
 
+wait_for_scaled_down_service() {
+  local service="$1"
+  local attempt
+  local replicas
+  for attempt in $(seq 1 90); do
+    replicas="$(docker service ls --filter "name=${service}" --format '{{.Replicas}}' | head -n 1)"
+    if [[ "$replicas" == "0/0" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Service did not scale down to 0/0: $service" >&2
+  docker service ps "$service" --no-trunc || true
+  return 1
+}
+
+scaled_down_services=(
+  "${STACK_NAME}_site"
+  "${STACK_NAME}_dashboard"
+  "${STACK_NAME}_reps"
+  "${STACK_NAME}_bot"
+  "${STACK_NAME}_compute-broker"
+  "${STACK_NAME}_workflow-runner"
+  "${STACK_NAME}_conversation-worker"
+  "${STACK_NAME}_matrix-bridge"
+  "${STACK_NAME}_openviking"
+  "${STACK_NAME}_logto"
+  "${STACK_NAME}_temporal"
+  "${STACK_NAME}_temporal-ui"
+  "${STACK_NAME}_synapse"
+)
+
+echo "Waiting for application and control services to stop."
+for service in "${scaled_down_services[@]}"; do
+  wait_for_scaled_down_service "$service"
+done
+
 wait_for_postgres() {
   local host="$1"
   local database="$2"
@@ -145,6 +182,16 @@ wait_for_postgres() {
 
 wait_for_postgres postgres delegate delegate "$ENV_ROOT/postgres.env"
 wait_for_postgres logto-postgres logto logto "$ENV_ROOT/logto-postgres.env"
+
+echo "Closing idle database sessions left by stopped releases."
+docker run --rm --network delegate-internal --env-file "$ENV_ROOT/postgres.env" \
+  postgres:16-alpine psql -h postgres -U delegate -d postgres -v ON_ERROR_STOP=1 \
+  -c "SELECT count(pg_terminate_backend(pid)) AS terminated_idle_sessions
+      FROM pg_stat_activity
+      WHERE usename = 'delegate'
+        AND datname IN ('delegate', 'delegate_temporal', 'temporal', 'temporal_visibility')
+        AND state = 'idle'
+        AND pid <> pg_backend_pid()"
 
 echo "Creating private object-store buckets."
 docker run --rm --network delegate-internal \

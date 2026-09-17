@@ -147,11 +147,9 @@ export async function GET(request: Request) {
         "/auth/error?reason=creator_access_required",
       );
     }
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to complete login.",
-      },
-      { status: 500 },
+    return clearCreatorAuthCookiesAndRedirect(
+      request,
+      "/auth/error?reason=login_failed",
     );
   }
 }

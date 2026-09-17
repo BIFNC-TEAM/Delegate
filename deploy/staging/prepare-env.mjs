@@ -87,7 +87,9 @@ const state = {
 
 writeEnv(statePath, state);
 
-const databaseUrl = `postgresql://delegate:${encodeURIComponent(state.POSTGRES_PASSWORD)}@postgres:5432/delegate`;
+// Keep the aggregate Prisma pool budget below PostgreSQL's connection ceiling.
+// Seven app services share this URL, so an explicit per-process cap is required.
+const databaseUrl = `postgresql://delegate:${encodeURIComponent(state.POSTGRES_PASSWORD)}@postgres:5432/delegate?connection_limit=5&pool_timeout=10`;
 const logtoDbUrl = `postgresql://logto:${encodeURIComponent(state.LOGTO_DB_PASSWORD)}@logto-postgres:5432/logto`;
 
 const modelKeys = [
@@ -391,6 +393,10 @@ writeEnv(`${values.output}/temporal.env`, {
   POSTGRES_PWD: state.POSTGRES_PASSWORD,
   POSTGRES_SEEDS: "postgres",
   POSTGRES_DB: "delegate_temporal",
+  SQL_MAX_CONNS: "10",
+  SQL_MAX_IDLE_CONNS: "10",
+  SQL_VIS_MAX_CONNS: "5",
+  SQL_VIS_MAX_IDLE_CONNS: "5",
 });
 
 writeEnv(`${values.output}/matrix.env`, {

@@ -4,8 +4,10 @@ This runbook governs the move from subject-only legacy Logto links to the
 self-hosted, issuer-aware Account model defined in
 [`adr-self-hosted-logto-account-system.md`](./adr-self-hosted-logto-account-system.md).
 
-The current preflight is deliberately read-only. It does not update an issuer,
-merge identities, create Accounts, or modify Workspace ownership.
+The preflight is deliberately read-only. It does not update an issuer, merge
+identities, create Accounts, or modify Workspace ownership. A separately
+reviewed operator cutover can remap one verified Logto issuer only after the
+preflight, backup, restore, and tenant-equivalence gates below pass.
 
 ## Required deployment record
 
@@ -65,6 +67,50 @@ Exit codes:
 - `2`: a blocking identity issue exists;
 - `3`: the approval artifact is missing, incomplete, stale, or invalid;
 - other non-zero values: the query or database connection failed.
+
+## Remap a verified Logto issuer
+
+Use
+[`logto-issuer-cutover.sql`](../prisma/backfill/logto-issuer-cutover.sql) only
+when the source and target origins have been independently proven to serve the
+same Logto tenant. Matching subject strings, email addresses, or application
+credentials are not sufficient proof.
+
+Before the cutover:
+
+1. capture a restorable database backup and record the successful restore
+   rehearsal;
+2. run the strict identity preflight and archive its approved report;
+3. pause or drain authentication callbacks that can write identity rows;
+4. record the exact source counts for `OwnerIdentityLink`, `IdentityLink`, and
+   `AuthIdentity` where `provider = 'LOGTO'`;
+5. confirm that identity proof and binding challenge rows do not still refer
+   to the source issuer.
+
+Run the cutover with those reviewed counts:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -v source_issuer='https://old.example.com/oidc' \
+  -v target_issuer='https://new.example.com/oidc' \
+  -v expected_owner_count=10 \
+  -v expected_audience_count=4 \
+  -v expected_auth_identity_count=10 \
+  -f prisma/backfill/logto-issuer-cutover.sql
+```
+
+The script runs in one serializable transaction, takes an advisory lock and
+table write locks, and fails closed when reviewed counts changed, the target
+already contains a conflicting principal, stored issuer evidence disagrees,
+or dependent proof/challenge rows require review. It updates issuer evidence
+with the identity keys, verifies the source is empty and the target counts are
+exact, and rolls back the entire transaction when verification fails.
+
+After the commit, rerun the strict preflight, verify the old issuer count is
+zero, exercise existing Creator and Audience login flows, and attach the
+script output plus postflight results to the deployment record. Keep the
+backup until the observation window closes; do not reverse the cutover with an
+unreviewed bulk update.
 
 ## Issue handling
 

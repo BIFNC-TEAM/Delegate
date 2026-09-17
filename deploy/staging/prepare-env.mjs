@@ -266,8 +266,23 @@ const paymentEnv = {
   ...sourceSubset(weChatKeys),
 };
 
+const minerUApiBaseUrl = sourceValue("MINERU_STAGING_API_BASE_URL");
+const minerUApiToken = sourceValue("MINERU_STAGING_API_TOKEN");
+const minerUEnv = minerUApiBaseUrl
+  ? {
+      MINERU_API_BASE_URL: minerUApiBaseUrl,
+      MINERU_API_TIMEOUT_MS: sourceValue("MINERU_API_TIMEOUT_MS", "600000"),
+      MINERU_API_POLL_INTERVAL_MS: sourceValue("MINERU_API_POLL_INTERVAL_MS", "1000"),
+      MINERU_PARSE_METHOD: sourceValue("MINERU_PARSE_METHOD", "auto"),
+      MINERU_LANGUAGE: sourceValue("MINERU_LANGUAGE", "ch"),
+      MINERU_BACKEND: sourceValue("MINERU_BACKEND", "pipeline"),
+      ...(minerUApiToken ? { MINERU_API_TOKEN: minerUApiToken } : {}),
+    }
+  : {};
+
 writeEnv(`${values.output}/dashboard.env`, {
   ...paymentEnv,
+  ...minerUEnv,
   CHANNEL_CREDENTIAL_MASTER_KEY: state.CHANNEL_CREDENTIAL_MASTER_KEY,
   CHANNEL_CREDENTIAL_MASTER_KEY_VERSION: "staging-v1",
   PAYOUT_CREDENTIAL_MASTER_KEY: state.PAYOUT_CREDENTIAL_MASTER_KEY,

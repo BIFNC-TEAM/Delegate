@@ -8,6 +8,8 @@ import {
   type OwnerNotificationRules,
 } from "../src/owner-settings";
 import { prisma } from "../src/prisma";
+import { resolveOwnerForAuth, resolveOwnerForRegistration } from "../src/auth-identities";
+import { buildExternalAuthProfileFromLogtoIdToken } from "../src/auth-session";
 import { getWorkspaceAuditSnapshot } from "../src/workspace-audit";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
@@ -19,6 +21,70 @@ if (process.env.DELEGATE_POSTGRES_E2E === "1") {
 }
 
 describePostgres("owner settings PostgreSQL concurrency", () => {
+  it("persists username-only registration and preserves an explicitly chosen nickname on later login", async () => {
+    const claims = {
+      iss: "https://auth.example.com/oidc",
+      sub: `username-registration-${Date.now()}`,
+      username: "registered_user",
+    };
+    const profile = buildExternalAuthProfileFromLogtoIdToken(
+      `e30.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fixture`,
+    );
+    const { owner } = await resolveOwnerForRegistration(profile, undefined, {
+      DELEGATE_CREATOR_ADMISSION_MODE: "self_service",
+    });
+    try {
+      expect((await getOwnerSettingsSnapshot({ ownerId: owner.id })).profile)
+        .toMatchObject({ displayName: "registered_user", version: 0 });
+      await updateOwnerProfileSettings({
+        ownerId: owner.id,
+        requestId: "username-registration-custom-name",
+        idempotencyKey: "username-registration-custom-name",
+        profile: { displayName: "My nickname", timezone: "UTC", preferredLocale: "en", expectedVersion: 0 },
+      });
+      await resolveOwnerForAuth({ ...profile, name: "Changed upstream" });
+      expect(await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } }))
+        .toMatchObject({ displayName: "registered_user", accountDisplayName: "My nickname" });
+    } finally {
+      await prisma.eventAudit.deleteMany({ where: { ownerId: owner.id } });
+      await prisma.owner.delete({ where: { id: owner.id } });
+    }
+  });
+
+  it("repairs an untouched legacy name once under concurrent login and rejects stale settings saves", async () => {
+    const profile = {
+      provider: "logto" as const,
+      issuer: "https://auth.example.com/oidc",
+      subject: `legacy-name-${Date.now()}`,
+    };
+    const { owner } = await resolveOwnerForRegistration(profile, undefined, {
+      DELEGATE_CREATOR_ADMISSION_MODE: "self_service",
+    });
+    try {
+      const stored = await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } });
+      expect(stored.createdAt).toEqual(stored.updatedAt);
+      const repaired = await Promise.all([
+        resolveOwnerForAuth({ ...profile, name: "Recovered name" }),
+        resolveOwnerForAuth({ ...profile, name: "Recovered name" }),
+      ]);
+      expect(repaired.map((result) => result.owner.displayName))
+        .toEqual(["Recovered name", "Recovered name"]);
+      expect((await getOwnerSettingsSnapshot({ ownerId: owner.id })).profile)
+        .toMatchObject({ displayName: "Recovered name", version: 1 });
+      await expect(updateOwnerProfileSettings({
+        ownerId: owner.id,
+        requestId: "stale-before-name-repair",
+        idempotencyKey: "stale-before-name-repair",
+        profile: { displayName: stored.displayName, timezone: "UTC", preferredLocale: "en", expectedVersion: 0 },
+      })).rejects.toMatchObject({ code: "owner_settings_version_conflict" });
+      expect((await prisma.owner.findUniqueOrThrow({ where: { id: owner.id } })).displayName)
+        .toBe("Recovered name");
+    } finally {
+      await prisma.eventAudit.deleteMany({ where: { ownerId: owner.id } });
+      await prisma.owner.delete({ where: { id: owner.id } });
+    }
+  });
+
   it("replays the same payload concurrently for one idempotency key", async () => {
     const owner = await prisma.owner.create({
       data: {

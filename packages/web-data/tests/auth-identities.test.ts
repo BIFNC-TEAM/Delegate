@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CreatorAdmissionRequiredError,
@@ -11,9 +11,121 @@ import {
   resolveOwnerForRegistration,
 } from "../src/auth-identities";
 
+import { buildExternalAuthProfileFromLogtoIdToken } from "../src/auth-session";
+import { getOwnerDashboardPreferences } from "../src/owner-settings";
+
 const LOGTO_ISSUER = "https://auth.example.com/oidc";
 
 describe("auth identity mapping", () => {
+  it("carries a username-only registration into Owner and the site/dashboard account label", async () => {
+    const client = new FakeAuthIdentityClient();
+    const claims = { iss: LOGTO_ISSUER, sub: "tfb2g89j123", username: "registered_user" };
+    const profile = buildExternalAuthProfileFromLogtoIdToken(
+      `e30.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.test`,
+    );
+    const { owner } = await resolveOwnerForRegistration(profile, client, {
+      DELEGATE_CREATOR_ADMISSION_MODE: "self_service",
+    });
+    expect(owner.displayName).toBe("registered_user");
+    expect(await getOwnerDashboardPreferences({ ownerId: owner.id }, {
+      client: client as never,
+    })).toMatchObject({ displayName: "registered_user" });
+  });
+
+  it("repairs an untouched generated Owner name once on verified login", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
+    await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    expect(client.owners[0]?.displayName).toBe("Creator tfb2g89j");
+    const repaired = await resolveOwnerForAuth({ ...profile, name: "registered_user" }, client);
+    expect(repaired.owner.displayName).toBe("registered_user");
+    expect(await getOwnerDashboardPreferences({ ownerId: repaired.owner.id }, {
+      client: client as never,
+    })).toMatchObject({ displayName: "registered_user" });
+    expect(client.owners[0]?.settingsVersion).toBe(1);
+    await resolveOwnerForAuth({ ...profile, name: "later_idp_name" }, client);
+    expect(client.owners[0]?.displayName).toBe("registered_user");
+  });
+
+  it.each([
+    { displayName: "Chosen public Owner" },
+    { accountDisplayName: "Chosen nickname" },
+    { accountDisplayName: "Creator tfb2g89j" },
+    { settingsVersion: 1 },
+    { updatedAt: new Date("2026-09-02T00:00:00Z") },
+  ])("preserves existing or potentially edited names: %j", async (changes) => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
+    await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    Object.assign(client.owners[0]!, changes);
+    const before = { ...client.owners[0]! };
+    await resolveOwnerForAuth({ ...profile, name: "registered_user" }, client);
+    expect(client.owners[0]).toEqual(before);
+  });
+
+  it.each([
+    [{ email: "User@Example.com" }, "user"],
+    [{ phone: "+8613800000000" }, "+8613800000000"],
+    [{}, "Creator fallback"],
+  ])("retains the established fallback when no name is supplied: %j", async (details, expected) => {
+    const client = new FakeAuthIdentityClient();
+    const result = await resolveOwnerForRegistration({
+      provider: "logto", issuer: LOGTO_ISSUER, subject: "fallback-user", ...details,
+    }, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    expect(result.owner.displayName).toBe(expected);
+  });
+
+  it("repairs issuer-evidenced legacy links without changing their identity key", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
+    await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    client.ownerIdentityLinks[0]!.issuer = null;
+    const repaired = await resolveOwnerForAuth({ ...profile, name: "registered_user" }, client, {
+      DELEGATE_AUTH_IDENTITY_ISSUER_MODE: "shadow",
+    });
+    expect(repaired.owner.displayName).toBe("registered_user");
+    expect(repaired.identityLink.issuer).toBeNull();
+  });
+
+  it("does not invalidate preferences when the incoming name equals the generated name", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
+    await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    await resolveOwnerForAuth({ ...profile, name: "Creator tfb2g89j" }, client);
+    expect(client.owners[0]?.settingsVersion).toBe(0);
+  });
+
+  it("does not replace a generated name when fresh name claims are absent", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
+    await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    await resolveOwnerForAuth({ ...profile, name: "  " }, client);
+    expect(client.owners[0]?.displayName).toBe("Creator tfb2g89j");
+    expect(client.owners[0]?.settingsVersion).toBe(0);
+  });
+
+  it("does not overwrite a settings save racing with repair", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
+    await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    const updateMany = client.owner.updateMany;
+    vi.spyOn(client.owner, "updateMany").mockImplementation(async (args) => {
+      Object.assign(client.owners[0]!, { accountDisplayName: "Concurrent choice", settingsVersion: 1 });
+      return updateMany(args);
+    });
+    await resolveOwnerForAuth({ ...profile, name: "registered_user" }, client);
+    expect(client.owners[0]).toMatchObject({ displayName: "Creator tfb2g89j", accountDisplayName: "Concurrent choice" });
+  });
+
+  it("propagates repair persistence failures instead of returning a successful login", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
+    await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    vi.spyOn(client.owner, "updateMany").mockRejectedValue(new Error("database unavailable"));
+    await expect(resolveOwnerForAuth({ ...profile, name: "registered_user" }, client))
+      .rejects.toThrow("database unavailable");
+  });
+
   it("creates one owner per Logto subject", async () => {
     const client = new FakeAuthIdentityClient();
 
@@ -510,6 +622,10 @@ type OwnerRow = {
   id: string;
   displayName: string;
   handle: string | null;
+  accountDisplayName?: string | null;
+  settingsVersion?: number;
+  createdAt?: Date;
+  updatedAt?: Date;
 };
 
 type OwnerIdentityLinkRow = {
@@ -593,6 +709,20 @@ class FakeAuthIdentityClient {
   };
 
   owner = {
+    findUnique: async (args: any) => this.owners.find((owner) => owner.id === args.where.id) ?? null,
+    updateMany: async (args: any) => {
+      const owner = this.owners.find((item) => Object.entries(args.where).every(([key, value]) => {
+        const actual = item[key as keyof OwnerRow];
+        return value instanceof Date && actual instanceof Date
+          ? value.getTime() === actual.getTime() : value === actual;
+      }));
+      if (!owner) return { count: 0 };
+      Object.assign(owner, args.data, {
+        settingsVersion: (owner.settingsVersion ?? 0) + 1,
+        updatedAt: new Date(),
+      });
+      return { count: 1 };
+    },
     create: async (args: any) => {
       const legacyConflict = this.ownerIdentityLinks.some(
         (link) =>
@@ -609,6 +739,10 @@ class FakeAuthIdentityClient {
         id: `owner-${this.owners.length + 1}`,
         displayName: args.data.displayName,
         handle: null,
+        accountDisplayName: null,
+        settingsVersion: 0,
+        createdAt: new Date("2026-09-01T00:00:00Z"),
+        updatedAt: new Date("2026-09-01T00:00:00Z"),
       };
       const identityLink: OwnerIdentityLinkRow = {
         id: `owner-identity-link-${this.ownerIdentityLinks.length + 1}`,

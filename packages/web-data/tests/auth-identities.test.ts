@@ -32,6 +32,31 @@ describe("auth identity mapping", () => {
     })).toMatchObject({ displayName: "registered_user" });
   });
 
+  it("keeps the same Owner when a username account later binds a verified phone", async () => {
+    const client = new FakeAuthIdentityClient();
+    const principal = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "phone-migration-user" };
+    const registered = await resolveOwnerForRegistration({ ...principal, name: "Original name" }, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    Object.assign(client.owners[0]!, { accountDisplayName: "Chosen nickname", settingsVersion: 1 });
+    const signedIn = await resolveOwnerForAuth({ ...principal, phone: "+8613800138000", phoneVerified: true, name: "Upstream name" }, client);
+    expect(signedIn.owner.id).toBe(registered.owner.id);
+    expect(signedIn.owner).toMatchObject({ displayName: "Original name", accountDisplayName: "Chosen nickname" });
+    expect(signedIn.identityLink).toMatchObject({ phone: "+8613800138000", phoneVerifiedAt: expect.any(Date) });
+    expect(client.owners).toHaveLength(1);
+  });
+
+  it("registers a phone-only principal with a chosen name and requires explicit Creator enrollment", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "phone-new-user", phone: "+8613800138000", phoneVerified: true, name: "手机用户" };
+    const env = { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" };
+    await expect(resolveOwnerForAuth(profile, client, env)).rejects.toBeInstanceOf(CreatorRegistrationRequiredError);
+    const created = await resolveOwnerForRegistration(profile, client, env);
+    expect(created.owner.displayName).toBe("手机用户");
+    expect(created.identityLink.phoneVerifiedAt).toEqual(expect.any(Date));
+    const existing = await resolveOwnerForAuth(profile, client, env);
+    expect(existing.created).toBe(false);
+    expect(existing.owner.id).toBe(created.owner.id);
+  });
+
   it("repairs an untouched generated Owner name once on verified login", async () => {
     const client = new FakeAuthIdentityClient();
     const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };
@@ -65,7 +90,7 @@ describe("auth identity mapping", () => {
 
   it.each([
     [{ email: "User@Example.com" }, "user"],
-    [{ phone: "+8613800000000" }, "+8613800000000"],
+    [{ phone: "+8613800000000" }, "Creator fallback"],
     [{}, "Creator fallback"],
   ])("retains the established fallback when no name is supplied: %j", async (details, expected) => {
     const client = new FakeAuthIdentityClient();

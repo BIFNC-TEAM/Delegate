@@ -20,6 +20,22 @@ const existingSessionState = {
 };
 
 describe("public audience auth binding", () => {
+  it("does not turn an unnamed phone identity into a visible contact name", async () => {
+    const dependencies = {
+      linkAudienceIdentityToAuth: vi.fn().mockResolvedValue({ id: "identity-existing" }),
+      resolveWebAudienceContact: vi.fn(),
+      createPublicChatSessionState: vi.fn(),
+    };
+    await bindPublicAudienceAuthProfile({
+      representativeId: "rep-1", representativeSlug: "demo",
+      initialAudienceIdentityId: "identity-existing", sessionState: existingSessionState,
+      profile: { provider: "logto", issuer: profile.issuer, subject: "phone-user", phone: "+8613800138000", phoneVerified: true },
+    }, dependencies as never);
+    expect(dependencies.resolveWebAudienceContact).toHaveBeenCalledWith({
+      representativeId: "rep-1", representativeSlug: "demo", audienceId: "aud_existing",
+    });
+  });
+
   it("preserves an anonymous chat session when it can be bound safely", async () => {
     const dependencies = {
       linkAudienceIdentityToAuth: vi.fn().mockResolvedValue({

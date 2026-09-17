@@ -46,3 +46,10 @@ test("all public HTTPS routers use the mainland HTTP-01 resolver", () => {
     assert.equal(resolver.trim(), "lehttp", `${router} must use lehttp`);
   }
 });
+
+
+test("Logto mounts the mainland SMS adapter from the immutable release directory", () => {
+  assert.match(logtoBlock, /DELEGATE_LOGTO_CONNECTOR_ROOT.*@delegate-connector-tencent-sms-cn:ro/u);
+  const deploy = readFileSync(new URL("../server-deploy.sh", import.meta.url), "utf8");
+  assert.ok(deploy.includes('export DELEGATE_LOGTO_CONNECTOR_ROOT="$REPO_ROOT/deploy/logto/connectors/connector-tencent-sms-cn"'));
+});

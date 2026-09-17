@@ -219,6 +219,19 @@ describe("Logto OIDC helpers", () => {
     expect(profile.name).toBe(expected);
   });
 
+  it("carries verified phone and chosen name from a signed passwordless ID token", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const jwks = createLocalJWKSet({ keys: [{ ...await exportJWK(publicKey), kid: "phone-key", alg: "RS256" }] });
+    const now = new Date("2026-09-17T00:00:00Z");
+    const idToken = await new SignJWT({ phone_number: "8613800138000", phone_number_verified: true, name: "手机用户", nonce: "phone-nonce" })
+      .setProtectedHeader({ alg: "RS256", kid: "phone-key" })
+      .setIssuer("https://auth.example.com/oidc").setAudience("app-1").setSubject("phone-user")
+      .setIssuedAt(now.getTime() / 1000).setExpirationTime(now.getTime() / 1000 + 300).sign(privateKey);
+    expect(await buildVerifiedExternalAuthProfileFromLogtoIdToken({
+      endpoint: "https://auth.example.com", appId: "app-1", appSecret: "secret", redirectUri: "https://dashboard.example.com/auth/callback",
+    }, { idToken, nonce: "phone-nonce", jwks, now })).toMatchObject({ subject: "phone-user", phone: "8613800138000", phoneVerified: true, name: "手机用户" });
+  });
+
   it.each(["name", "username", "preferred_username"])("verifies a signed Logto id_token before using %s as its display name", async (nameClaim) => {
     const { privateKey, publicKey } = await generateKeyPair("RS256");
     const jwk = await exportJWK(publicKey);

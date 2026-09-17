@@ -353,6 +353,27 @@ describe("creator admission auth routes", () => {
     );
   });
 
+  it.each(["register", "sign_in"])("completes a verified phone-only %s callback without requiring username or email", async (creatorFlow) => {
+    mocks.readAccountSessionMode.mockReturnValue("enforce");
+    mocks.verifyDelegateAuthState.mockReturnValue({
+      version: 2, actor: "owner", creatorFlow, state: "state-1", nonce: "nonce-1",
+      codeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", returnTo: "/dashboard",
+    });
+    const profile = { provider: "logto", issuer: "https://auth.example.com/oidc", subject: "phone-principal", phone: "8613800138000", phoneVerified: true, name: "手机用户" };
+    mocks.buildVerifiedExternalAuthProfileFromLogtoIdToken.mockResolvedValue(profile);
+    mocks.resolveOwnerForAuth.mockResolvedValue({ owner: { id: "phone-owner" } });
+    mocks.resolveOwnerForRegistration.mockResolvedValue({ owner: { id: "phone-owner" } });
+    const response = await completeCreatorLogin(new Request("https://dashboard.example.com/auth/callback?code=code-1&state=state-1"));
+    expect(response.status).toBe(307);
+    expect(response.cookies.get("delegate_dashboard_session_v2")?.value).toBe("new-dashboard-v2-token");
+    expect(creatorFlow === "register" ? mocks.resolveOwnerForRegistration : mocks.resolveOwnerForAuth).toHaveBeenCalledWith(profile);
+    expect(mocks.issueAccountSessionShadow).toHaveBeenCalledWith(expect.objectContaining({
+      principal: expect.objectContaining({ phone: "8613800138000", phoneVerified: true, displayName: "手机用户" }),
+      persona: { kind: "owner", ownerId: "phone-owner" },
+      allowCrossPersonaEnrollment: creatorFlow === "register",
+    }));
+  });
+
   it("fails closed without exposing internal callback errors", async () => {
     mocks.resolveOwnerForAuth.mockRejectedValue(
       new Error(

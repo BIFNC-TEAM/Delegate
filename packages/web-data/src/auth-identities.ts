@@ -577,9 +577,9 @@ function buildOwnerDisplayName(profile: ReturnType<typeof normalizeExternalAuthP
   if (profile.email) {
     return profile.email.split("@")[0] ?? profile.email;
   }
-  if (profile.phone) {
-    return profile.phone;
-  }
+  // Phone is an authentication identifier, never a public Owner attribution.
+  // Hosted phone registration collects a name; incomplete upstream profiles
+  // retain a non-sensitive placeholder until the user chooses a name.
   return `Creator ${profile.subject.slice(0, 8)}`;
 }
 

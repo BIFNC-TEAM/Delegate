@@ -100,8 +100,7 @@ export async function bindPublicAudienceAuthProfile(
 function buildAudienceContactProfile(profile: ExternalAuthProfile) {
   const displayName =
     profile.name?.trim()
-    || profile.email?.trim()
-    || profile.phone?.trim();
+    || profile.email?.trim();
   const username = profile.email?.trim();
 
   return {

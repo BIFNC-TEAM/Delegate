@@ -50,6 +50,9 @@ jobs:
       - name: Validate self-hosted Logto configuration
         run: pnpm test:logto:config && pnpm logto:local:config > /dev/null
 
+      - name: Validate mainland SMS connector against pinned Logto
+        run: pnpm test:logto:phone && pnpm test:logto:phone:runtime
+
       - name: Validate Logto identity migration contracts
         run: pnpm test:logto:identity-contracts
 

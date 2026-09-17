@@ -101,7 +101,10 @@
     "test:migration-gate": "vitest run scripts/tests/workspace-skill-release-gate.test.ts",
     "test:migration-fixture:pg16": "bash scripts/tests/workspace-skill-legacy-migration.pg16.sh",
     "test:wallet-migration-fixture:pg16": "bash scripts/tests/wallet-scoped-migration.pg16.sh",
-    "test:memory-use-truth-migration-fixture:pg16": "bash scripts/tests/memory-use-truth-ledger-migration.pg16.sh"
+    "test:memory-use-truth-migration-fixture:pg16": "bash scripts/tests/memory-use-truth-ledger-migration.pg16.sh",
+    "logto:phone:configure": "node scripts/logto-phone-auth.mjs",
+    "test:logto:phone": "vitest run scripts/tests/logto-phone-auth.test.ts",
+    "test:logto:phone:runtime": "bash scripts/tests/logto-phone-auth.runtime.sh"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

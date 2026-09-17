@@ -76,6 +76,8 @@ services:
 
   logto:
     image: ${LOGTO_OSS_IMAGE:-svhd/logto:1.41.0}
+    volumes:
+      - ./deploy/logto/connectors/connector-tencent-sms-cn:/etc/logto/packages/core/connectors/@delegate-connector-tencent-sms-cn:ro
     environment: *logto-environment
     depends_on:
       logto-postgres:

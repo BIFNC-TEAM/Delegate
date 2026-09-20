@@ -104,7 +104,10 @@
     "test:memory-use-truth-migration-fixture:pg16": "bash scripts/tests/memory-use-truth-ledger-migration.pg16.sh",
     "logto:phone:configure": "node scripts/logto-phone-auth.mjs",
     "test:logto:phone": "vitest run scripts/tests/logto-phone-auth.test.ts",
-    "test:logto:phone:runtime": "bash scripts/tests/logto-phone-auth.runtime.sh"
+    "test:logto:phone:runtime": "bash scripts/tests/logto-phone-auth.runtime.sh",
+    "logto:wechat:configure": "node scripts/logto-wechat-auth.mjs",
+    "test:logto:wechat": "vitest run scripts/tests/logto-wechat-auth.test.ts",
+    "test:logto:wechat:runtime": "bash scripts/tests/logto-wechat-auth.runtime.sh"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

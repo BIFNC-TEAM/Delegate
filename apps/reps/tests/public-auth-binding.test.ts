@@ -36,6 +36,24 @@ describe("public audience auth binding", () => {
     });
   });
 
+  it("binds a WeChat-only visitor without inventing email or phone identifiers", async () => {
+    const dependencies = {
+      linkAudienceIdentityToAuth: vi.fn().mockResolvedValue({ id: "wechat-audience" }),
+      resolveWebAudienceContact: vi.fn(),
+      createPublicChatSessionState: vi.fn(),
+    };
+    const wechatProfile = { provider: "logto" as const, issuer: profile.issuer, subject: "wechat-logto-user", name: "微信访客" };
+    const result = await bindPublicAudienceAuthProfile({
+      representativeId: "rep-1", representativeSlug: "demo", initialAudienceIdentityId: "identity-existing",
+      sessionState: existingSessionState, profile: wechatProfile,
+    }, dependencies as never);
+    expect(result.audienceIdentityId).toBe("wechat-audience");
+    expect(dependencies.resolveWebAudienceContact).toHaveBeenCalledWith({
+      representativeId: "rep-1", representativeSlug: "demo", audienceId: "aud_existing", displayName: "微信访客",
+    });
+    expect(dependencies.createPublicChatSessionState).not.toHaveBeenCalled();
+  });
+
   it("preserves an anonymous chat session when it can be bound safely", async () => {
     const dependencies = {
       linkAudienceIdentityToAuth: vi.fn().mockResolvedValue({

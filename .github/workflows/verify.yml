@@ -53,6 +53,9 @@ jobs:
       - name: Validate mainland SMS connector against pinned Logto
         run: pnpm test:logto:phone && pnpm test:logto:phone:runtime
 
+      - name: Validate WeChat login configuration and pinned connector
+        run: pnpm test:logto:wechat && pnpm test:logto:wechat:runtime
+
       - name: Validate Logto identity migration contracts
         run: pnpm test:logto:identity-contracts
 

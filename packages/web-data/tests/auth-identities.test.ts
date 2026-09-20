@@ -57,6 +57,27 @@ describe("auth identity mapping", () => {
     expect(existing.owner.id).toBe(created.owner.id);
   });
 
+  it("keeps a WeChat-only user's Owner and chosen nickname across repeat logins", async () => {
+    const client = new FakeAuthIdentityClient();
+    const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "wechat-logto-user", name: "微信初始昵称" };
+    const created = await resolveOwnerForRegistration(profile, client, { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" });
+    Object.assign(client.owners[0]!, { accountDisplayName: "用户主动设置的名字", settingsVersion: 1 });
+    const signedIn = await resolveOwnerForAuth({ ...profile, name: "微信新昵称" }, client);
+    expect(signedIn.owner).toMatchObject({ id: created.owner.id, displayName: "微信初始昵称", accountDisplayName: "用户主动设置的名字" });
+    expect(client.owners).toHaveLength(1);
+    expect(signedIn.identityLink.email).toBeNull();
+    expect(signedIn.identityLink.phone).toBeNull();
+  });
+
+  it("does not merge distinct WeChat principals merely because nicknames match", async () => {
+    const client = new FakeAuthIdentityClient();
+    const env = { DELEGATE_CREATOR_ADMISSION_MODE: "self_service" };
+    const a = await resolveOwnerForRegistration({ provider: "logto", issuer: LOGTO_ISSUER, subject: "wechat-a", name: "相同昵称" }, client, env);
+    const b = await resolveOwnerForRegistration({ provider: "logto", issuer: LOGTO_ISSUER, subject: "wechat-b", name: "相同昵称" }, client, env);
+    expect(a.owner.id).not.toBe(b.owner.id);
+    expect(client.owners).toHaveLength(2);
+  });
+
   it("repairs an untouched generated Owner name once on verified login", async () => {
     const client = new FakeAuthIdentityClient();
     const profile = { provider: "logto" as const, issuer: LOGTO_ISSUER, subject: "tfb2g89j123" };

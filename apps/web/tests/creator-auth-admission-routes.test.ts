@@ -374,6 +374,27 @@ describe("creator admission auth routes", () => {
     }));
   });
 
+  it.each(["register", "sign_in"])("completes a WeChat-only %s without email, phone or password", async (creatorFlow) => {
+    mocks.readAccountSessionMode.mockReturnValue("enforce");
+    mocks.verifyDelegateAuthState.mockReturnValue({
+      version: 2, actor: "owner", creatorFlow, state: "state-1", nonce: "nonce-1",
+      codeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", returnTo: "/dashboard",
+    });
+    const profile = { provider: "logto", issuer: "https://auth.example.com/oidc", subject: "wechat-logto-user", name: "微信昵称" };
+    mocks.buildVerifiedExternalAuthProfileFromLogtoIdToken.mockResolvedValue(profile);
+    mocks.resolveOwnerForAuth.mockResolvedValue({ owner: { id: "existing-owner" } });
+    mocks.resolveOwnerForRegistration.mockResolvedValue({ owner: { id: "existing-owner" } });
+    const response = await completeCreatorLogin(new Request("https://dashboard.example.com/auth/callback?code=code-1&state=state-1"));
+    expect(response.status).toBe(307);
+    expect(response.cookies.get("delegate_dashboard_session_v2")?.value).toBe("new-dashboard-v2-token");
+    expect(creatorFlow === "register" ? mocks.resolveOwnerForRegistration : mocks.resolveOwnerForAuth).toHaveBeenCalledWith(profile);
+    expect(mocks.issueAccountSessionShadow).toHaveBeenCalledWith(expect.objectContaining({
+      principal: expect.objectContaining({ subject: profile.subject, displayName: "微信昵称", email: undefined, phone: undefined }),
+      persona: { kind: "owner", ownerId: "existing-owner" },
+      allowCrossPersonaEnrollment: creatorFlow === "register",
+    }));
+  });
+
   it("fails closed without exposing internal callback errors", async () => {
     mocks.resolveOwnerForAuth.mockRejectedValue(
       new Error(

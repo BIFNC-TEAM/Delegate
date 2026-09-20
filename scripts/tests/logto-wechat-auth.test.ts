@@ -66,8 +66,15 @@ describe('WeChat hosted registration and sign-in configuration', () => {
     expect(state.experience.mfa).toEqual(before.mfa);
     expect(state.experience.captchaPolicy).toEqual(before.captchaPolicy);
     expect(state.experience.socialSignIn).toEqual({ skipRequiredIdentifiers: true, automaticAccountLinking: false });
-    expect(state.accountCenter).toEqual({ enabled: true, fields: { phone: 'Edit', password: 'ReadOnly', social: 'Edit' } });
+    expect(state.accountCenter).toEqual({ enabled: true, fields: { phone: 'Edit', password: 'ReadOnly', email: 'ReadOnly', social: 'Edit' } });
     expect(state.connectors[0].syncProfile).toBe(false);
+  });
+  it('exposes existing verification methods read-only instead of blocking password-only users', () => {
+    const { state } = fixture();
+    state.accountCenter.fields = { password: 'Off', email: 'Off', phone: 'Off', name: 'Off' };
+    expect(buildWechatAuthPlan(state, readWechatConfig(env)).accountCenterPatch.fields).toEqual({
+      password: 'ReadOnly', email: 'ReadOnly', phone: 'ReadOnly', name: 'Off', social: 'Edit',
+    });
   });
   it('updates the same connector on repeated apply without duplicating targets or identities', async () => {
     const { state, request } = fixture();

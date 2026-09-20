@@ -69,7 +69,20 @@ export function buildWechatAuthPlan(state, config) {
         automaticAccountLinking: false,
       },
     },
-    accountCenterPatch: { enabled: true, fields: { ...accountCenter.fields, social: 'Edit' } },
+    accountCenterPatch: {
+      enabled: true,
+      fields: {
+        ...accountCenter.fields,
+        // Logto filters hasPassword/primaryEmail/primaryPhone by these controls.
+        // Hiding them prevents existing users from verifying identity to bind
+        // WeChat, even though the underlying credential exists. ReadOnly does
+        // not permit password changes or bypass step-up verification.
+        ...Object.fromEntries(['password', 'email', 'phone'].map((field) => [
+          field, accountCenter.fields[field] === 'Edit' ? 'Edit' : 'ReadOnly',
+        ])),
+        social: 'Edit',
+      },
+    },
   };
 }
 

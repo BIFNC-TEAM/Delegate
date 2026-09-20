@@ -46,8 +46,11 @@ Append `--apply` to configure the target environment. The script:
 - Skips required phone/email/username/password fulfillment for social sign-in,
   so pending SMS delivery does not block WeChat users.
 - Disables implicit social account matching by email/phone. Binding is explicit.
-- Enables social-identity editing in Logto's built-in Account Center while
-  preserving other field permissions.
+- Enables social-identity editing in Logto's built-in Account Center. Existing
+  password/email/phone verification states become at least ReadOnly (existing
+  Edit remains Edit); other field permissions are preserved. This is required
+  for Logto to present existing identity-verification methods and does not grant
+  password editing or bypass fresh verification.
 - Preserves ordinary login/signup methods, MFA, captcha and existing users.
 - Reads back the saved configuration without printing secrets.
 

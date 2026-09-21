@@ -1,9 +1,11 @@
+import { AvatarUploadError, MAX_AVATAR_FILE_BYTES, managedAvatarObjectKey, storeOwnerAvatar, deleteOwnerAvatarObject } from "./owner-avatar-storage";
 import { createLogtoManagementClient, readLogtoManagementConfig } from "./logto-management";
 import { prisma } from "./prisma";
 import { readLogtoAccountCenterUrl } from "./owner-settings";
 
 export type OwnerIdentityProfile = {
   avatar: string | null;
+  avatarCleanupPending?: boolean;
   phone: string | null;
   email: string | null;
   hasPassword: boolean;
@@ -16,7 +18,7 @@ export class IdentityProfileError extends Error {
 }
 function safeAvatar(value: unknown): string | null {
   if (typeof value !== "string" || !value) return null;
-  try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password ? url.toString() : null; } catch { return null; }
+  try { const url = new URL(value); return (url.protocol === "https:" || managedAvatarObjectKey(value)) && !url.username && !url.password ? url.toString() : null; } catch { return null; }
 }
 export function serializeIdentityProfile(user: Record<string, unknown>, managementUrl: string | null): OwnerIdentityProfile {
   const identities = user.identities && typeof user.identities === "object" && !Array.isArray(user.identities) ? user.identities as Record<string, unknown> : {};
@@ -57,5 +59,45 @@ export async function updateOwnerAvatar(principal: IdentityProfilePrincipal, ava
   await client.updateUserAvatar(principal.subject, avatar);
   const saved = await client.getUserProfile(principal.subject);
   if ((saved.avatar || '') !== avatar) throw new IdentityProfileError(502, "Avatar update could not be verified.");
-  return serializeIdentityProfile(saved, readLogtoAccountCenterUrl());
+  const oldKey = avatar === '' && typeof current.avatar === 'string' ? managedAvatarObjectKey(current.avatar, principal.ownerId) : null;
+  const cleanupPending = oldKey ? !await cleanupAvatar(oldKey) : false;
+  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl()), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
+}
+
+async function cleanupAvatar(key: string): Promise<boolean> {
+  try { await deleteOwnerAvatarObject(key); return true; }
+  catch { console.warn("owner_avatar_cleanup_failed", { objectKey: key }); return false; }
+}
+export async function uploadOwnerAvatar(principal: IdentityProfilePrincipal, input: unknown) {
+  if (!input || typeof input !== "object" || !("base64" in input) || typeof input.base64 !== "string"
+    || Object.keys(input).some((key) => key !== "base64") || input.base64.length > Math.ceil(MAX_AVATAR_FILE_BYTES / 3) * 4
+    ) throw new IdentityProfileError(400, "Invalid avatar upload.");
+  const bytes = Buffer.from(input.base64, "base64");
+  if (bytes.toString("base64") !== input.base64) throw new IdentityProfileError(400, "Invalid avatar encoding.");
+  const client = await clientFor(principal);
+  const current = await client.getUserProfile(principal.subject);
+  if (current.isSuspended === true) throw new IdentityProfileError(403, "Account is unavailable.");
+  let stored;
+  try { stored = await storeOwnerAvatar(principal.ownerId, bytes); }
+  catch (error) { if (error instanceof AvatarUploadError) throw new IdentityProfileError(error.status, error.message); throw error; }
+  let saved;
+  try {
+    await client.updateUserAvatar(principal.subject, stored.url);
+    saved = await client.getUserProfile(principal.subject);
+    if (saved.avatar !== stored.url) throw new Error("Avatar update was not confirmed.");
+  } catch (error) {
+    // A lost response may still mean a committed update. Only delete our new
+    // object when a fresh read proves it is not referenced; never break a saved avatar.
+    let latest;
+    try { latest = await client.getUserProfile(principal.subject); }
+    catch { console.warn("owner_avatar_confirmation_unavailable", { objectKey: stored.key }); }
+    if (latest?.avatar === stored.url) saved = latest;
+    else {
+      if (latest) await cleanupAvatar(stored.key);
+      throw new IdentityProfileError(502, "Avatar save could not be confirmed. Refresh your profile before retrying.");
+    }
+  }
+  const oldKey = typeof current.avatar === "string" ? managedAvatarObjectKey(current.avatar, principal.ownerId) : null;
+  const cleanupPending = oldKey && oldKey !== stored.key ? !await cleanupAvatar(oldKey) : false;
+  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl()), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
 }

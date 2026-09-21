@@ -4949,3 +4949,7 @@ p.representative-memory-settings-error {
 .account-profile-method { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 0; border-top: 1px solid var(--v2-line); }
 .account-profile-method p { color: var(--v2-muted); margin: 8px 0 0; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .account-profile-avatar-row, .account-profile-method { flex-wrap: wrap; } .account-profile-avatar-row .settings-field { flex-basis: calc(100% - 80px); } .account-profile-method > a { width: 100%; text-align: center; min-height: 44px; } }
+
+.account-profile-upload { flex: 1; min-width: 0; }
+.account-profile-upload-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.account-profile-upload .settings-action-note { overflow-wrap: anywhere; margin: 12px 0 0; }

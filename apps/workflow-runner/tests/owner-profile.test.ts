@@ -1,8 +1,8 @@
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks=vi.hoisted(()=>({get:vi.fn(),update:vi.fn()}));
-vi.mock('@delegate/web-data/owner-identity-profile',()=>({getOwnerIdentityProfile:mocks.get,updateOwnerAvatar:mocks.update,IdentityProfileError:class extends Error{constructor(readonly status:number,message:string){super(message)}}}));
+const mocks=vi.hoisted(()=>({get:vi.fn(),update:vi.fn(),upload:vi.fn()}));
+vi.mock('@delegate/web-data/owner-identity-profile',()=>({getOwnerIdentityProfile:mocks.get,updateOwnerAvatar:mocks.update,uploadOwnerAvatar:mocks.upload,IdentityProfileError:class extends Error{constructor(readonly status:number,message:string){super(message)}}}));
 import { handleOwnerProfile } from '../src/owner-profile';
 const token='only-a-test-token-with-at-least-32-bytes';
 const principal={ownerId:'owner',issuer:'https://login.example.com/oidc',subject:'subject'};
@@ -20,5 +20,6 @@ describe('narrow worker account profile endpoint',()=>{
  });
  it('passes the exact principal to the independently authorized identity reader',async()=>{expect((await invoke({action:'get',principal})).writeHead.mock.calls[0]?.[0]).toBe(200);expect(mocks.get).toHaveBeenCalledWith(principal);});
  it.each([{action:'password',principal,password:'new'}, {action:'avatar',principal:{...principal,admin:true},avatar:''}, {action:'get',principal,allUsers:true}])('rejects expansion beyond the profile contract',async(body)=>{expect((await invoke(body)).writeHead.mock.calls[0]?.[0]).toBe(400);expect(mocks.get).not.toHaveBeenCalled();expect(mocks.update).not.toHaveBeenCalled();});
+ it('routes uploads through the same independently checked principal',async()=>{mocks.upload.mockResolvedValue({avatar:'https://example.com/a.jpg'});const avatar={base64:Buffer.from('test').toString('base64')};expect((await invoke({action:'avatar-upload',principal,avatar})).writeHead.mock.calls[0]?.[0]).toBe(200);expect(mocks.upload).toHaveBeenCalledWith(principal,avatar);});
  it('bounds request size',async()=>{expect((await invoke({action:'avatar',principal,avatar:'x'.repeat(9000)})).writeHead.mock.calls[0]?.[0]).toBe(413);});
 });

@@ -6,30 +6,52 @@ import type { Locale } from "@delegate/web-ui";
 export function DashboardAccountProfile({ locale }: { locale: Locale }) {
   const zh = locale === 'zh';
   const [profile, setProfile] = useState<OwnerIdentityProfile | null>(null);
-  const [avatar, setAvatar] = useState('');
-  const avatarDirty = useRef(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const requestVersion = useRef(0);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
+  useEffect(() => {
+    if (!file) { setPreview(null); return; }
+    const url = URL.createObjectURL(file); setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
   const load = async () => {
+    const version = ++requestVersion.current;
     try {
       const response = await fetch('/api/dashboard/account-profile', { cache: 'no-store' });
       if (!response.ok) throw new Error('unavailable');
       const data = await response.json() as OwnerIdentityProfile;
-      setProfile(data); if (!avatarDirty.current) setAvatar(data.avatar ?? ''); setError('');
-    } catch { setError(zh ? '暂时无法读取账号信息，请重试。' : 'Account information is unavailable. Please retry.'); }
+      if (version === requestVersion.current) { setProfile(data); setError(''); }
+    } catch { if (version === requestVersion.current) setError(zh ? '暂时无法读取账号信息，请重试。' : 'Account information is unavailable. Please retry.'); }
   };
   useEffect(() => { void load(); const refresh = () => { void load(); }; window.addEventListener('focus', refresh); return () => window.removeEventListener('focus', refresh); }, [locale]);
-  const save = async () => {
-    setSaving(true); setError(''); setNotice('');
+  const chooseFile = (selected: File | undefined) => {
+    if (!selected) return;
+    setError(''); setNotice('');
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(selected.type)) { setError(zh ? '请选择 JPG、PNG 或 WebP 图片。' : 'Choose a JPG, PNG, or WebP image.'); return; }
+    if (!selected.size || selected.size > 5 * 1024 * 1024) { setError(zh ? '图片不能为空，且不得超过 5 MB。' : 'Choose a non-empty image up to 5 MB.'); return; }
+    setFile(selected);
+  };
+  const save = async (remove = false) => {
+    if (saving || (!remove && !file)) return;
+    setSaving(true); setError(''); setNotice(''); ++requestVersion.current;
     try {
-      const value = avatar.trim();
-      if (value && !/^https:\/\//i.test(value)) throw new Error(zh ? '请填写 HTTPS 头像地址，或留空移除头像。' : 'Use an HTTPS avatar URL, or leave blank to remove.');
-      const response = await fetch('/api/dashboard/account-profile', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ avatar: value }) });
-      if (!response.ok) throw new Error(zh ? '头像保存失败，请稍后重试。' : 'Avatar could not be saved. Please retry.');
+      const form = new FormData(); if (file) form.set('avatar', file);
+      const response = await fetch('/api/dashboard/account-profile', remove
+        ? { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ avatar: '' }) }
+        : { method: 'POST', body: form });
+      if (!response.ok) {
+        if ([400, 413, 415].includes(response.status)) throw new Error(zh ? '图片无效。请选择不超过 5 MB、像素不超过 2000 万的静态 JPG、PNG 或 WebP 图片。' : 'Use a valid non-animated JPG, PNG, or WebP, up to 5 MB and 20 megapixels.');
+        throw new Error(zh ? '头像保存未完成，请重试；若网络中断，请先刷新确认保存结果。' : 'Avatar save could not be confirmed. Refresh your profile before retrying.');
+      }
       const saved = await response.json() as OwnerIdentityProfile;
-      setProfile(saved); setAvatar(saved.avatar ?? ''); avatarDirty.current = false;
-      setNotice(zh ? '头像已保存' : 'Avatar saved');
+      ++requestVersion.current; setProfile(saved); setFile(null);
+      setNotice(saved.avatarCleanupPending
+        ? (zh ? '头像已保存，旧图片清理暂未完成。' : 'Avatar saved; the old image could not yet be cleaned up.')
+        : remove ? (zh ? '头像已移除' : 'Avatar removed') : (zh ? '头像已上传并保存' : 'Avatar uploaded and saved'));
     } catch (e) { setError(e instanceof Error ? e.message : (zh ? '网络请求失败' : 'Network request failed')); }
     finally { setSaving(false); }
   };
@@ -40,9 +62,16 @@ export function DashboardAccountProfile({ locale }: { locale: Locale }) {
     {!profile && !error && <p role="status">{zh ? '正在读取账号信息…' : 'Loading account…'}</p>}
     {profile && <>
       <div className="account-profile-avatar-row">
-        {profile.avatar ? <img src={profile.avatar} alt={zh ? '当前头像' : 'Current avatar'} className="account-profile-avatar" referrerPolicy="no-referrer" /> : <span className="account-profile-avatar is-empty" aria-label={zh ? '未设置头像' : 'No avatar'}>D</span>}
-        <label className="settings-field"><span>{zh ? '头像地址' : 'Avatar URL'}</span><input type="url" value={avatar} maxLength={2048} onChange={(event) => { avatarDirty.current = true; setAvatar(event.target.value); }} placeholder="https://…" /><small>{zh ? '填写 HTTPS 图片地址；留空可移除头像。' : 'Enter an HTTPS image URL; leave blank to remove.'}</small></label>
-        <button type="button" className="dashboard-v2-button-secondary" disabled={saving || avatar === (profile.avatar ?? '')} onClick={() => { void save(); }}>{saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存头像' : 'Save avatar')}</button>
+        {preview || profile.avatar ? <img src={preview || profile.avatar!} alt={zh ? (preview ? '待上传头像预览' : '当前头像') : (preview ? 'New avatar preview' : 'Current avatar')} className="account-profile-avatar" referrerPolicy="no-referrer" /> : <span className="account-profile-avatar is-empty" aria-label={zh ? '未设置头像' : 'No avatar'}>D</span>}
+        <div className="account-profile-upload">
+          <input ref={fileInput} type="file" hidden accept="image/jpeg,image/png,image/webp" aria-label={zh ? '选择头像图片' : 'Choose avatar image'} disabled={saving} onChange={(event) => { chooseFile(event.target.files?.[0]); event.target.value = ''; }} />
+          <div className="account-profile-upload-actions">
+            <button type="button" className="dashboard-v2-button-secondary" disabled={saving} onClick={() => fileInput.current?.click()}>{zh ? '选择本地图片' : 'Choose image'}</button>
+            {file && <><button type="button" className="dashboard-v2-button-primary" disabled={saving} onClick={() => { void save(); }}>{saving ? (zh ? '上传中…' : 'Uploading…') : (zh ? '上传并保存' : 'Upload and save')}</button><button type="button" className="dashboard-v2-button-secondary" disabled={saving} onClick={() => setFile(null)}>{zh ? '取消选择' : 'Cancel selection'}</button></>}
+            {!file && profile.avatar && <button type="button" className="dashboard-v2-button-secondary" disabled={saving} onClick={() => { void save(true); }}>{zh ? '移除头像' : 'Remove avatar'}</button>}
+          </div>
+          <p className="settings-action-note">{file ? file.name : (zh ? '支持静态 JPG、PNG、WebP，最大 5 MB；保存为居中裁剪的方形头像。' : 'JPG, PNG, or WebP, up to 5 MB. Saved as a centered square avatar.')}</p>
+        </div>
       </div>
       {notice && <p role="status">{notice}</p>}
       <div className="account-profile-method"><div><strong>{zh ? '绑定手机号' : 'Phone'}</strong><p>{profile.phone ?? (zh ? '尚未绑定' : 'Not linked')}</p></div>{link(profile.links?.phone, zh ? (profile.phone ? '更换手机号' : '绑定手机号') : 'Manage phone')}</div>

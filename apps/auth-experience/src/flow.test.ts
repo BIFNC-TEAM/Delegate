@@ -143,6 +143,11 @@ describe('development-only WeChat relay build', () => {
       expect(regex.exec(callback+'?code=test&state=nonce')?.[1]).toBe('?code=test&state=nonce');
       expect(labels[`${prefix}.permanent`]).toBe('false');
       expect(labels['traefik.http.routers.delegate-local-wechat.rule']).toContain('Method(`GET`)');
+      const configuredHtml=readFileSync(join(directory,'index.html'),'utf8');
+      expect(configuredHtml).toMatch(/delegate-auth\.js\?v=[a-f0-9]{16}/);
+      execFileSync(process.execPath,['build.mjs'],{cwd,stdio:'pipe',env:{...process.env,NODE_ENV:'development',DELEGATE_AUTH_UI_MOCK_SMS_ORIGIN:'',DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI:'',AUTH_UI_OUTPUT_DIR:directory}});
+      const unconfiguredHtml=readFileSync(join(directory,'index.html'),'utf8');
+      expect(unconfiguredHtml.match(/delegate-auth\.js\?v=[a-f0-9]{16}/)?.[0]).not.toBe(configuredHtml.match(/delegate-auth\.js\?v=[a-f0-9]{16}/)?.[0]);
     } finally { rmSync(directory,{recursive:true,force:true}); }
   });
 });

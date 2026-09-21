@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
-import { mkdir, copyFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 const outputDirectory = process.env.AUTH_UI_OUTPUT_DIR || 'dist';
 const mockOrigin = process.env.DELEGATE_AUTH_UI_MOCK_SMS_ORIGIN || '';
 const localWechatCallback = process.env.DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI || '';
@@ -35,7 +36,14 @@ if (localWechatCallback) {
 }
 await mkdir(`${outputDirectory}/assets`, { recursive: true });
 await build({ entryPoints: ['src/main.tsx'], outfile: `${outputDirectory}/assets/delegate-auth.js`, bundle: true, minify: true, sourcemap: false, target: ['es2022'], jsx: 'automatic', define: { __MOCK_SMS_ORIGIN__: JSON.stringify(mockOrigin), __WECHAT_LOCAL_CALLBACK_URI__: JSON.stringify(localWechatCallback), 'process.env.NODE_ENV': JSON.stringify('production') } });
-await copyFile('index.html', `${outputDirectory}/index.html`);
+// Logto caches assets for a week. Version URLs by content so a normal page
+// refresh loads a changed callback configuration instead of stale JavaScript.
+let html = await readFile('index.html', 'utf8');
+for (const asset of ['delegate-auth.js', 'delegate-auth.css']) {
+  const digest = createHash('sha256').update(await readFile(`${outputDirectory}/assets/${asset}`)).digest('hex').slice(0, 16);
+  html = html.replace(`/assets/${asset}`, `/assets/${asset}?v=${digest}`);
+}
+await writeFile(`${outputDirectory}/index.html`, html);
 console.log(`Built auth experience (${mockOrigin ? 'LOCAL MOCK SMS' : 'real verification'}; local WeChat relay: ${relayLabels ? 'configured' : 'off'}).`);
 await writeFile(`${outputDirectory}/build-mode.json`, JSON.stringify({ mode: mockOrigin ? 'local-mock' : 'real', localWechatCallback: localWechatCallback || null }));
 if (relayLabels) await writeFile(`${outputDirectory}/local-wechat-relay-labels.json`, JSON.stringify(relayLabels, null, 2));

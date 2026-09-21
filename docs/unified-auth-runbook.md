@@ -126,4 +126,6 @@ pnpm --filter @delegate/auth-experience build
 | 本地授权参数 | 原生 Experience API 创建微信授权验证记录 | redirect_uri 为批准域名，state 不变，scope=snsapi_login | 通过，未访问微信授权页 |
 | 本地前端产物 | GET /build-mode.json | localWechatCallback 为已批准的固定路径 | 通过 |
 
-部署前标签快照和部署核对结果保存于被 Git 忽略的 `.local/logto/wechat-local-relay-before-*.json`、`.local/logto/wechat-local-relay-applied.json`。当前登录体验单测重新运行，30 项通过；代码与上次完整回归相同，仅更新了部署状态记录。
+部署前标签快照和部署核对结果保存于被 Git 忽略的 `.local/logto/wechat-local-relay-before-*.json`、`.local/logto/wechat-local-relay-applied.json`。当前登录体验单测重新运行，30 项通过；部署时另补充了下述资源缓存修复，并通过对应构建回归、typecheck 和实际 HTTP 资源校验。
+
+本次部署还确认 Logto 静态资源缓存为 7 天；构建器现为 JS/CSS URL 添加内容摘要版本，回调配置变更后普通刷新即可加载新文件，避免旧脚本继续发送 loopback 回调。对应构建回归测试校验了配置变化会生成不同脚本 URL。

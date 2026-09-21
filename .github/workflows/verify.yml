@@ -56,6 +56,9 @@ jobs:
       - name: Validate WeChat login configuration and pinned connector
         run: pnpm test:logto:wechat && pnpm test:logto:wechat:runtime
 
+      - name: Validate unified login and local mock isolation
+        run: pnpm test:logto:unified
+
       - name: Validate Logto identity migration contracts
         run: pnpm test:logto:identity-contracts
 

@@ -116,7 +116,23 @@ export function createLogtoManagementClient(
     return cachedToken.value;
   };
 
+  const userRequest = async (subject: string, method = "GET", body?: unknown) => {
+    const accessToken = await getAccessToken();
+    const response = await fetchImpl(new URL(`/api/users/${encodeURIComponent(subject)}`, config.endpoint).toString(), {
+      method, redirect: "error",
+      headers: { authorization: `Bearer ${accessToken}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(config.requestTimeoutMs),
+    });
+    if (!response.ok) throw new Error(`Logto account profile request failed (${response.status}).`);
+    const payload = await response.json();
+    if (!isRecord(payload) || payload.id !== subject || (method === "GET" && (typeof payload.hasPassword !== "boolean" || typeof payload.isSuspended !== "boolean"))) throw new Error("Invalid Logto account profile response.");
+    return payload;
+  };
+
   return {
+    getUserProfile: (subject: string) => userRequest(subject),
+    updateUserAvatar: (subject: string, avatar: string) => userRequest(subject, "PATCH", { avatar }),
     async listAllUsers(): Promise<LogtoManagementUser[]> {
       const accessToken = await getAccessToken();
       const users: LogtoManagementUser[] = [];
@@ -207,4 +223,8 @@ function boundedInteger(
     throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
   }
   return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

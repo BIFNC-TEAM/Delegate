@@ -107,7 +107,9 @@
     "test:logto:phone:runtime": "bash scripts/tests/logto-phone-auth.runtime.sh",
     "logto:wechat:configure": "node scripts/logto-wechat-auth.mjs",
     "test:logto:wechat": "vitest run scripts/tests/logto-wechat-auth.test.ts",
-    "test:logto:wechat:runtime": "bash scripts/tests/logto-wechat-auth.runtime.sh"
+    "test:logto:wechat:runtime": "bash scripts/tests/logto-wechat-auth.runtime.sh",
+    "test:logto:unified": "vitest run scripts/tests/auth-mock-sms.test.ts scripts/tests/logto-unified-auth.test.ts",
+    "logto:unified:configure": "node scripts/logto-unified-auth.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

@@ -1,5 +1,6 @@
 "use client";
 
+import { DashboardAccountProfile } from "./dashboard-account-profile";
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
@@ -617,6 +618,8 @@ export function DashboardSettings({
           <p>{copy.persistenceUnavailableMessage}</p>
         </div>
       ) : null}
+
+      {initialSection === "profile" && profileAvailable ? <DashboardAccountProfile locale={locale} /> : null}
 
       {initialSection === "profile" ? (
         <form
@@ -1414,7 +1417,7 @@ const settingsCopy = {
     profileCardTitle: "账户资料",
     profileCardDescription:
       "显示名称用于 Owner 控制面和需要明确操作者身份的业务记录。",
-    displayNameLabel: "显示名称",
+    displayNameLabel: "昵称",
     displayNameHelp:
       "最多 80 个字符；不会修改对外代理名称或公开页面上的 Owner 署名。",
     displayNameRequired: "请输入显示名称。",

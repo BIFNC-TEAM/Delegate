@@ -85,6 +85,15 @@ import { GET as completeCreatorLogin } from "../app/auth/callback/route";
 import { GET as startCreatorLogin } from "../app/auth/login/route";
 
 describe("creator admission auth routes", () => {
+  it("signs Owner registration intent for unified login while opening sign-in", async () => {
+    vi.stubEnv("DELEGATE_UNIFIED_AUTH_ENABLED", "true");
+    try {
+      mocks.isLogtoOidcConfigured.mockReturnValue(true);
+      await startCreatorLogin(new Request("https://dashboard.example.com/auth/login"));
+      expect(mocks.createDelegateAuthState).toHaveBeenCalledWith(expect.objectContaining({ actor: "owner", creatorFlow: "register" }));
+      expect(mocks.buildLogtoAuthorizeUrl).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({ firstScreen: "sign_in" }));
+    } finally { vi.unstubAllEnvs(); }
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     const admissionError = Object.assign(

@@ -109,3 +109,16 @@ describe("Logto Management API client", () => {
     await expect(client.listAllUsers()).rejects.toThrow("MAX_PAGES");
   });
 });
+
+describe('current-user profile management contract', () => {
+  const config = { endpoint: 'https://auth.example.com', clientId: 'app', clientSecret: 'secret', resource: 'https://default.logto.app/api', requestTimeoutMs: 15000, pageSize: 100, maxPages: 100 };
+  it('writes only avatar for the explicitly selected subject and follows no redirects', async () => {
+    const request = vi.fn(async (url: string) => url.endsWith('/oidc/token') ? Response.json({ access_token: 'token', expires_in: 3600 }) : Response.json({ id: 'subject' }));
+    await createLogtoManagementClient(config, request).updateUserAvatar('subject', 'https://example.com/avatar.png');
+    expect(request).toHaveBeenLastCalledWith('https://auth.example.com/api/users/subject', expect.objectContaining({ method: 'PATCH', redirect: 'error', body: JSON.stringify({ avatar: 'https://example.com/avatar.png' }) }));
+  });
+  it.each([{ id: 'another', hasPassword: true, isSuspended: false }, { id: 'subject', isSuspended: false }, { id: 'subject', hasPassword: false }])('fails closed on malformed profile responses', async (user) => {
+    const request = vi.fn(async (url: string) => url.endsWith('/oidc/token') ? Response.json({ access_token: 'token', expires_in: 3600 }) : Response.json(user));
+    await expect(createLogtoManagementClient(config, request).getUserProfile('subject')).rejects.toThrow('Invalid Logto account profile');
+  });
+});

@@ -50,7 +50,7 @@ docker compose --env-file .env --env-file .local/logto/delegate-auth.env --env-f
 
 ## 切换真实短信与发布
 
-此分支未部署到 `login.rag8.cn`。正式 UI 使用无 mock 构建：
+此分支的正式 UI / 业务代码未部署到 `login.rag8.cn`；该域名仅已添加下文获批的本地微信回调 302 路由。正式 UI 使用无 mock 构建：
 
 ```sh
 NODE_ENV=production AUTH_UI_OUTPUT_DIR=../../.local/logto/auth-ui-production pnpm --filter @delegate/auth-experience build
@@ -92,9 +92,9 @@ AUTH_INTEGRATION_PHONE=<尚未注册的白名单测试号码> node --env-file=.e
 
 修复后的本地链路：本地 Logto 发起授权 → 微信 → `https://login.rag8.cn/_delegate/local-wechat/psrzl0j00w79` → 浏览器收到固定 HTTP 302 → `http://127.0.0.1:3301/callback/psrzl0j00w79`。浏览器回到本机原会话后继续执行原有 state、有效期、connector 和 Logto 验证；公网 Logto 不交换这次授权码，也不创建/合并本地身份。
 
-**当前状态：代码和自动化验证完成；线上固定路由尚未添加，等待用户明确批准。** 自动审批拒绝了代理标签变更，因此未重试或绕过。浏览器安全策略也不允许代理操作微信授权页，真实扫码需用户完成。批准前本地构建不启用 relay，会在微信跳转前明确提示回调未配置。
+**当前状态：用户明确批准后，固定 302 路由已添加，本地页面已启用。** 首次自动审批拒绝后没有绕过；本次依据用户后续明确授权执行。全部既有 service labels 保留，线上 Logto 运行 task ID 未改变。浏览器安全策略不允许代理操作微信授权页，真实扫码仍需用户完成。
 
-获批后，用以下显式配置构建本地体验：
+今后重新构建本机体验时，使用以下显式配置以保留已获批的本地微信入口：
 
 ```sh
 NODE_ENV=development \
@@ -111,3 +111,19 @@ pnpm --filter @delegate/auth-experience build
 修改范围仅 5 个文件：`build.mjs`（显式本地配置、域名检查、生成固定路由标签）、`src/flow.ts`（回调地址选择与拒绝错误配置）、`src/main.tsx`（使用正确回调并核对连接器返回的 redirect_uri/state）、`src/flow.test.ts`（新增 11 项回归）、本运行手册。
 
 已运行 `pnpm --filter @delegate/auth-experience test`（30 项通过）、对应 `typecheck` 和本地构建（通过）。真实微信扫码未运行，不能据此宣称完整微信登录已恢复。
+
+
+本次部署后验证（均使用虚构 code/state，不跟随跳转、不请求微信授权页）：
+
+| 测试场景 | 输入／前置条件 | 预期结果 | 实际结果 |
+| --- | --- | --- | --- |
+| 已批准的固定回调 | GET 固定 relay 路径，虚构 code/state | 302 到本机对应 connector，保留查询参数 | 通过 |
+| 转发响应头 | 同上 | no-store、no-referrer | 通过 |
+| 原公网回调 | 原公网 connector 的 /callback 路径 | 不转发本地 | HTTP 200，未转发 |
+| 其他 connector | /_delegate/local-wechat/other-connector | 不匹配固定转发 | HTTP 200，未转发 |
+| 非 GET 请求 | POST 固定路径 | 不匹配固定转发 | HTTP 404，未转发 |
+| 线上 OIDC 健康 | /.well-known/openid-configuration | 200 | 通过 |
+| 本地授权参数 | 原生 Experience API 创建微信授权验证记录 | redirect_uri 为批准域名，state 不变，scope=snsapi_login | 通过，未访问微信授权页 |
+| 本地前端产物 | GET /build-mode.json | localWechatCallback 为已批准的固定路径 | 通过 |
+
+部署前标签快照和部署核对结果保存于被 Git 忽略的 `.local/logto/wechat-local-relay-before-*.json`、`.local/logto/wechat-local-relay-applied.json`。当前登录体验单测重新运行，30 项通过；代码与上次完整回归相同，仅更新了部署状态记录。

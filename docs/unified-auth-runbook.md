@@ -129,3 +129,6 @@ pnpm --filter @delegate/auth-experience build
 部署前标签快照和部署核对结果保存于被 Git 忽略的 `.local/logto/wechat-local-relay-before-*.json`、`.local/logto/wechat-local-relay-applied.json`。当前登录体验单测重新运行，30 项通过；部署时另补充了下述资源缓存修复，并通过对应构建回归、typecheck 和实际 HTTP 资源校验。
 
 本次部署还确认 Logto 静态资源缓存为 7 天；构建器现为 JS/CSS URL 添加内容摘要版本，回调配置变更后普通刷新即可加载新文件，避免旧脚本继续发送 loopback 回调。对应构建回归测试校验了配置变化会生成不同脚本 URL。
+
+
+扫码后若微信验证接口成功，但账号识别返回 `404/user.identity_not_exist`，应进入新建/关联选择；不要与手机号专用的 `user.user_not_exist` 混用。该差异已由真实扫码审计日志和 Logto 1.41 源码确认，并加入回归测试。2026-09-21 的本地修复构建已启用，用户需重新发起扫码，不能复用已消费的授权码。

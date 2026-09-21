@@ -16,6 +16,8 @@ function fixture(fail?: (path: string, body: any, index: number) => void) {
   return { flow, request, navigate };
 }
 const missing = () => { throw new AuthError('user.user_not_exist', 'not found', 404); };
+// Logto 1.41 SocialVerification.identifyUser uses a distinct code from phone verification.
+const missingSocial = () => { throw new AuthError('user.identity_not_exist', 'The user identity does not exist.', 404); };
 describe('verified account flows', () => {
   it('registers an unknown verified phone and waits for optional profile before redirect', async () => {
     let first = true;
@@ -31,14 +33,14 @@ describe('verified account flows', () => {
     expect(request.mock.calls.map(([path]) => path)).toEqual(['/api/experience/submit']);
   });
   it('pauses unknown WeChat before creating an identity or workspace', async () => {
-    const { flow, request, navigate } = fixture((path) => { if (path.endsWith('/identification')) missing(); });
+    const { flow, request, navigate } = fixture((path) => { if (path.endsWith('/identification')) missingSocial(); });
     await flow.wechatCallback('wechat', 'social-proof', { code: 'provider-code', state: 'nonce' });
     expect(flow.state.stage).toBe('wechat-choice'); expect(navigate).not.toHaveBeenCalled();
     expect(request.mock.calls.some(([, , body]) => body?.interactionEvent === 'Register')).toBe(false);
   });
   it('links WeChat only after verifying the existing account, preserving the social proof', async () => {
     let first = true;
-    const { flow, request } = fixture((path) => { if (path.endsWith('/identification') && first) { first = false; missing(); } });
+    const { flow, request } = fixture((path) => { if (path.endsWith('/identification') && first) { first = false; missingSocial(); } });
     await flow.wechatCallback('wechat', 'social-proof', { code: 'provider-code', state: 'nonce' });
     flow.chooseExisting(); await flow.passwordLogin('existing', 'correct-password');
     const calls = request.mock.calls;
@@ -47,7 +49,8 @@ describe('verified account flows', () => {
     expect(calls.some(([, , body]) => body?.interactionEvent === 'Register')).toBe(false);
   });
   it.each(['link', 'reset'] as const)('never creates a missing account during %s', async (stage) => {
-    const { flow, request } = fixture((path) => { if (path.endsWith('/identification')) missing(); });
+    let first = true;
+    const { flow, request } = fixture((path) => { if (path.endsWith('/identification')) { if (first && stage === 'link') { first = false; missingSocial(); } missing(); } });
     if (stage === 'link') { await flow.wechatCallback('wechat', 'social-proof', { code: 'code', state: 'nonce' }); flow.chooseExisting(); }
     else await flow.reset('reset');
     await flow.sendCode('13800138000');
@@ -57,7 +60,7 @@ describe('verified account flows', () => {
   it('cannot link on a wrong password or overwrite an occupied social identity', async () => {
     let phase = 'social';
     const { flow, navigate } = fixture((path) => {
-      if (phase === 'social' && path.endsWith('/identification')) missing();
+      if (phase === 'social' && path.endsWith('/identification')) missingSocial();
       if (phase === 'password' && path.endsWith('/password')) throw new AuthError('user.invalid_password', 'bad');
       if (phase === 'conflict' && path.endsWith('/profile')) throw new AuthError('user.identity_already_in_use', 'conflict');
     });
@@ -65,6 +68,36 @@ describe('verified account flows', () => {
     phase = 'password'; await flow.run(() => flow.passwordLogin('existing', 'wrong')); expect(flow.state.error).toContain('密码不正确');
     phase = 'conflict'; await flow.run(() => flow.passwordLogin('existing', 'right')); expect(flow.state.error).toContain('已关联');
     expect(navigate).not.toHaveBeenCalled();
+  });
+  it('signs in an already-linked WeChat identity without offering registration or changing its profile', async () => {
+    const { flow, request, navigate } = fixture();
+    await flow.wechatCallback('wechat', 'social-proof', { code: 'provider-code', state: 'nonce' });
+    expect(navigate).toHaveBeenCalledWith('/oidc/auth/resume');
+    expect(request.mock.calls.some(([, , body]) => body?.interactionEvent === 'Register')).toBe(false);
+    expect(request.mock.calls.some(([path]) => path === '/api/experience/profile')).toBe(false);
+  });
+  it('creates a new WeChat account only after the explicit new-user choice', async () => {
+    let first = true;
+    const { flow, request, navigate } = fixture((path) => { if (path.endsWith('/identification') && first) { first = false; missingSocial(); } });
+    await flow.run(() => flow.wechatCallback('wechat', 'social-proof', { code: 'provider-code', state: 'nonce' }));
+    expect(flow.state).toMatchObject({ stage: 'wechat-choice', error: '' });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(request.mock.calls.some(([, , body]) => body?.interactionEvent === 'Register')).toBe(false);
+    await flow.chooseNew();
+    expect(request).toHaveBeenCalledWith('/api/experience/interaction-event', 'PUT', { interactionEvent: 'Register' });
+    expect(request).toHaveBeenLastCalledWith('/api/experience/identification', 'POST', { verificationId: 'social-proof' });
+    expect(flow.state.stage).toBe('onboarding');
+  });
+  it.each([
+    ['session.verification_session_not_found', 404],
+    ['user.user_not_exist', 404],
+    ['user.identity_not_exist', 500],
+  ])('does not mistake unrelated error %s (%s) for a new WeChat user', async (code, status) => {
+    const { flow, request, navigate } = fixture((path) => { if (path.endsWith('/identification')) throw new AuthError(code as string, 'failure', status as number); });
+    await flow.run(() => flow.wechatCallback('wechat', 'social-proof', { code: 'provider-code', state: 'nonce' }));
+    expect(flow.state.stage).toBe('login'); expect(flow.state.error).not.toBe('');
+    expect(navigate).not.toHaveBeenCalled();
+    expect(request.mock.calls.some(([, , body]) => body?.interactionEvent === 'Register')).toBe(false);
   });
   it('requires a fresh challenge when the phone changes and rejects resending during cooldown', async () => {
     const { flow, request } = fixture(); await flow.sendCode('13800138000'); const count = request.mock.calls.length;

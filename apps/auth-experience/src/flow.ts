@@ -157,7 +157,8 @@ export class AuthFlow {
     this.socialId = result.verificationId;
     try { await this.identify(result.verificationId); }
     catch (error) {
-      if (error instanceof AuthError && error.code === "user.user_not_exist") { this.set({ stage: "wechat-choice" }); return; }
+      // Social identity lookup uses a different missing-account code than phone lookup.
+      if (error instanceof AuthError && error.status === 404 && error.code === "user.identity_not_exist") { this.set({ stage: "wechat-choice" }); return; }
       throw error;
     }
     await this.submit();

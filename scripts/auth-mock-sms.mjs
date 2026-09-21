@@ -12,7 +12,17 @@ export function mockSmsConfig(env) {
   if (secret.length < 32) throw new Error('Mock delivery token must have at least 32 characters.');
   const phones = new Set((env.AUTH_MOCK_SMS_ALLOWED_PHONES || '').split(',').map((x) => x.trim().replace(/^\+/, '')).filter(Boolean));
   if (!phones.size || [...phones].some((x) => !/^861[3-9]\d{9}$/.test(x))) throw new Error('Mock SMS requires an explicit mainland test-phone allowlist.');
-  return { origin: origin.origin, secret, phones };
+  let wechat;
+  if (env.DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI) {
+    const callback = new URL(env.DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI);
+    const match = /^\/_delegate\/local-wechat\/([A-Za-z0-9_-]+)$/.exec(callback.pathname);
+    if (origin.origin !== 'http://127.0.0.1:3301' || callback.protocol !== 'https:' || callback.username || callback.password || callback.port
+      || callback.search || callback.hash || !match || ['localhost', '127.0.0.1', '[::1]'].includes(callback.hostname)
+      || callback.hostname !== env.WECHAT_WEB_CALLBACK_DOMAIN) throw new Error('Invalid approved local WeChat callback configuration.');
+    callback.searchParams.set('delegate_flow', 'account');
+    wechat = { connectorId: match[1], callbackUri: callback.toString(), accountCallback: `${origin.origin}/account/callback/social/${match[1]}` };
+  }
+  return { origin: origin.origin, secret, phones, wechat };
 }
 export function createMockSmsStore(config, now = Date.now) {
   const codes = new Map();
@@ -48,10 +58,40 @@ export function createMockSmsStore(config, now = Date.now) {
     },
   };
 }
-export function createMockSmsServer(config) {
+// This marker selects a fixed local callback page; it grants no identity or
+// account access. Native Account Center still validates its saved state/proofs.
+export function accountWechatCallbackTarget(config, path, method) {
+  if (!config.wechat || method !== 'GET' || !path.startsWith(`/callback/${config.wechat.connectorId}?`)) return null;
+  const url = new URL(path, config.origin);
+  if (url.origin !== config.origin || url.pathname !== `/callback/${config.wechat.connectorId}`
+    || url.searchParams.getAll('delegate_flow').length !== 1 || url.searchParams.get('delegate_flow') !== 'account') return null;
+  const target = new URL(config.wechat.accountCallback);
+  for (const key of ['code', 'state', 'error', 'error_description']) {
+    const value = url.searchParams.get(key);
+    if (value !== null) target.searchParams.set(key, value);
+  }
+  return target.toString();
+}
+export function rewriteAccountWechatRequest(config, path, body) {
+  if (!config.wechat || !body || typeof body !== 'object' || Array.isArray(body)) return body;
+  if (path === '/api/verifications/social' && body.connectorId === config.wechat.connectorId) {
+    if (body.redirectUri !== config.wechat.accountCallback) throw new Error('Unexpected local account callback.');
+    return { ...body, redirectUri: config.wechat.callbackUri };
+  }
+  if (path === '/api/verifications/social/verify' && body.connectorData?.redirectUri === config.wechat.accountCallback) {
+    return { ...body, connectorData: { ...body.connectorData, redirectUri: config.wechat.callbackUri } };
+  }
+  return body;
+}
+export function createMockSmsServer(config, upstreamAddress = { hostname: 'logto', port: 3001 }) {
   const store = createMockSmsStore(config);
   return createServer(async (req, res) => {
     const reply = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
+    const accountCallback = accountWechatCallbackTarget(config, req.url || '/', req.method);
+    if (accountCallback) {
+      res.writeHead(302, { Location: accountCallback, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+      res.end(); return;
+    }
     if (req.url === '/health' && req.method === 'GET') return reply(200, { status: 'ok', mode: 'local_mock' });
     if (req.url === '/__delegate_mock_sms/resolve') {
       if (req.headers.origin !== config.origin) return reply(403, { message: 'Untrusted origin' });
@@ -62,16 +102,20 @@ export function createMockSmsServer(config) {
     if (!['/deliver', '/__delegate_mock_sms/resolve'].includes(req.url || '')) {
       // Local issuer proxy: preserve native Logto cookies and CSP. Never relax CSP.
       let replacement;
-      if (req.url === '/api/verifications/verification-code/verify' && req.method === 'POST') {
+      const accountSocialRequest = config.wechat && ['/api/verifications/social', '/api/verifications/social/verify'].includes(req.url);
+      if (req.method === 'POST' && (req.url === '/api/verifications/verification-code/verify' || accountSocialRequest)) {
         if (req.headers.origin !== config.origin) return reply(403, { message: 'Untrusted origin' });
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 8192) return reply(413, { message: 'Request too large' }); }
-        try { const data = JSON.parse(body); replacement = JSON.stringify({ ...data, code: store.resolveAccountCode(data) }); }
+        try {
+          const data = JSON.parse(body);
+          replacement = JSON.stringify(accountSocialRequest ? rewriteAccountWechatRequest(config, req.url, data) : { ...data, code: store.resolveAccountCode(data) });
+        }
         catch { return reply(400, { message: 'Invalid request' }); }
       }
       const headers = { ...req.headers };
       if (replacement) { delete headers['transfer-encoding']; headers['content-length'] = String(Buffer.byteLength(replacement)); }
-      const upstream = httpRequest({ hostname: 'logto', port: 3001, path: req.url, method: req.method, headers }, (response) => {
+      const upstream = httpRequest({ ...upstreamAddress, path: req.url, method: req.method, headers }, (response) => {
         res.writeHead(response.statusCode || 502, response.headers); response.pipe(res);
       });
       upstream.on('error', () => { if (!res.headersSent) reply(502, { message: 'Local Logto is unavailable' }); else res.destroy(); });

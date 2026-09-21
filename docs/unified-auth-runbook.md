@@ -135,3 +135,33 @@ pnpm --filter @delegate/auth-experience build
 
 
 微信绑定成功后如果工作台登录状态已过期，重新从 Dashboard 的 `/auth/login` 发起登录即可，不要重放旧回调 code，也不必重复绑定。state 有效期仍为 10 分钟；无效回调现在进入可恢复的提示页。2026-09-21 已通过用户真实扫码绑定结果、本地只读绑定状态和浏览器新登录确认“关联已有账号 → 进入原账号工作台”，首次微信新建账号分支仍需单独验收。
+
+
+## 原生账号中心“添加微信”回调（2026-09-21）
+
+登录体验与 Account Center 是两套客户端：后者通过 `POST /api/verifications/social` 发起授权，使用 `/account/callback/social/<connectorId>` 回调。之前的登录入口修复没有覆盖它，因此仍向微信提交 loopback redirect_uri。
+
+当前本地修复复用**已获批的同一条公网固定 302**，没有添加或修改线上路由：本地代理只对已配置微信 connector 的原生账号中心请求，把回调改为批准的 relay URL 并增加 `delegate_flow=account`；在验证请求中保持相同回调。返回本地 `/callback/<id>` 后，代理识别这个标记，将 code/state/error 转发到固定的 `/account/callback/social/<id>` 并移除标记。未标记的普通登录回调仍进入原登录体验。
+
+本机 `.local/logto/auth-mock.env` 还需要以下两个非密钥配置（已配置）：
+
+```dotenv
+WECHAT_WEB_CALLBACK_DOMAIN=login.rag8.cn
+DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI=https://login.rag8.cn/_delegate/local-wechat/psrzl0j00w79
+```
+
+配置改变后按原 local overlay 重建 `auth-mock-sms` 服务。修复不修改原生账号中心的静态文件，也不需要清理账户 Cookie；关闭旧微信错误页，回到账号安全页重新点击“添加”即可发起新请求。
+
+安全边界：标记仅选择固定的本地页面，不能指定目标 URL，也不是身份凭据。Authorization、二次验证头、state、验证记录 ID 都保留，原生 Logto 仍执行验证及最终绑定/冲突检查；未认证请求实际返回 401。非本机 Origin 被拒绝，其他 provider 和账号 mutation 请求不改写。此逻辑只在显式开启的本地开发代理运行，生产登录不使用它。
+
+| 测试场景 | 输入／前置条件 | 预期结果 | 实际结果 |
+| --- | --- | --- | --- |
+| 原生添加微信 | 配置中的 connector、原生 account 回调 | 授权参数使用批准域名，保留 state/验证信息 | 单测、HTTP 代理、固定版本真实连接器纯 URI 生成验证通过 |
+| 原生验证回调 | 原 verificationRecordId/code/state | 保留证明，只保持同一 relay redirectUri | 自动化通过 |
+| 公网返回本机 | 合成 code/state + account 标记 | 先经过既有 302，再回到固定原生 Account Center 回调 | 实际 HTTP 转发通过，未访问微信授权页 |
+| 普通登录 | 无 account 标记 | 继续原登录回调 | 实际 HTTP 验证通过 |
+| 鉴权与边界 | 无 token、错误 Origin、错误 callback、其他 provider | 保留 401、拒绝非法请求，不扩大改写范围 | 自动化及真实 Logto 401 验证通过 |
+
+本次修改 5 个文件：`scripts/auth-mock-sms.mjs`（本地回调配置、精准请求改写与分流）、`scripts/tests/auth-mock-sms.test.ts`（配置/路由边界）、`scripts/tests/account-wechat-proxy.test.ts`（实际 HTTP 代理鉴权和证明保留）、`package.json`（纳入既有 CI 调用的统一登录测试入口）、本运行手册。
+
+`pnpm test:logto:unified`：21 项通过。`pnpm exec turbo run test --concurrency=1`：28/28 任务成功，全部复用缓存；本次改动位于根 scripts，已另跑上述定向测试。真人从账号安全页再次扫码绑定尚需用户验收，不把合成转发测试描述为已实际完成绑定。

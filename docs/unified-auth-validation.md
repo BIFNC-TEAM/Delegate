@@ -106,3 +106,24 @@
 修复后的真实微信再次扫码仍需用户完成，不将自动化结果描述为真实扫码全链路通过。
 
 本次实际执行：`pnpm --filter @delegate/auth-experience test` 最终 35 项通过；对应 `typecheck` 通过；保留批准 relay 的开发构建通过；`pnpm exec turbo run test --concurrency=1` 28/28 任务成功（27 个缓存复用）。HTTP 检查确认实际服务的脚本与修复构建完全一致，内容版本匹配且 relay 配置仍在。
+
+
+## 微信绑定完成后工作台 state 过期（2026-09-21）
+
+实际证据：本地 Dashboard 最后一次 `/auth/login` 是 16:23:33，微信绑定完成并回调工作台是 16:47:33，间隔约 24 分钟，超过既有 state 的 10 分钟有效期。Logto 的手机验证、识别、profile 更新、submit 全部成功；只读查询确认用户指定的测试账号已包含微信绑定。错误发生在工作台拒绝过期 state，不能把它描述为微信绑定失败。
+
+处理：保留签名、state 一致性、Owner 类型、PKCE 和 10 分钟有效期校验。失败回调不交换 code、不发会话、不修改绑定，也不清除另一标签页的有效会话；改为 303 跳转到明确的重新登录提示页。用户显式重新发起登录后获得新的 state，可复用已完成的 Logto 登录。
+
+已实际通过浏览器从工作台 `/auth/login` 重新登录，成功到达 Dashboard，并在个人资料中确认指定测试手机号和“微信账号：已绑定”。这次没有再次扫描微信、没有重新绑定或修改密码。
+
+| 测试场景 | 输入／前置条件 | 预期结果 | 实际结果 |
+| --- | --- | --- | --- |
+| 无效或过期 state | 校验返回 null | 提供重新登录入口，不交换 code | 旧代码回归失败，修复后通过 |
+| 被另一尝试替换的 state | 回调 state 与 Cookie 不一致 | 拒绝登录，保留原有效会话 | 自动化通过 |
+| 错误账号类型 | audience state 用于 Owner 回调 | 拒绝建立 Owner 会话 | 自动化通过 |
+| 真实签名过期状态 | 合成本地签名 state，时间为 11 分钟前 | 303 到恢复页，不修改 Cookie | 实际 HTTP 联调通过 |
+| 重新发起登录 | 用户已完成微信关联的 Logto 会话 | 进入原账号工作台，绑定仍在 | 浏览器通过 |
+
+修改文件：`apps/web/app/auth/callback/route.ts`（失败回调安全恢复）、`apps/web/app/auth/error/page.tsx`（可理解的提示与新登录入口）、`apps/web/tests/creator-auth-admission-routes.test.ts`（3 项拒绝无效状态及不影响其他会话的回归），以及运行/验收文档。
+
+实际命令：`pnpm --filter @delegate/dashboard exec vitest run tests/creator-auth-admission-routes.test.ts tests/creator-auth-error-page.test.ts` 24 项通过；`pnpm exec vitest run packages/web-data/tests/auth-session.test.ts` 35 项通过；Dashboard typecheck 通过；`pnpm exec turbo run test --concurrency=1` 28/28 任务成功（26 个缓存复用）。未延长或绕过 state 有效期。

@@ -271,6 +271,22 @@ describe("creator admission auth routes", () => {
     );
   });
 
+  it.each([
+    null,
+    { version: 2, actor: "owner", state: "a-newer-login-state", returnTo: "/dashboard" },
+    { version: 2, actor: "audience", state: "state-1", returnTo: "/dashboard" },
+  ])("offers a fresh login for invalid callback state without exchanging codes or clearing another session", async (authState) => {
+    mocks.verifyDelegateAuthState.mockReturnValue(authState);
+    const response = await completeCreatorLogin(new Request("https://dashboard.example.com/auth/callback?code=untrusted-code&state=state-1"));
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("https://dashboard.example.com/auth/error?reason=login_state_invalid");
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(mocks.exchangeLogtoCodeForTokens).not.toHaveBeenCalled();
+    expect(mocks.resolveOwnerForAuth).not.toHaveBeenCalled();
+    expect(mocks.resolveOwnerForRegistration).not.toHaveBeenCalled();
+    expect(mocks.issueAccountSessionShadow).not.toHaveBeenCalled();
+  });
+
   it("creates a Creator only from signed registration state and permits explicit cross-persona enrollment", async () => {
     mocks.readAccountSessionMode.mockReturnValue("shadow");
     mocks.verifyDelegateAuthState.mockReturnValue({

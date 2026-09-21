@@ -51,7 +51,12 @@ export async function GET(request: Request) {
       verifyDelegateAuthState(cookieStore.get(DELEGATE_OWNER_AUTH_STATE_COOKIE)?.value, secret) ??
       verifyDelegateAuthState(cookieStore.get(LEGACY_DELEGATE_AUTH_STATE_COOKIE)?.value, secret);
     if (!authState || authState.state !== state || authState.actor !== "owner") {
-      return NextResponse.json({ error: "Invalid or expired login state." }, { status: 400 });
+      // Do not exchange the code, weaken state verification, or clear a newer
+      // login/session belonging to another tab. Offer an explicit fresh start.
+      return NextResponse.redirect(
+        buildCreatorRedirectUrl("/auth/error?reason=login_state_invalid", request.url),
+        303,
+      );
     }
 
     const logtoConfig = readLogtoOidcConfig("dashboard");

@@ -1,5 +1,10 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from 'vitest';
-import { AuthError, AuthFlow, identifier, passwordError, readSocialCallback, type Requester } from './flow';
+import { AuthError, AuthFlow, identifier, passwordError, readSocialCallback, wechatCallbackUri, type Requester } from './flow';
 function fixture(fail?: (path: string, body: any, index: number) => void) {
   let index = 0;
   const request = vi.fn(async (path: string, _method?: string, body?: any) => {
@@ -94,5 +99,50 @@ describe('WeChat callback state', () => {
     expect(()=>readSocialCallback(JSON.stringify(saved),'/callback/wechat',params,700000)).toThrow();
     expect(()=>readSocialCallback(JSON.stringify(saved),'/callback/other',params,2000)).toThrow();
     expect(()=>readSocialCallback(JSON.stringify(saved),'/callback/wechat',new URLSearchParams({state:'nonce',error:'cancelled'}),2000)).toThrow('取消');
+  });
+});
+
+describe('WeChat approved-domain callback routing', () => {
+  const relay = 'https://login.rag8.cn/_delegate/local-wechat/connector';
+  it('uses the approved public relay for local login and preserves the original callback identity', async () => {
+    const {flow,request}=fixture();
+    const redirect=wechatCallbackUri('http://127.0.0.1:3301','connector',relay);
+    await flow.startWechat('connector','nonce',redirect);
+    expect(request).toHaveBeenLastCalledWith('/api/experience/verification/social/connector/authorization-uri','POST',{state:'nonce',redirectUri:relay});
+    expect(readSocialCallback(JSON.stringify({connectorId:'connector',verificationId:'proof',state:'nonce',createdAt:1000}),'/callback/connector',new URLSearchParams({code:'test',state:'nonce'}),2000)).toMatchObject({verificationId:'proof'});
+  });
+  it('leaves public Logto callbacks on their own origin, even when a local relay was configured', () => {
+    expect(wechatCallbackUri('https://login.rag8.cn','public-connector',relay)).toBe('https://login.rag8.cn/callback/public-connector');
+  });
+  it('rejects unconfigured loopback callbacks before sending the user to WeChat', () => {
+    expect(()=>wechatCallbackUri('http://127.0.0.1:3301','connector')).toThrow('尚未配置');
+    expect(()=>wechatCallbackUri('http://localhost:3301','connector',relay)).toThrow('尚未配置');
+  });
+  it.each(['http://login.rag8.cn/_delegate/local-wechat/connector','https://user:pass@login.rag8.cn/_delegate/local-wechat/connector','https://login.rag8.cn/_delegate/local-wechat/other','https://login.rag8.cn/_delegate/local-wechat/connector?returnTo=https://evil.test','https://127.0.0.1/_delegate/local-wechat/connector'])('rejects invalid or mismatched relay %s',(uri)=>{
+    expect(()=>wechatCallbackUri('http://127.0.0.1:3301','connector',uri)).toThrow();
+  });
+});
+
+describe('development-only WeChat relay build', () => {
+  const cwd=fileURLToPath(new URL('..',import.meta.url));
+  const callback='https://login.rag8.cn/_delegate/local-wechat/connector';
+  it.each([{NODE_ENV:'production',WECHAT_WEB_CALLBACK_DOMAIN:'login.rag8.cn'},{NODE_ENV:'development',WECHAT_WEB_CALLBACK_DOMAIN:'other.example.com'}])('rejects production or mismatched approved domain', (change) => {
+    expect(()=>execFileSync(process.execPath,['build.mjs'],{cwd,stdio:'pipe',env:{...process.env,...change,DELEGATE_AUTH_UI_MOCK_SMS_ORIGIN:'',DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI:callback}})).toThrow();
+  });
+  it('generates an exact-path 302 relay with a fixed local destination and preserves code/state query', () => {
+    const directory=mkdtempSync(join(tmpdir(),'delegate-wechat-build-'));
+    try {
+      execFileSync(process.execPath,['build.mjs'],{cwd,stdio:'pipe',env:{...process.env,NODE_ENV:'development',WECHAT_WEB_CALLBACK_DOMAIN:'login.rag8.cn',DELEGATE_AUTH_UI_MOCK_SMS_ORIGIN:'',DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI:callback,AUTH_UI_OUTPUT_DIR:directory}});
+      const labels=JSON.parse(readFileSync(join(directory,'local-wechat-relay-labels.json'),'utf8'));
+      const prefix='traefik.http.middlewares.delegate-local-wechat-redirect.redirectregex';
+      const regex=new RegExp(labels[`${prefix}.regex`]);
+      expect(callback+'?code=test&state=nonce').toMatch(regex);
+      expect(regex.test('https://login.rag8.cn/callback/public?code=test')).toBe(false);
+      expect(regex.test(callback+'/other?code=test')).toBe(false);
+      expect(labels[`${prefix}.replacement`]).toBe('http://127.0.0.1:3301/callback/connector${1}');
+      expect(regex.exec(callback+'?code=test&state=nonce')?.[1]).toBe('?code=test&state=nonce');
+      expect(labels[`${prefix}.permanent`]).toBe('false');
+      expect(labels['traefik.http.routers.delegate-local-wechat.rule']).toContain('Method(`GET`)');
+    } finally { rmSync(directory,{recursive:true,force:true}); }
   });
 });

@@ -64,7 +64,7 @@ NODE_ENV=production AUTH_UI_OUTPUT_DIR=../../.local/logto/auth-ui-production pnp
 
 ## 限制与待验收
 
-- 新的微信“新建 / 关联”分支已做自动化调用顺序、冲突、错误密码及 state 防重放测试；未完成这版 UI 的真实微信扫码端到端验收。微信网站应用回调域为 `login.rag8.cn`，本地 loopback 不能替代正式回调域。
+- 新的微信“新建 / 关联”分支已做自动化调用顺序、冲突、错误密码及 state 防重放测试；未完成这版 UI 的真实微信扫码端到端验收。微信网站应用回调域为 `login.rag8.cn`，不能直接把 loopback 作为微信 redirect_uri；本地联调需要下述固定 302 回调转发。
 - 历史上已创建 Logto 身份但尚无 Owner 的账号，按已有身份登录，不会回到“未知微信身份”选择分支。若微信已经属于另一 Logto 账号，不能直接用本流程转移或合并；本次未实现历史重复账号迁移，也未操作历史用户数据。
 - 仅支持现有 TOTP 的登录二次验证；未实现新 MFA 注册、WebAuthn、CAPTCHA 或第三方应用授权同意页。不要把此自定义体验直接用于依赖这些页面的租户/应用；启用 CAPTCHA 的环境会明确阻止登录，不跳过验证。
 - 忘记密码目前使用手机号；未绑定手机号的旧账号需先用现有登录方式进入并绑定。邮箱找回需要邮件服务和单独配置。
@@ -85,3 +85,29 @@ AUTH_INTEGRATION_PHONE=<尚未注册的白名单测试号码> node --env-file=.e
 ```
 
 集成脚本拒绝修改已有测试号码账号，只清理本次新建的 Logto fixture，不创建业务工作区。重新运行时选尚未使用的白名单号码。
+
+## 本地微信回调修复（2026-09-21）
+
+根因：登录页直接用 `location.origin` 构造微信 `redirect_uri`，本机发出了 `http://127.0.0.1:3301/callback/...`，与微信网站应用批准的 `login.rag8.cn` 不匹配。只替换成线上 Logto 的 `/callback/...` 也不正确，因为微信验证记录、Cookie 和浏览器 state 留在本地实例。
+
+修复后的本地链路：本地 Logto 发起授权 → 微信 → `https://login.rag8.cn/_delegate/local-wechat/psrzl0j00w79` → 浏览器收到固定 HTTP 302 → `http://127.0.0.1:3301/callback/psrzl0j00w79`。浏览器回到本机原会话后继续执行原有 state、有效期、connector 和 Logto 验证；公网 Logto 不交换这次授权码，也不创建/合并本地身份。
+
+**当前状态：代码和自动化验证完成；线上固定路由尚未添加，等待用户明确批准。** 自动审批拒绝了代理标签变更，因此未重试或绕过。浏览器安全策略也不允许代理操作微信授权页，真实扫码需用户完成。批准前本地构建不启用 relay，会在微信跳转前明确提示回调未配置。
+
+获批后，用以下显式配置构建本地体验：
+
+```sh
+NODE_ENV=development \
+DELEGATE_AUTH_UI_MOCK_SMS_ORIGIN=http://127.0.0.1:3301 \
+WECHAT_WEB_CALLBACK_DOMAIN=login.rag8.cn \
+DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI=https://login.rag8.cn/_delegate/local-wechat/psrzl0j00w79 \
+pnpm --filter @delegate/auth-experience build
+```
+
+构建产物 `local-wechat-relay-labels.json` 给出可审核的 Traefik service labels。只允许给 `delegate_logto` 添加其中的 `delegate-local-wechat` 路由/中间件标签，保留全部原有标签，不更新 task template、镜像或凭据。应用前保存标签快照；应用后检查精确路径返回 302、Location 保留 query 且目标固定、其他 connector/public callback 不匹配该路由、现有健康检查和运行 task ID 不变。下一次完整 stack 部署可能移除临时 service labels，需显式重新审核该本地联调入口。
+
+转发只匹配已批准域名、固定 connector 路径和 GET；不能传入任意 return URL。响应使用 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`。它是浏览器跳转，不是服务器反向代理至服务器自身的 loopback。生产构建禁止包含本地 relay；未配置/域名不符/connector不符会在外跳前失败，正常公网回调仍使用自身 `/callback/<id>`。
+
+修改范围仅 5 个文件：`build.mjs`（显式本地配置、域名检查、生成固定路由标签）、`src/flow.ts`（回调地址选择与拒绝错误配置）、`src/main.tsx`（使用正确回调并核对连接器返回的 redirect_uri/state）、`src/flow.test.ts`（新增 11 项回归）、本运行手册。
+
+已运行 `pnpm --filter @delegate/auth-experience test`（30 项通过）、对应 `typecheck` 和本地构建（通过）。真实微信扫码未运行，不能据此宣称完整微信登录已恢复。

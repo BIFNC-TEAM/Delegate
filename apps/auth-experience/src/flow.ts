@@ -40,6 +40,28 @@ export function messageFor(error: unknown): string {
   return messages[error.code] ?? (error.code.endsWith("_invalid") || error.code.startsWith("local_") ? error.message : "暂时无法完成，请核对输入后重试");
 }
 
+// A local Logto interaction must return to the same browser origin. A fixed
+// relay on the approved WeChat domain carries code/state back without logging
+// into a different Logto instance or transferring its user identities.
+export function wechatCallbackUri(origin: string, connectorId: string, localRelay = "") {
+  if (!/^[A-Za-z0-9_-]+$/u.test(connectorId)) throw new AuthError("local_wechat_config", "微信连接器配置无效");
+  const current = new URL(origin);
+  if (["localhost", "127.0.0.1", "[::1]"].includes(current.hostname)) {
+    if (current.origin !== "http://127.0.0.1:3301" || !localRelay) {
+      throw new AuthError("local_wechat_config", "本地微信回调尚未配置，请使用短信登录或联系管理员配置微信联调入口");
+    }
+    const relay = new URL(localRelay);
+    if (relay.protocol !== "https:" || relay.username || relay.password || relay.port || relay.search || relay.hash
+      || ["localhost", "127.0.0.1", "[::1]"].includes(relay.hostname)
+      || relay.pathname !== `/_delegate/local-wechat/${connectorId}`) {
+      throw new AuthError("local_wechat_config", "本地微信回调配置不匹配，请联系管理员");
+    }
+    return relay.toString();
+  }
+  if (current.protocol !== "https:") throw new AuthError("local_wechat_config", "微信登录需要 HTTPS 回调地址");
+  return new URL(`/callback/${connectorId}`, current.origin).toString();
+}
+
 export function readSocialCallback(raw: string | null, pathname: string, params: URLSearchParams, now = Date.now()) {
   let saved;
   try { saved = raw ? JSON.parse(raw) : null; } catch { throw new AuthError("local_social_state", "微信授权会话已失效，请重新登录"); }

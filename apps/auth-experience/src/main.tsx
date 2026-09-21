@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
-import { AuthError, AuthFlow, readSocialCallback, type Event, type Identifier, type Requester } from "./flow";
+import { AuthError, AuthFlow, readSocialCallback, wechatCallbackUri, type Event, type Identifier, type Requester } from "./flow";
 import "./styles.css";
 
 declare const __MOCK_SMS_ORIGIN__: string;
+declare const __WECHAT_LOCAL_CALLBACK_URI__: string;
 const params = new URLSearchParams(location.search);
 const appId = params.get("app_id") || sessionStorage.getItem("delegate.auth.appId") || "";
 if (appId) sessionStorage.setItem("delegate.auth.appId", appId);
@@ -76,11 +77,13 @@ function App() {
   const beginWechat = () => invoke(async () => {
     if (!wechat) return;
     if ((settings?.termsOfUseUrl || settings?.privacyPolicyUrl) && !terms) throw new AuthError("local_terms", "请先阅读并同意用户协议和隐私政策");
+    const redirectUri = wechatCallbackUri(location.origin, wechat.id, __WECHAT_LOCAL_CALLBACK_URI__);
     const nonce = crypto.randomUUID();
-    const result = await flow.startWechat(wechat.id, nonce, `${location.origin}/callback/${wechat.id}`);
+    const result = await flow.startWechat(wechat.id, nonce, redirectUri);
     sessionStorage.setItem("delegate.auth.social", JSON.stringify({ connectorId: wechat.id, state: nonce, verificationId: result.verificationId, createdAt: Date.now() }));
     const url = new URL(result.authorizationUri);
-    if (url.origin !== "https://open.weixin.qq.com" || url.pathname !== "/connect/qrconnect") throw new Error("Unexpected WeChat authorization URL");
+    if (url.origin !== "https://open.weixin.qq.com" || url.pathname !== "/connect/qrconnect"
+      || url.searchParams.get("redirect_uri") !== redirectUri || url.searchParams.get("state") !== nonce) throw new Error("Unexpected WeChat authorization URL");
     location.assign(url.toString());
   });
   const codeField = <div className="code-row"><label><span>验证码</span><input aria-label="验证码" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} placeholder="6 位验证码" /></label><button type="button" className="text-button" disabled={busy || remaining > 0} onClick={() => invoke(() => flow.sendCode(account))}>{remaining ? `${remaining} 秒后重发` : "获取验证码"}</button></div>;

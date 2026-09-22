@@ -20,6 +20,15 @@ export function unifiedPatch(current, emailEnabled = false) {
     verificationCodePolicy: { ...current.verificationCodePolicy, expirationDuration: Math.min(300, current.verificationCodePolicy?.expirationDuration || 300), maxRetryAttempts: Math.min(5, current.verificationCodePolicy?.maxRetryAttempts || 5) },
   };
 }
+export function loginRestartUrl(dashboardUrl, issuer) {
+  const target = new URL(dashboardUrl);
+  const local = ['localhost', '127.0.0.1', '[::1]'];
+  if ((target.protocol !== 'https:' && !(target.protocol === 'http:' && local.includes(target.hostname) && local.includes(new URL(issuer).hostname)))
+    || target.username || target.password || target.search || target.hash || target.pathname !== '/' || target.origin === new URL(issuer).origin) {
+    throw new Error('NEXT_PUBLIC_DASHBOARD_URL must be a separate trusted application origin for login recovery.');
+  }
+  return new URL('/auth/login', target).toString();
+}
 export async function configureUnifiedAuth(env, { apply = false, mock = false } = {}, request = createManagementClient(env)) {
   if (mock) assertLocalMock(env);
   const [current, center, connectors, fields, discovery] = await Promise.all([
@@ -38,6 +47,7 @@ export async function configureUnifiedAuth(env, { apply = false, mock = false } 
   if (!connectors.some((c) => c.type === 'Email') && current.signIn?.methods?.some((m) => m.identifier === 'email')) throw new Error('An email connector is required to preserve existing email sign-in with optional registration passwords.');
   const ses = connectors.find((c) => c.connectorId === 'delegate-tencent-ses' && c.type === 'Email');
   if (ses && ses.config?.expireMinutes !== patch.verificationCodePolicy.expirationDuration / 60) throw new Error('SES template expiration does not match the planned verification policy; align the policy and rerun SES configuration first.');
+  if (env.NEXT_PUBLIC_DASHBOARD_URL) patch.unknownSessionRedirectUrl = loginRestartUrl(env.NEXT_PUBLIC_DASHBOARD_URL, env.LOGTO_ENDPOINT);
   const account = { enabled: true, fields: { ...center.fields, phone: 'Edit', email: emailEnabled ? 'Edit' : 'ReadOnly', password: 'Edit', social: 'Edit', name: 'ReadOnly', avatar: 'Edit' } };
   if (!apply) return { mode: mock ? 'LOCAL MOCK 123456' : 'real', applied: false, phoneOneClick: true, optionalProfile: true, emailEnabled, usernameEnabled: false };
   if (mock) {

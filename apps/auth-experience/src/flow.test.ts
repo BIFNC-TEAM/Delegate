@@ -198,3 +198,29 @@ describe('development-only WeChat relay build', () => {
     } finally { rmSync(directory,{recursive:true,force:true}); }
   });
 });
+
+
+describe('expired authorization recovery', () => {
+  it('returns to the application login entry when resetting an expired interaction fails', async () => {
+    const {flow,request,navigate}=fixture(()=>{throw new AuthError('session.not_found','expired',404);});
+    await flow.run(()=>flow.restart('http://localhost:3001/auth/login','http://127.0.0.1:3301'));
+    expect(request).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledWith('http://localhost:3001/auth/login');
+    expect(flow.state.error).toBe('');
+  });
+  it('resets an active interaction without changing the application authorization state', async () => {
+    const {flow,navigate}=fixture();
+    await flow.restart('http://localhost:3001/auth/login','http://127.0.0.1:3301');
+    expect(flow.state.stage).toBe('login');expect(navigate).not.toHaveBeenCalled();
+  });
+  it('preserves network failures rather than treating them as expired sessions', async () => {
+    const {flow,navigate}=fixture(()=>{throw new Error('offline');});
+    await flow.run(()=>flow.restart('https://dashboard.example.com/auth/login','https://login.example.com'));
+    expect(flow.state.error).toContain('网络');expect(navigate).not.toHaveBeenCalled();
+  });
+  it.each([undefined,'javascript:alert(1)','//evil.example/auth/login','https://login.example.com/sign-in','https://login.example.com/auth/login','https://user:secret@dashboard.example.com/auth/login','http://dashboard.example.com/auth/login','https://dashboard.example.com/auth/callback?code=stale','https://dashboard.example.com/auth/login?returnTo=https://evil.example'])('rejects missing, unsafe, looping or stale recovery destinations: %s', async (url) => {
+    const {flow,navigate}=fixture(()=>{throw new AuthError('session.not_found','expired',404);});
+    await flow.run(()=>flow.restart(url,'https://login.example.com'));
+    expect(navigate).not.toHaveBeenCalled();expect(flow.state.error).toContain('网站登录入口');
+  });
+});

@@ -30,7 +30,7 @@ const flow = new AuthFlow(request, (url) => {
   if (!["http:", "https:"].includes(destination.protocol)) throw new Error("Unsafe redirect");
   location.assign(destination.toString());
 }, resolveCode);
-type Settings = { socialConnectors?: { id: string; target: string; logo: string; name?: Record<string, string> }[]; termsOfUseUrl?: string; privacyPolicyUrl?: string; captchaPolicy?: { enabled?: boolean }; signIn?: { methods?: { identifier: string; password?: boolean }[] } };
+type Settings = { unknownSessionRedirectUrl?: string | null; socialConnectors?: { id: string; target: string; logo: string; name?: Record<string, string> }[]; termsOfUseUrl?: string; privacyPolicyUrl?: string; captchaPolicy?: { enabled?: boolean }; signIn?: { methods?: { identifier: string; password?: boolean }[] } };
 
 function App() {
   const state = useSyncExternalStore(flow.subscribe, flow.snapshot);
@@ -97,7 +97,7 @@ function App() {
   const profile = <><h1>创建密码，设置昵称</h1><p className="muted">账号已创建。现在补充资料，也可以稍后在个人信息中设置。</p>{passwordField}<p className="hint">至少 8 个字符，包含大小写字母、数字、特殊字符中的至少三种。</p><label><span>昵称</span><input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} autoComplete="nickname" placeholder="你希望别人如何称呼你" /></label><div className="actions"><button disabled={busy} onClick={() => invoke(() => flow.completeProfile(name, password))}>确定</button><button disabled={busy} className="secondary" onClick={() => invoke(() => flow.completeProfile("", "", true))}>暂时跳过</button></div></>;
   return <main><section className="auth-card"><a className="brand" href="#" onClick={(e) => e.preventDefault()}><span>D</span>Delegate</a><p className="eyebrow">你的对外代理，从这里开始</p>
     {mockOrigin && <div className="mock-note" role="status">本地测试环境 · 短信验证码 123456 · 不发送真实短信</div>}
-    {(state.error || bootError) && <div className="error" role="alert">{bootError || state.error}{!settings?.captchaPolicy?.enabled && <button className="text-button" disabled={busy} onClick={() => { setBootError(""); invoke(() => flow.reset()); }}>重新开始登录</button>}</div>}
+    {(state.error || bootError) && <div className="error" role="alert">{bootError || state.error}{!settings?.captchaPolicy?.enabled && <button className="text-button" disabled={state.busy} onClick={() => { if (!settings) { location.reload(); return; } setBootError(""); sessionStorage.removeItem("delegate.auth.social"); setCode(""); setPassword(""); setConfirm(""); invoke(() => flow.restart(settings.unknownSessionRedirectUrl, location.origin)); }}>重新开始登录</button>}</div>}
     {(state.stage === "login" || state.stage === "link") && <>
       {state.stage === "link" && <><h1>关联已有账号</h1><p className="muted">验证原账号后，将微信关联到它。原工作区与资料将保留。</p></>}
       <div className="tabs" role="tablist" aria-label="登录方式"><button role="tab" aria-selected={mode === "sms"} className={mode === "sms" ? "selected" : ""} disabled={busy} onClick={() => { setMode("sms"); setPassword(""); }}>验证码登录</button><button role="tab" aria-selected={mode === "password"} className={mode === "password" ? "selected" : ""} disabled={busy} onClick={() => { setMode("password"); setCode(""); }}>账号登录</button></div>

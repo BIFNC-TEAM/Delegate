@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { assertLocalMock, unifiedPatch, configureUnifiedAuth } from '../logto-unified-auth.mjs';
+import { assertLocalMock, unifiedPatch, configureUnifiedAuth, loginRestartUrl } from '../logto-unified-auth.mjs';
 describe('unified auth configuration', () => {
   it('retains stricter password and OTP requirements', () => {
     const patch=unifiedPatch({passwordPolicy:{length:{min:12,max:64},characterTypes:{min:4},rejects:{pwned:true}},verificationCodePolicy:{expirationDuration:120,maxRetryAttempts:3}});
@@ -28,5 +28,15 @@ describe('unified auth configuration', () => {
   });
   it('requires explicit local opt-in, token and allowlist', () => {
     expect(()=>assertLocalMock({LOGTO_ENDPOINT:'http://127.0.0.1:3301',NODE_ENV:'development',DELEGATE_AUTH_MOCK_SMS:'true'})).toThrow();
+  });
+});
+
+describe('application login recovery URL configuration', () => {
+  it('routes to the application login handler, not an expired OIDC authorize URL', () => {
+    expect(loginRestartUrl('http://localhost:3001','http://127.0.0.1:3301')).toBe('http://localhost:3001/auth/login');
+    expect(loginRestartUrl('https://dashboard.example.com','https://login.example.com')).toBe('https://dashboard.example.com/auth/login');
+  });
+  it.each(['https://login.example.com','javascript:alert(1)','https://user:secret@dashboard.example.com','https://dashboard.example.com/auth/callback','https://dashboard.example.com?returnTo=evil','http://dashboard.example.com','http://localhost:3001'])('rejects invalid application origins: %s',(origin)=>{
+    expect(()=>loginRestartUrl(origin,'https://login.example.com')).toThrow();
   });
 });

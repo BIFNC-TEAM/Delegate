@@ -95,6 +95,24 @@ export class AuthFlow {
     await this.request("/api/experience", "PUT", { interactionEvent: stage === "reset" ? "ForgotPassword" : "SignIn" });
     this.set({ stage, created: false, error: "", cooldownUntil: 0 });
   }
+  async restart(restartUrl: string | null | undefined, origin: string) {
+    try { await this.reset(); }
+    catch (error) {
+      if (!(error instanceof AuthError) || error.code !== "session.not_found") throw error;
+      // PUT /experience cannot recreate the expired OIDC interaction. Return to
+      // the application's login route so it issues fresh state, nonce and PKCE.
+      // This URL comes from Logto configuration, never query params or referrer.
+      let target: URL;
+      try { target = new URL(restartUrl ?? ""); }
+      catch { throw new AuthError("local_restart_unavailable", "请从网站登录入口重新进入，当前登录页尚未配置恢复地址"); }
+      const local = ["localhost", "127.0.0.1", "[::1]"];
+      if ((target.protocol !== "https:" && !(target.protocol === "http:" && local.includes(target.hostname) && local.includes(new URL(origin).hostname)))
+        || target.username || target.password || target.search || target.hash || target.origin === new URL(origin).origin || target.pathname !== "/auth/login") {
+        throw new AuthError("local_restart_unavailable", "请从网站登录入口重新进入，当前登录页的恢复地址配置无效");
+      }
+      this.navigate(target.toString());
+    }
+  }
   async sendCode(value: string) {
     if (Date.now() < this.state.cooldownUntil) throw new AuthError("local_cooldown", "请等待倒计时结束后再获取验证码");
     const id = identifier(value, this.state.stage !== "reset");

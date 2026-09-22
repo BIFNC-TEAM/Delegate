@@ -2,6 +2,9 @@ import { createServer, request as httpRequest } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
+// Logto stores mainland numbers as 86 + 11 digits; normalize a single + at ingress.
+export const isMainlandMockPhone = (phone) => /^861[3-9]\d{9}$/u.test(String(phone ?? ''));
+
 export function mockSmsConfig(env) {
   const origin = new URL(env.LOGTO_ENDPOINT || '');
   if (env.NODE_ENV !== 'development' || env.DELEGATE_AUTH_MOCK_SMS !== 'true'
@@ -10,8 +13,6 @@ export function mockSmsConfig(env) {
   }
   const secret = env.AUTH_MOCK_SMS_TOKEN || '';
   if (secret.length < 32) throw new Error('Mock delivery token must have at least 32 characters.');
-  const phones = new Set((env.AUTH_MOCK_SMS_ALLOWED_PHONES || '').split(',').map((x) => x.trim().replace(/^\+/, '')).filter(Boolean));
-  if (!phones.size || [...phones].some((x) => !/^861[3-9]\d{9}$/.test(x))) throw new Error('Mock SMS requires an explicit mainland test-phone allowlist.');
   let wechat;
   if (env.DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI) {
     const callback = new URL(env.DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI);
@@ -22,7 +23,7 @@ export function mockSmsConfig(env) {
     callback.searchParams.set('delegate_flow', 'account');
     wechat = { connectorId: match[1], callbackUri: callback.toString(), accountCallback: `${origin.origin}/account/callback/social/${match[1]}` };
   }
-  return { origin: origin.origin, secret, phones, wechat };
+  return { origin: origin.origin, secret, wechat };
 }
 export function createMockSmsStore(config, now = Date.now) {
   const codes = new Map();
@@ -34,7 +35,7 @@ export function createMockSmsStore(config, now = Date.now) {
       const actual = Buffer.from(authorization || '');
       if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw new Error('unauthorized');
       const phone = String(data?.to ?? '').replace(/^\+/, '');
-      if (!config.phones.has(phone) || !validTypes.has(data?.type) || !/^\d{6}$/.test(data?.payload?.code ?? '')) throw new Error('invalid_delivery');
+      if (!isMainlandMockPhone(phone) || !validTypes.has(data?.type) || !/^\d{6}$/.test(data?.payload?.code ?? '')) throw new Error('invalid_delivery');
       for (const [id, value] of codes) if (value.expiresAt <= now()) codes.delete(id);
       if (codes.size > 500) throw new Error('capacity_reached');
       codes.delete(key(phone, data.type));
@@ -42,7 +43,7 @@ export function createMockSmsStore(config, now = Date.now) {
     },
     resolveAccountCode(data) {
       const phone = String(data?.identifier?.value ?? '').replace(/^\+/, '');
-      if (data?.identifier?.type !== 'phone' || !config.phones.has(phone) || data.code !== '123456') return data.code;
+      if (data?.identifier?.type !== 'phone' || !isMainlandMockPhone(phone) || data.code !== '123456') return data.code;
       // Simulated local handset for the native Account Center. The original
       // verification ID, session and server-side attempt/expiry checks remain intact.
       const purposes = ['UserPermissionValidation', 'BindNewIdentifier'];
@@ -51,7 +52,7 @@ export function createMockSmsStore(config, now = Date.now) {
     },
     resolve(data) {
       const phone = String(data?.phone ?? '').replace(/^\+/, '');
-      if (!config.phones.has(phone) || data?.testCode !== '123456' || !validTypes.has(data?.type)) throw new Error('invalid_test_code');
+      if (!isMainlandMockPhone(phone) || data?.testCode !== '123456' || !validTypes.has(data?.type)) throw new Error('invalid_test_code');
       const item = codes.get(key(phone, data.type));
       if (!item || item.expiresAt <= now()) throw new Error('code_expired');
       return item.code;

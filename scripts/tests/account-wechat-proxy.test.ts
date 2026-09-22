@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createMockSmsServer, mockSmsConfig } from '../auth-mock-sms.mjs';
-const config = mockSmsConfig({ NODE_ENV:'development',DELEGATE_AUTH_MOCK_SMS:'true',LOGTO_ENDPOINT:'http://127.0.0.1:3301',AUTH_MOCK_SMS_TOKEN:'a-synthetic-token-with-at-least-32-characters',AUTH_MOCK_SMS_ALLOWED_PHONES:'8613800138000',WECHAT_WEB_CALLBACK_DOMAIN:'login.rag8.cn',DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI:'https://login.rag8.cn/_delegate/local-wechat/connector' });
+const config = mockSmsConfig({ NODE_ENV:'development',DELEGATE_AUTH_MOCK_SMS:'true',LOGTO_ENDPOINT:'http://127.0.0.1:3301',AUTH_MOCK_SMS_TOKEN:'a-synthetic-token-with-at-least-32-characters',WECHAT_WEB_CALLBACK_DOMAIN:'login.rag8.cn',DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI:'https://login.rag8.cn/_delegate/local-wechat/connector' });
 let upstream: Server; let proxy: Server; let base: string;
 let observed: { path?: string; authorization?: string; verification?: string; body: any };
 beforeAll(async () => {
@@ -25,6 +25,15 @@ describe('Account Center proxy HTTP boundary',()=>{
     const response=await fetch(base+'/api/verifications/social',{method:'POST',headers,body:JSON.stringify(body)});
     expect(response.status).toBe(201);expect(observed).toMatchObject({authorization:headers.authorization,verification:headers['logto-verification-id'],body:{...body,redirectUri:config.wechat.callbackUri}});
     const result=await response.json();expect(result.verificationRecordId).toBe('server-proof');expect(new URL(result.authorizationUri).searchParams.get('redirect_uri')).toBe(config.wechat.callbackUri);
+  });
+  it('maps an unrestricted mainland Account Center code while preserving verification proof and authentication',async()=>{
+    const phone='8619900000456';
+    const delivery=await fetch(base+'/deliver',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${config.secret}`},body:JSON.stringify({to:phone,type:'BindNewIdentifier',payload:{code:'928371'}})});
+    expect(delivery.status).toBe(200);
+    const verification={identifier:{type:'phone',value:phone},verificationRecordId:'native-record',code:'123456'};
+    const response=await fetch(base+'/api/verifications/verification-code/verify',{method:'POST',headers,body:JSON.stringify(verification)});
+    expect(response.status).toBe(201);
+    expect(observed).toMatchObject({authorization:headers.authorization,verification:headers['logto-verification-id'],body:{...verification,code:'928371'}});
   });
   it('preserves native authentication rejection',async()=>{
     const response=await fetch(base+'/api/verifications/social',{method:'POST',headers:{origin:config.origin,'content-type':'application/json'},body:JSON.stringify(body)});

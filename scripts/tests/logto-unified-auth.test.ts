@@ -26,7 +26,7 @@ describe('unified auth configuration', () => {
   it('rejects a public fixed-code issuer before network calls', async () => {
     const request=vi.fn(); await expect(configureUnifiedAuth({LOGTO_ENDPOINT:'https://login.rag8.cn'},{mock:true,apply:true},request)).rejects.toThrow(); expect(request).not.toHaveBeenCalled();
   });
-  it('requires explicit local opt-in, token and allowlist', () => {
+  it('requires explicit local opt-in and authenticated delivery token', () => {
     expect(()=>assertLocalMock({LOGTO_ENDPOINT:'http://127.0.0.1:3301',NODE_ENV:'development',DELEGATE_AUTH_MOCK_SMS:'true'})).toThrow();
   });
 });

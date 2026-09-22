@@ -26,7 +26,6 @@ NODE_ENV=development
 DELEGATE_AUTH_MOCK_SMS=true
 LOGTO_ENDPOINT=http://127.0.0.1:3301
 AUTH_MOCK_SMS_TOKEN=<至少32字符的随机令牌>
-AUTH_MOCK_SMS_ALLOWED_PHONES=8613800138000,8613800138001
 ```
 
 3. 构建本地体验并启动：
@@ -44,9 +43,9 @@ LOGTO_BACKCHANNEL_ENDPOINT=http://127.0.0.1:3301 node --env-file=.env --env-file
 docker compose --env-file .env --env-file .local/logto/delegate-auth.env --env-file .local/logto/account-profile-runtime.env -f compose.yml -f compose.local.yml up -d --no-deps dashboard workflow-runner
 ```
 
-6. 从 `http://localhost:3001/auth/login` 进入。白名单中的测试号码使用 `123456`；先点获取验证码。不发送真实短信。已有 SSO 会话可能直接进入工作台；测试新注册请用独立浏览器会话。
+6. 从 `http://localhost:3001/auth/login` 进入。所有格式有效的中国大陆 +86 手机号均可使用 `123456`；先点获取验证码。不发送真实短信。已有 SSO 会话可能直接进入工作台；测试新注册请用独立浏览器会话。
 
-本地代理占用 127.0.0.1:3301，原 Logto core 直接端口改为 127.0.0.1:3303，admin 仍为 3302。代理保留原生 CSP 和 Cookie，不关闭安全头。固定码只映射到本机模拟收到的真实随机验证码；Logto 继续执行会话绑定、有效期、尝试次数和验证记录检查。账号中心的本地手机验证也仅对白名单提供映射。
+本地代理占用 127.0.0.1:3301，原 Logto core 直接端口改为 127.0.0.1:3303，admin 仍为 3302。代理保留原生 CSP 和 Cookie，不关闭安全头。固定码只映射到本机模拟收到的真实随机验证码；Logto 继续执行会话绑定、有效期、尝试次数和验证记录检查。账号中心的本地手机验证同样支持所有有效的 +86 手机号，不再使用号码白名单。邮箱仍发送真实邮件验证码；手机号 mock 不会代替邮箱验证。
 
 ## 切换真实短信与发布
 
@@ -58,7 +57,7 @@ NODE_ENV=production AUTH_UI_OUTPUT_DIR=../../.local/logto/auth-ui-production pnp
 
 正式环境只能挂载这份 `build-mode.json` 为 `real` 的产物到固定版本 Logto 的 `/etc/logto/packages/experience/dist`，或采用经验证的自定义 UI 发布流程。OSS 本地挂载与 Logto Cloud 上传不同，不应把 OSS 的 Azure 上传接口当成已可用。
 
-恢复腾讯云连接器时，先在本地 Logto 管理台用私有快照中的原配置替换 HTTP mock 连接器（既有手机号脚本会主动拒绝直接覆盖其他供应商），再用 `scripts/logto-phone-auth.mjs` 校验腾讯云配置，最后运行 `scripts/logto-unified-auth.mjs --apply`；无 mock 标志的配置工具拒绝 HTTP mock provider。不得把 `compose.auth-experience.local.yml`、mock 构建、白名单或 mock 服务部署到公网。统一 UI、Logto 策略、工作台开关和后台服务应一起发布并保留回滚快照。
+恢复腾讯云连接器时，先在本地 Logto 管理台用私有快照中的原配置替换 HTTP mock 连接器（既有手机号脚本会主动拒绝直接覆盖其他供应商），再用 `scripts/logto-phone-auth.mjs` 校验腾讯云配置，最后运行 `scripts/logto-unified-auth.mjs --apply`；无 mock 标志的配置工具拒绝 HTTP mock provider。不得把 `compose.auth-experience.local.yml`、mock 构建或 mock 服务部署到公网。统一 UI、Logto 策略、工作台开关和后台服务应一起发布并保留回滚快照。
 
 官方接口说明：[Bring your UI](https://docs.logto.io/customization/bring-your-ui)、[社交登录](https://docs.logto.io/end-user-flows/sign-up-and-sign-in/social-sign-in)。当前实现另对照了固定版本 1.41 容器中的实际源码并完成本地 API 联调。
 
@@ -81,10 +80,10 @@ pnpm --filter @delegate/auth-experience typecheck
 pnpm --filter @delegate/dashboard typecheck
 pnpm --filter @delegate/workflow-runner typecheck
 pnpm --filter @delegate/dashboard build
-AUTH_INTEGRATION_PHONE=<尚未注册的白名单测试号码> node --env-file=.env --env-file=.local/logto/delegate-auth.env --env-file=.local/logto/auth-mock.env scripts/tests/unified-auth.local.mjs
+AUTH_INTEGRATION_PHONE=<尚未注册的 +86 测试号码> node --env-file=.env --env-file=.local/logto/delegate-auth.env --env-file=.local/logto/auth-mock.env scripts/tests/unified-auth.local.mjs
 ```
 
-集成脚本拒绝修改已有测试号码账号，只清理本次新建的 Logto fixture，不创建业务工作区。重新运行时选尚未使用的白名单号码。
+集成脚本拒绝修改已有测试号码账号，只清理本次新建的 Logto fixture，不创建业务工作区。重新运行时选尚未使用的 +86 测试号码。
 
 ## 本地微信回调修复（2026-09-21）
 
@@ -165,3 +164,11 @@ DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI=https://login.rag8.cn/_delegate/local-we
 本次修改 5 个文件：`scripts/auth-mock-sms.mjs`（本地回调配置、精准请求改写与分流）、`scripts/tests/auth-mock-sms.test.ts`（配置/路由边界）、`scripts/tests/account-wechat-proxy.test.ts`（实际 HTTP 代理鉴权和证明保留）、`package.json`（纳入既有 CI 调用的统一登录测试入口）、本运行手册。
 
 `pnpm test:logto:unified`：21 项通过。`pnpm exec turbo run test --concurrency=1`：28/28 任务成功，全部复用缓存；本次改动位于根 scripts，已另跑上述定向测试。真人从账号安全页再次扫码绑定尚需用户验收，不把合成转发测试描述为已实际完成绑定。
+
+## 2026-09-22 本地 +86 全号码验证
+
+已按用户要求移除本地 mock 号码白名单。验证代码始终为 `123456`，须先通过正常入口获取验证码；号码格式、Logto 会话、有效期、密码、身份绑定与冲突校验继续正常运行。
+
+- `pnpm test:logto:unified`：60 项通过，包含原名单外号码的六种验证码用途、原生账号中心代理、非法格式和环境隔离。
+- `AUTH_INTEGRATION_PHONE=8619900922001 node --env-file=.env --env-file=.local/logto/delegate-auth.env --env-file=.local/logto/auth-mock.env scripts/tests/unified-auth.local.mjs`：本地 Logto 注册、昵称/密码保存、验证码再次登录、密码登录与重置通过；旧密码和跨会话验证记录被拒绝。仅本次新建测试账号已清理，未创建业务工作区。
+- 本次未重新运行整个工作区测试；未发送真实短信，未改线上服务。

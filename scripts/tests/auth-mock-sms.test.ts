@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createMockSmsStore, mockSmsConfig } from '../auth-mock-sms.mjs';
-const env = { NODE_ENV: 'development', DELEGATE_AUTH_MOCK_SMS: 'true', LOGTO_ENDPOINT: 'http://127.0.0.1:3301', AUTH_MOCK_SMS_TOKEN: 'test-only-token-with-at-least-32-bytes', AUTH_MOCK_SMS_ALLOWED_PHONES: '8613800138000' };
+const env = { NODE_ENV: 'development', DELEGATE_AUTH_MOCK_SMS: 'true', LOGTO_ENDPOINT: 'http://127.0.0.1:3301', AUTH_MOCK_SMS_TOKEN: 'test-only-token-with-at-least-32-bytes' };
 describe('local fixed-code SMS delivery simulation', () => {
-  it.each([{ NODE_ENV: 'production' }, { LOGTO_ENDPOINT: 'https://login.rag8.cn' }, { DELEGATE_AUTH_MOCK_SMS: 'false' }, { AUTH_MOCK_SMS_ALLOWED_PHONES: '' }])('refuses unsafe configuration %j', (change) => { expect(() => mockSmsConfig({ ...env, ...change })).toThrow(); });
-  it('requires authenticated delivery, allowlisted phone, correct purpose and explicit test code', () => {
+  it.each([{ NODE_ENV: 'production' }, { LOGTO_ENDPOINT: 'https://login.rag8.cn' }, { DELEGATE_AUTH_MOCK_SMS: 'false' }])('refuses unsafe configuration %j', (change) => { expect(() => mockSmsConfig({ ...env, ...change })).toThrow(); });
+  it('requires authenticated delivery, valid mainland phone, correct purpose and explicit test code', () => {
     const config = mockSmsConfig(env); const store = createMockSmsStore(config);
     expect(() => store.deliver({ to: '8613800138000', type: 'SignIn', payload: { code: '928371' } }, '')).toThrow();
     store.deliver({ to: '+8613800138000', type: 'SignIn', payload: { code: '928371' } }, `Bearer ${config.secret}`);
@@ -12,12 +12,25 @@ describe('local fixed-code SMS delivery simulation', () => {
     expect(() => store.resolve({ phone: '8613800138000', type: 'SignIn', testCode: '000000' })).toThrow();
     expect(() => store.resolve({ phone: '8613900138000', type: 'SignIn', testCode: '123456' })).toThrow();
   });
-  it('maps only allowlisted native Account Center test codes; keeps other codes unchanged', () => {
+  it('maps all mainland native Account Center test codes; keeps other codes unchanged', () => {
     const config = mockSmsConfig(env); const store = createMockSmsStore(config);
     store.deliver({ to: '8613800138000', type: 'BindNewIdentifier', payload: { code: '987654' } }, `Bearer ${config.secret}`);
     expect(store.resolveAccountCode({ identifier: { type: 'phone', value: '8613800138000' }, code: '123456' })).toBe('987654');
     expect(store.resolveAccountCode({ identifier: { type: 'phone', value: '8613800138000' }, code: '000000' })).toBe('000000');
     expect(store.resolveAccountCode({ identifier: { type: 'phone', value: '8613900138000' }, code: '123456' })).toBe('123456');
+  });
+  it.each(['8613900000123','+8618600000123','8619900000123'])('accepts previously unlisted mainland phone %s for all SMS verification purposes', (phone) => {
+    const config=mockSmsConfig(env);const store=createMockSmsStore(config);
+    for(const type of ['SignIn','Register','ForgotPassword','Generic','UserPermissionValidation','BindNewIdentifier']) {
+      store.deliver({to:phone,type,payload:{code:'928371'}},`Bearer ${config.secret}`);
+      expect(store.resolve({phone,type,testCode:'123456'})).toBe('928371');
+    }
+    expect(store.resolveAccountCode({identifier:{type:'phone',value:phone},code:'123456'})).toBe('928371');
+  });
+  it.each(['++8613800138000','13800138000','85212345678','+12025550123','8612800138000','861380013800','86138001380000','8613800138000junk'])('rejects malformed or non-mainland recipient %s', (phone) => {
+    const config=mockSmsConfig(env);const store=createMockSmsStore(config);
+    expect(()=>store.deliver({to:phone,type:'SignIn',payload:{code:'928371'}},`Bearer ${config.secret}`)).toThrow('invalid_delivery');
+    expect(()=>store.resolve({phone,type:'SignIn',testCode:'123456'})).toThrow('invalid_test_code');
   });
   it('expires captured messages and uses the latest real Logto code after resend', () => {
     let now = 0; const config = mockSmsConfig(env); const store = createMockSmsStore(config, () => now);

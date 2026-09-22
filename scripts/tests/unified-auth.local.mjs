@@ -3,11 +3,11 @@
 import assert from 'node:assert/strict';
 import { randomBytes, createHash } from 'node:crypto';
 import { createManagementClient } from '../logto-phone-auth.mjs';
-import { mockSmsConfig } from '../auth-mock-sms.mjs';
+import { isMainlandMockPhone, mockSmsConfig } from '../auth-mock-sms.mjs';
 const config = mockSmsConfig(process.env);
 const origin = config.origin;
 const phone = process.env.AUTH_INTEGRATION_PHONE;
-assert(phone && config.phones.has(phone), 'Set an unused allowlisted AUTH_INTEGRATION_PHONE.');
+assert(phone && isMainlandMockPhone(phone), 'Set an unused mainland AUTH_INTEGRATION_PHONE (86 + 11 digits).');
 const identifier = { type: 'phone', value: phone };
 const app = process.env.LOGTO_DASHBOARD_APP_ID;
 assert(app && process.env.NEXT_PUBLIC_DASHBOARD_URL, 'Dashboard OIDC configuration is required.');
@@ -52,6 +52,12 @@ try {
   assert((await send('/api/experience/submit','POST')).data.redirectTo);
   const user=await management(`/api/users/${createdId}`); assert.equal(user.name,'Local auth integration fixture'); assert.equal(user.hasPassword,true);
   console.log('PASS verified registration, optional password/nickname persistence and OIDC submission');
+  await start();
+  const loginProof=await verify();
+  await send('/api/experience/identification','POST',{verificationId:loginProof});
+  assert((await send('/api/experience/submit','POST')).data.redirectTo);
+  assert.equal((await findUser())?.id,createdId);
+  console.log('PASS existing fixed-code sign-in preserves the same account');
   await start();
   await assert.rejects(send('/api/experience/identification','POST',{verificationId:proof}));
   await assert.rejects(send('/api/experience/verification/password','POST',{identifier,password:'WrongPassword890!'}));

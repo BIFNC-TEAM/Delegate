@@ -9,7 +9,8 @@ describe("settings section navigation", () => {
   it("falls back to profile for absent or invalid sections", () => {
     expect(parseSettingsSection(undefined)).toBe("profile");
     expect(parseSettingsSection("developer")).toBe("profile");
-    expect(parseSettingsSection("security")).toBe("security");
+    expect(parseSettingsSection("security")).toBe("profile");
+    expect(parseSettingsSection("notifications")).toBe("notifications");
   });
 
   it("preserves owner dashboard context while clearing unrelated module state", () => {

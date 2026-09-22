@@ -172,3 +172,11 @@ DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI=https://login.rag8.cn/_delegate/local-we
 - `pnpm test:logto:unified`：60 项通过，包含原名单外号码的六种验证码用途、原生账号中心代理、非法格式和环境隔离。
 - `AUTH_INTEGRATION_PHONE=8619900922001 node --env-file=.env --env-file=.local/logto/delegate-auth.env --env-file=.local/logto/auth-mock.env scripts/tests/unified-auth.local.mjs`：本地 Logto 注册、昵称/密码保存、验证码再次登录、密码登录与重置通过；旧密码和跨会话验证记录被拒绝。仅本次新建测试账号已清理，未创建业务工作区。
 - 本次未重新运行整个工作区测试；未发送真实短信，未改线上服务。
+
+## 三方账号管理
+
+账户信息中的登录方式顺序为手机号、邮箱、登录密码、三方账号绑定。三方账号摘要按已启用服务商显示名称和绑定状态；管理入口进入工作台 `settingsSection=connections`，仍属于“资料与偏好”，不会新增一级设置分区。
+
+列表读取 Logto 已启用且在 Account Center 可见的社交连接器，按 target 去重并优先选择 Web 连接器。当前显示微信，未来新增服务商自动沿用此列表；Native-only、关闭或只读的服务商不提供越权操作入口。绑定、更换及解除绑定分别进入原生 `/account/social/:connectorId`、`/change` 和 `/remove`，继续使用 Logto 的身份验证、OAuth state、验证记录和冲突校验。工作台不直接修改用户 identities，也不返回第三方令牌。
+
+返回管理页或切回浏览器窗口时刷新绑定状态。新增覆盖：多个服务商状态、Web 优先去重、只读/关闭控制、异常配置/网络失败、原生操作路由及敏感字段不外泄。

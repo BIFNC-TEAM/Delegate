@@ -1,5 +1,6 @@
 export const settingsSections = [
   "profile",
+  "connections",
   "notifications",
 ] as const;
 

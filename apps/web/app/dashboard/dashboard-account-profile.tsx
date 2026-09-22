@@ -1,9 +1,9 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { OwnerIdentityProfile } from "@delegate/web-data/owner-identity-profile";
 import type { Locale } from "@delegate/web-ui";
 
-export function DashboardAccountProfile({ locale }: { locale: Locale }) {
+export function DashboardAccountProfile({ locale, available = true, children }: { locale: Locale; available?: boolean; children: ReactNode }) {
   const zh = locale === 'zh';
   const [profile, setProfile] = useState<OwnerIdentityProfile | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -19,6 +19,7 @@ export function DashboardAccountProfile({ locale }: { locale: Locale }) {
     return () => URL.revokeObjectURL(url);
   }, [file]);
   const load = async () => {
+    if (!available) return;
     const version = ++requestVersion.current;
     try {
       const response = await fetch('/api/dashboard/account-profile', { cache: 'no-store' });
@@ -27,7 +28,7 @@ export function DashboardAccountProfile({ locale }: { locale: Locale }) {
       if (version === requestVersion.current) { setProfile(data); setError(''); }
     } catch { if (version === requestVersion.current) setError(zh ? '暂时无法读取账号信息，请重试。' : 'Account information is unavailable. Please retry.'); }
   };
-  useEffect(() => { void load(); const refresh = () => { void load(); }; window.addEventListener('focus', refresh); return () => window.removeEventListener('focus', refresh); }, [locale]);
+  useEffect(() => { void load(); const refresh = () => { void load(); }; window.addEventListener('focus', refresh); return () => window.removeEventListener('focus', refresh); }, [locale, available]);
   const chooseFile = (selected: File | undefined) => {
     if (!selected) return;
     setError(''); setNotice('');
@@ -56,8 +57,8 @@ export function DashboardAccountProfile({ locale }: { locale: Locale }) {
     finally { setSaving(false); }
   };
   const link = (href: string | undefined, label: string) => href ? <a className="dashboard-v2-button-secondary" href={href} target="_blank" rel="noreferrer">{label} ↗</a> : <span className="settings-action-note">{zh ? '管理入口未配置' : 'Management unavailable'}</span>;
-  return <section className="dashboard-v2-panel settings-card account-profile-panel" aria-labelledby="account-profile-title">
-    <header><p className="dashboard-v2-eyebrow">ACCOUNT PROFILE</p><h2 id="account-profile-title">{zh ? '头像与登录方式' : 'Avatar and sign-in methods'}</h2><p className="settings-card-description">{zh ? '管理已绑定的身份。修改密码、手机号或微信关联时，会先验证你的身份。' : 'Manage linked identities. Sensitive changes require identity verification.'}</p></header>
+  if (!available) return <>{children}</>;
+  return <div className="account-profile-content">
     {error && <p role="alert" className="settings-field-error">{error} <button type="button" onClick={() => { void load(); }}>{zh ? '重试' : 'Retry'}</button></p>}
     {!profile && !error && <p role="status">{zh ? '正在读取账号信息…' : 'Loading account…'}</p>}
     {profile && <>
@@ -74,10 +75,13 @@ export function DashboardAccountProfile({ locale }: { locale: Locale }) {
         </div>
       </div>
       {notice && <p role="status">{notice}</p>}
+    </>}
+    {children}
+    {profile && <>
       <div className="account-profile-method"><div><strong>{zh ? '绑定手机号' : 'Phone'}</strong><p>{profile.phone ?? (zh ? '尚未绑定' : 'Not linked')}</p></div>{link(profile.links?.phone, zh ? (profile.phone ? '更换手机号' : '绑定手机号') : 'Manage phone')}</div>
       <div className="account-profile-method"><div><strong>{zh ? '登录密码' : 'Password'}</strong><p>{profile.hasPassword ? (zh ? '已设置' : 'Set') : (zh ? '尚未设置，可继续使用微信或验证码登录' : 'Not set; social or code sign-in remains available')}</p></div>{link(profile.links?.password, zh ? (profile.hasPassword ? '修改密码' : '设置密码') : 'Manage password')}</div>
       <div className="account-profile-method"><div><strong>{zh ? '微信账号' : 'WeChat'}</strong><p>{profile.wechatLinked ? (zh ? '已绑定' : 'Linked') : (zh ? '尚未绑定' : 'Not linked')}</p></div>{link(profile.links?.social, zh ? '管理第三方账号' : 'Manage linked accounts')}</div>
       <div className="account-profile-method"><div><strong>{zh ? '绑定邮箱' : 'Email'}</strong><p>{profile.email ?? (zh ? '尚未绑定' : 'Not linked')}</p></div>{profile.links?.email ? link(profile.links.email, zh ? (profile.email ? '更换邮箱' : '绑定邮箱') : 'Manage email') : <span className="settings-action-note">{zh ? '邮箱验证服务暂未启用' : 'Email verification is not enabled yet'}</span>}</div>
     </>}
-  </section>;
+  </div>;
 }

@@ -619,8 +619,6 @@ export function DashboardSettings({
         </div>
       ) : null}
 
-      {initialSection === "profile" && profileAvailable ? <DashboardAccountProfile locale={locale} /> : null}
-
       {initialSection === "profile" ? (
         <form
           aria-busy={savingSection === "profile"}
@@ -634,50 +632,52 @@ export function DashboardSettings({
             headingId="settings-profile-heading"
             title={copy.profileCardTitle}
           >
-            <div className="settings-field-grid">
-              <label className="settings-field settings-field-wide">
-                <span>{copy.displayNameLabel}</span>
-                <input
-                  aria-describedby={
-                    effectiveProfileErrors.displayName
-                      ? "settings-display-name-error"
-                      : "settings-display-name-help"
-                  }
-                  aria-invalid={
-                    effectiveProfileErrors.displayName ? true : undefined
-                  }
-                  disabled={
-                    !profileAvailable ||
-                    savingSection === "profile" ||
-                    navigationPending
-                  }
-                  maxLength={80}
-                  onChange={(event) => {
-                    setProfileDraft((current) => ({
-                      ...current,
-                      displayName: event.target.value,
-                    }));
-                    setProfileFieldErrors((current) => ({
-                      ...current,
-                      displayName: "",
-                    }));
-                  }}
-                  value={profileDraft.displayName}
-                />
-                {effectiveProfileErrors.displayName ? (
-                  <small
-                    className="settings-field-error"
-                    id="settings-display-name-error"
-                  >
-                    {effectiveProfileErrors.displayName}
-                  </small>
-                ) : (
-                  <small id="settings-display-name-help">
-                    {copy.displayNameHelp}
-                  </small>
-                )}
-              </label>
-            </div>
+            <DashboardAccountProfile locale={locale} available={profileAvailable}>
+              <div className="settings-field-grid account-profile-name">
+                <label className="settings-field settings-field-wide">
+                  <span>{copy.displayNameLabel}</span>
+                  <input
+                    aria-describedby={
+                      effectiveProfileErrors.displayName
+                        ? "settings-display-name-error"
+                        : "settings-display-name-help"
+                    }
+                    aria-invalid={
+                      effectiveProfileErrors.displayName ? true : undefined
+                    }
+                    disabled={
+                      !profileAvailable ||
+                      savingSection === "profile" ||
+                      navigationPending
+                    }
+                    maxLength={80}
+                    onChange={(event) => {
+                      setProfileDraft((current) => ({
+                        ...current,
+                        displayName: event.target.value,
+                      }));
+                      setProfileFieldErrors((current) => ({
+                        ...current,
+                        displayName: "",
+                      }));
+                    }}
+                    value={profileDraft.displayName}
+                  />
+                  {effectiveProfileErrors.displayName ? (
+                    <small
+                      className="settings-field-error"
+                      id="settings-display-name-error"
+                    >
+                      {effectiveProfileErrors.displayName}
+                    </small>
+                  ) : (
+                    <small id="settings-display-name-help">
+                      {copy.displayNameHelp}
+                    </small>
+                  )}
+                </label>
+              </div>
+            </DashboardAccountProfile>
           </SettingsCard>
 
           <SettingsCard
@@ -1413,10 +1413,10 @@ const settingsCopy = {
     profileTab: "资料与偏好",
     securityTab: "登录与安全",
     notificationsTab: "提醒",
-    profileEyebrow: "Owner profile",
-    profileCardTitle: "账户资料",
+    profileEyebrow: "Account information",
+    profileCardTitle: "账户信息",
     profileCardDescription:
-      "显示名称用于 Owner 控制面和需要明确操作者身份的业务记录。",
+      "管理你的头像、昵称和登录方式。修改手机号、邮箱、密码或第三方账号时，需要验证身份。",
     displayNameLabel: "昵称",
     displayNameHelp:
       "最多 80 个字符；不会修改对外代理名称或公开页面上的 Owner 署名。",
@@ -1525,10 +1525,10 @@ const settingsCopy = {
     profileTab: "Profile & preferences",
     securityTab: "Sign-in & security",
     notificationsTab: "Notifications",
-    profileEyebrow: "Owner profile",
-    profileCardTitle: "Account profile",
+    profileEyebrow: "Account information",
+    profileCardTitle: "Account information",
     profileCardDescription:
-      "Your display name identifies the Owner in the control plane and in business records that require a named actor.",
+      "Manage your avatar, display name, and sign-in methods. Changes to your phone, email, password, or linked accounts require identity verification.",
     displayNameLabel: "Display name",
     displayNameHelp:
       "Up to 80 characters. This does not rename a representative or change the public Owner attribution.",

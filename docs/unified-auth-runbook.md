@@ -180,3 +180,5 @@ DELEGATE_AUTH_WECHAT_LOCAL_CALLBACK_URI=https://login.rag8.cn/_delegate/local-we
 列表读取 Logto 已启用且在 Account Center 可见的社交连接器，按 target 去重并优先选择 Web 连接器。当前显示微信，未来新增服务商自动沿用此列表；Native-only、关闭或只读的服务商不提供越权操作入口。绑定、更换及解除绑定分别进入原生 `/account/social/:connectorId`、`/change` 和 `/remove`，继续使用 Logto 的身份验证、OAuth state、验证记录和冲突校验。工作台不直接修改用户 identities，也不返回第三方令牌。
 
 返回账户资料页或切回浏览器窗口时刷新绑定状态。新增覆盖：多个服务商状态、Web 优先去重、只读/关闭控制、异常配置/网络失败、原生操作路由及敏感字段不外泄。
+
+账户信息中的手机号、邮箱、密码和三方绑定操作在当前标签页打开，以便原生安全验证页的“返回”按钮通过浏览器历史回到账户信息。链接同时携带 Logto 原生 `redirect` 参数，完成操作后返回固定的资料页及其标题锚点；返回地址由当前工作台 origin 构造，不使用调用方传入的任意跳转目标。已打开的旧验证标签页需要先返回工作台，再从新入口进入。

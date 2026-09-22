@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { OwnerIdentityProfile } from "@delegate/web-data/owner-identity-profile";
 import type { Locale } from "@delegate/web-ui";
+import { buildAccountCenterHref } from "./settings-section-navigation";
 
 export function DashboardAccountProfile({ locale, available = true, children }: { locale: Locale; available?: boolean; children?: ReactNode }) {
   const zh = locale === 'zh';
@@ -56,7 +57,10 @@ export function DashboardAccountProfile({ locale, available = true, children }: 
     } catch (e) { setError(e instanceof Error ? e.message : (zh ? '网络请求失败' : 'Network request failed')); }
     finally { setSaving(false); }
   };
-  const link = (href: string | undefined, label: string) => href ? <a className="dashboard-v2-button-secondary" href={href} target="_blank" rel="noreferrer">{label} ↗</a> : <span className="settings-action-note">{zh ? '管理入口未配置' : 'Management unavailable'}</span>;
+  const link = (href: string | undefined, label: string) => {
+    const destination = buildAccountCenterHref(href, window.location.origin, locale);
+    return destination ? <a className="dashboard-v2-button-secondary" href={destination}>{label}</a> : <span className="settings-action-note">{zh ? '管理入口未配置' : 'Management unavailable'}</span>;
+  };
   const accounts = profile?.socialAccounts ?? [];
   const providerName = (account: OwnerIdentityProfile['socialAccounts'][number]) => zh ? account.name['zh-CN'] || account.name.en : account.name.en;
   if (!available) return <>{children}</>;

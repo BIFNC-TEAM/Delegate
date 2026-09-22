@@ -1,6 +1,6 @@
 # 手机号 / 邮箱登录与腾讯云 SES（2026-09-22）
 
-分支：`codex/unified-account-onboarding`，不创建 PR。邮件方案已按用户最新选择采用腾讯云 SES API，未使用或配置 SMTP。
+分支：`codex/unified-account-onboarding`，PR 目标分支为 `dev`。邮件方案已按用户最新选择采用腾讯云 SES API，未使用或配置 SMTP。
 
 ## 当前行为
 

@@ -1,6 +1,6 @@
 # 统一登录与注册
 
-分支：`codex/unified-account-onboarding`。基于已有手机号 / 微信接入分支继续开发；不创建 PR。
+分支：`codex/unified-account-onboarding`。基于已有手机号 / 微信接入分支继续开发；PR 目标分支为 `dev`。
 
 ## 行为与身份边界
 

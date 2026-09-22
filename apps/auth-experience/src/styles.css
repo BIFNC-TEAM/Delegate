@@ -164,7 +164,7 @@ input::placeholder {
 }
 
 .phone-row:focus-within,
-.code-row input:focus {
+input:not([type="checkbox"]):focus {
   border-color:#16A394;
   outline:2px solid #16A394;
   outline-offset:-2px;
@@ -175,15 +175,14 @@ input::placeholder {
   min-width:0;
 }
 
-.phone-row input:focus-visible {
+.phone-row input:focus {
   outline:none;
 }
 
 @media (forced-colors:active) {
   .phone-row:focus-within,
-  .code-row input:focus {
-    outline:2px solid Highlight;
-    outline-offset:-2px;
+  input:not([type="checkbox"]):focus {
+    outline-color:Highlight;
   }
 }
 

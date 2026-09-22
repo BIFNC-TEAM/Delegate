@@ -163,7 +163,8 @@ input::placeholder {
   overflow:hidden;
 }
 
-.phone-row:focus-within {
+.phone-row:focus-within,
+.code-row input:focus {
   border-color:#16A394;
   outline:2px solid #16A394;
   outline-offset:-2px;
@@ -179,7 +180,8 @@ input::placeholder {
 }
 
 @media (forced-colors:active) {
-  .phone-row:focus-within {
+  .phone-row:focus-within,
+  .code-row input:focus {
     outline:2px solid Highlight;
     outline-offset:-2px;
   }

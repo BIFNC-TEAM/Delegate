@@ -382,7 +382,7 @@ describe("Delegate Pi Agent runtime", () => {
       representative: {
         name: "地理代表——周行知",
         ownerName: "阿江",
-        role: "初中地理课程数字代表",
+        role: "初中地理课程对外代理",
       },
       audience: {
         kind: "external_visitor",

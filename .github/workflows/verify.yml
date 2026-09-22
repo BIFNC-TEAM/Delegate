@@ -62,6 +62,9 @@ jobs:
       - name: Validate Logto identity migration contracts
         run: pnpm test:logto:identity-contracts
 
+      - name: Check product terminology
+        run: pnpm test:terminology
+
       - name: Typecheck workspace
         run: pnpm typecheck
 

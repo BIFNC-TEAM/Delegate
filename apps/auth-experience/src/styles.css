@@ -160,11 +160,29 @@ input::placeholder {
   border:1px solid #E5E7EB;
   border-radius:12px;
   align-items:center;
+  overflow:hidden;
+}
+
+.phone-row:focus-within {
+  border-color:#16A394;
+  outline:2px solid #16A394;
+  outline-offset:-2px;
 }
 
 .phone-row input {
   border:0;
   min-width:0;
+}
+
+.phone-row input:focus-visible {
+  outline:none;
+}
+
+@media (forced-colors:active) {
+  .phone-row:focus-within {
+    outline:2px solid Highlight;
+    outline-offset:-2px;
+  }
 }
 
 .country {
@@ -259,10 +277,23 @@ input::placeholder {
 }
 
 .wechat {
-  width:100%;
+  display:grid;
+  place-items:center;
+  width:48px;
+  height:48px;
+  margin:0 auto;
+  padding:8px;
+  border-radius:9999px;
   background:#fff;
   border:1px solid #E5E7EB;
   color:#374151;
+}
+
+.wechat img {
+  display:block;
+  width:28px;
+  height:28px;
+  object-fit:contain;
 }
 
 .wechat:hover {

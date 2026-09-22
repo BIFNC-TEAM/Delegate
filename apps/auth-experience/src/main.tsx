@@ -30,7 +30,7 @@ const flow = new AuthFlow(request, (url) => {
   if (!["http:", "https:"].includes(destination.protocol)) throw new Error("Unsafe redirect");
   location.assign(destination.toString());
 }, resolveCode);
-type Settings = { socialConnectors?: { id: string; target: string; name?: Record<string, string> }[]; termsOfUseUrl?: string; privacyPolicyUrl?: string; captchaPolicy?: { enabled?: boolean }; signIn?: { methods?: { identifier: string }[] } };
+type Settings = { socialConnectors?: { id: string; target: string; logo: string; name?: Record<string, string> }[]; termsOfUseUrl?: string; privacyPolicyUrl?: string; captchaPolicy?: { enabled?: boolean }; signIn?: { methods?: { identifier: string }[] } };
 
 function App() {
   const state = useSyncExternalStore(flow.subscribe, flow.snapshot);
@@ -100,7 +100,7 @@ function App() {
       {state.stage === "login" && <p className="hint">未注册的手机号验证后将创建账号。</p>}
       {state.stage === "login" && (settings?.termsOfUseUrl || settings?.privacyPolicyUrl) && <label className="terms"><input type="checkbox" checked={terms} onChange={(e) => setTerms(e.target.checked)} />我已阅读并同意 {settings.termsOfUseUrl && <a href={settings.termsOfUseUrl} target="_blank" rel="noreferrer">用户协议</a>} {settings.privacyPolicyUrl && <a href={settings.privacyPolicyUrl} target="_blank" rel="noreferrer">隐私政策</a>}</label>}
       <button className="primary full" disabled={busy || !!bootError && !!settings?.captchaPolicy?.enabled}>{busy ? "处理中…" : state.stage === "link" ? "验证并关联" : mode === "sms" ? "登录 / 注册" : "登录"}</button></form>
-      {state.stage === "login" && wechat && <><div className="divider"><span>或</span></div><button className="wechat" disabled={busy} onClick={beginWechat}>微信授权登录</button></>}
+      {state.stage === "login" && wechat && <><div className="divider"><span>或</span></div><button type="button" className="wechat" aria-label="微信登录" title="微信登录" disabled={busy} onClick={beginWechat}><img src={wechat.logo} alt="" aria-hidden="true" /></button></>}
       {state.stage === "link" && <button className="text-button back" disabled={busy} onClick={() => invoke(() => flow.reset())}>取消关联，返回登录</button>}
     </>}
     {state.stage === "wechat-choice" && <><h1>欢迎使用 Delegate</h1><p className="muted">微信授权成功，请选择如何继续。此时尚未创建业务工作区。</p><div className="choices"><button disabled={busy} onClick={() => invoke(() => flow.chooseNew())}>我是新用户，创建账号</button><button className="secondary" disabled={busy} onClick={() => flow.chooseExisting()}>我已有账号，关联已有账号</button></div><p className="hint">已有账号请先验证原账号，避免创建重复工作区。</p></>}

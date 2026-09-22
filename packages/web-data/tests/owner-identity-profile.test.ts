@@ -89,7 +89,7 @@ describe('provider-specific binding actions',()=>{
     const profile=serializeIdentityProfile({identities:{wechat:{userId:'private-id',accessToken:'private-token'}}},'https://login.example.com/account',false,connectors);
     expect(profile.socialAccounts.map(a=>[a.provider,a.linked])).toEqual([['wechat',true],['github',false]]);
     expect(profile.socialAccounts[0]?.actions).toEqual({bind:'https://login.example.com/account/social/wechat-web',change:'https://login.example.com/account/social/wechat-web/change',remove:'https://login.example.com/account/social/wechat-web/remove'});
-    expect(profile.links?.social).toBe('/dashboard?view=settings&settingsSection=connections');
+    expect(profile.links?.social).toBe('/dashboard?view=settings&settingsSection=profile#account-social-heading');
     expect(JSON.stringify(profile)).not.toMatch(/private-id|private-token/);
   });
   it('does not offer mutations for read-only providers or an unavailable account center',()=>{

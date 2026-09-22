@@ -10,7 +10,7 @@ describe("settings section navigation", () => {
     expect(parseSettingsSection(undefined)).toBe("profile");
     expect(parseSettingsSection("developer")).toBe("profile");
     expect(parseSettingsSection("security")).toBe("profile");
-    expect(parseSettingsSection("connections")).toBe("connections");
+    expect(parseSettingsSection("connections")).toBe("profile");
     expect(parseSettingsSection("notifications")).toBe("notifications");
   });
 

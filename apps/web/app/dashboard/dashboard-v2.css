@@ -4955,3 +4955,7 @@ p.representative-memory-settings-error {
 .account-profile-upload-actions { display: flex; gap: 12px; flex-wrap: wrap; }
 .account-profile-upload-actions > a { min-height: 44px; }
 .account-profile-upload .settings-action-note { overflow-wrap: anywhere; margin: 12px 0 0; }
+
+.account-profile-social { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.account-profile-provider { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.account-profile-provider p { margin: 0; }

@@ -86,7 +86,6 @@ export function DashboardSettings({
   timeZones,
 }: DashboardSettingsProps) {
   const copy = settingsCopy[locale];
-  const activeSection = initialSection === "connections" ? "profile" : initialSection;
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const allowNextUnloadRef = useRef(false);
@@ -554,8 +553,8 @@ export function DashboardSettings({
           ] as const
         ).map(([section, label]) => (
           <a
-            aria-current={activeSection === section ? "page" : undefined}
-            className={activeSection === section ? "is-active" : undefined}
+            aria-current={initialSection === section ? "page" : undefined}
+            className={initialSection === section ? "is-active" : undefined}
             href={buildSettingsSectionHref({
               currentSearch: searchParams.toString(),
               locale,
@@ -632,8 +631,7 @@ export function DashboardSettings({
             headingId="settings-profile-heading"
             title={copy.profileCardTitle}
           >
-            <DashboardAccountProfile locale={locale} available={profileAvailable}
-              socialHref={buildSettingsSectionHref({ currentSearch: searchParams.toString(), locale, pathname, section: "connections" })}>
+            <DashboardAccountProfile locale={locale} available={profileAvailable}>
               <div className="settings-field-grid account-profile-name">
                 <label className="settings-field settings-field-wide">
                   <span>{copy.displayNameLabel}</span>
@@ -823,18 +821,6 @@ export function DashboardSettings({
             ) : (
               <p className="settings-action-note">{copy.sessionUnavailable}</p>
             )}
-          </SettingsCard>
-        </div>
-      ) : null}
-
-      {initialSection === "connections" ? (
-        <div className="settings-form-stack">
-          <div><a className="dashboard-v2-button-secondary" href={buildSettingsSectionHref({ currentSearch: searchParams.toString(), locale, pathname, section: "profile" })}>
-            {locale === "zh" ? "← 返回账户信息" : "← Back to account information"}
-          </a></div>
-          <SettingsCard eyebrow="Linked accounts" title={locale === "zh" ? "三方账号绑定" : "Third-party accounts"}
-            description={locale === "zh" ? "管理用于登录的三方账号。绑定、更换或解除绑定时，将进入安全验证流程。" : "Manage third-party sign-in accounts. Linking, changing, or unlinking an account uses the secure verification flow."}>
-            <DashboardAccountProfile locale={locale} mode="connections" />
           </SettingsCard>
         </div>
       ) : null}

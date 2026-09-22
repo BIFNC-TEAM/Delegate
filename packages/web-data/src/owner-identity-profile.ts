@@ -42,7 +42,7 @@ export function serializeIdentityProfile(user: Record<string, unknown>, manageme
       phone: new URL('/account/phone', center.origin).toString(),
       email: emailBindingAvailable ? new URL('/account/email', center.origin).toString() : null,
       password: new URL('/account/password', center.origin).toString(),
-      social: '/dashboard?view=settings&settingsSection=connections',
+      social: '/dashboard?view=settings&settingsSection=profile#account-social-heading',
     } : null,
   };
 }

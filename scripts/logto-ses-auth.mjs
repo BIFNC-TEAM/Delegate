@@ -3,19 +3,22 @@ import { pathToFileURL } from 'node:url';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createManagementClient } from './logto-phone-auth.mjs';
 import { connectorId, validateSesConfig } from '../deploy/logto/connectors/connector-tencent-ses/lib/ses.js';
-export function readSesConfig(env) {
+export function readSesConfig(env, expirationDuration = 300) {
   const required = ['TENCENT_SES_SECRET_ID','TENCENT_SES_SECRET_KEY','TENCENT_SES_FROM_EMAIL','TENCENT_SES_TEMPLATE_ID'];
   const missing = required.filter((key) => !env[key]?.trim());
   if (missing.length) throw new Error(`Missing SES settings: ${missing.join(', ')}`);
   return validateSesConfig({ secretId:env.TENCENT_SES_SECRET_ID.trim(), secretKey:env.TENCENT_SES_SECRET_KEY.trim(),
     region:env.TENCENT_SES_REGION?.trim() || 'ap-guangzhou', fromEmail:env.TENCENT_SES_FROM_EMAIL.trim(), templateId:Number(env.TENCENT_SES_TEMPLATE_ID),
-    codeVariable:env.TENCENT_SES_CODE_VARIABLE?.trim() || 'code', subject:env.TENCENT_SES_SUBJECT?.trim() || 'Delegate 邮箱验证码' });
+    expireMinutes: expirationDuration / 60, codeVariable:env.TENCENT_SES_CODE_VARIABLE?.trim() || 'code', subject:env.TENCENT_SES_SUBJECT?.trim() || 'Delegate 邮箱验证码' });
 }
 export async function configureSesAuth(env, { apply = false, backup } = {}, request = createManagementClient(env)) {
-  const config = readSesConfig(env);
-  const [connectors, factories, discovery] = await Promise.all([request('/api/connectors'),request('/api/connector-factories'),request('/oidc/.well-known/openid-configuration')]);
+  readSesConfig(env); // Validate private settings before accessing Logto.
+  const [connectors, factories, discovery, experience] = await Promise.all([request('/api/connectors'),request('/api/connector-factories'),request('/oidc/.well-known/openid-configuration'),request('/api/sign-in-exp')]);
   if (discovery?.issuer !== new URL('/oidc',env.LOGTO_ENDPOINT).toString()) throw new Error('SES target issuer mismatch.');
   if (!Array.isArray(connectors) || !Array.isArray(factories)) throw new Error('Invalid Logto connector response.');
+  const duration = experience?.verificationCodePolicy?.expirationDuration;
+  if (!Number.isSafeInteger(duration) || duration <= 0) throw new Error('Explicit Logto verification-code expiration policy is required.');
+  const config = readSesConfig(env, duration);
   const emails = connectors.filter((entry) => entry.type === 'Email');
   if (emails.length > 1 || emails.some((entry) => entry.connectorId !== connectorId)) throw new Error('An existing email provider requires an explicit migration; refusing to overwrite it.');
   const available = factories.some((entry) => entry.id === connectorId && entry.type === 'Email');

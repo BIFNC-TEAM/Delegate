@@ -36,6 +36,8 @@ export async function configureUnifiedAuth(env, { apply = false, mock = false } 
   const emailEnabled = connectors.some((c) => c.type === 'Email');
   const patch = unifiedPatch(current, emailEnabled);
   if (!connectors.some((c) => c.type === 'Email') && current.signIn?.methods?.some((m) => m.identifier === 'email')) throw new Error('An email connector is required to preserve existing email sign-in with optional registration passwords.');
+  const ses = connectors.find((c) => c.connectorId === 'delegate-tencent-ses' && c.type === 'Email');
+  if (ses && ses.config?.expireMinutes !== patch.verificationCodePolicy.expirationDuration / 60) throw new Error('SES template expiration does not match the planned verification policy; align the policy and rerun SES configuration first.');
   const account = { enabled: true, fields: { ...center.fields, phone: 'Edit', email: emailEnabled ? 'Edit' : 'ReadOnly', password: 'Edit', social: 'Edit', name: 'ReadOnly', avatar: 'Edit' } };
   if (!apply) return { mode: mock ? 'LOCAL MOCK 123456' : 'real', applied: false, phoneOneClick: true, optionalProfile: true, emailEnabled, usernameEnabled: false };
   if (mock) {

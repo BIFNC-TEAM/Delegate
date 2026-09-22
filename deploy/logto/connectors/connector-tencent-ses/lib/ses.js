@@ -10,6 +10,8 @@ export function validateSesConfig(config) {
     || !['ap-guangzhou', 'ap-hongkong'].includes(config.region) || typeof config.fromEmail !== 'string' || !emailPattern.test(config.fromEmail)
     || !Number.isSafeInteger(config.templateId) || config.templateId <= 0
     || typeof config.codeVariable !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,31}$/u.test(config.codeVariable)
+    || !Number.isFinite(config.expireMinutes) || config.expireMinutes <= 0 || config.expireMinutes > 60
+    || config.codeVariable === 'expireMinutes'
     || typeof config.subject !== 'string' || !config.subject.trim() || config.subject.length > 128 || /[\r\n]/u.test(config.subject)) throw new TencentSesError('InvalidConfiguration');
   return config;
 }
@@ -18,7 +20,7 @@ export function createSesRequest(data, config, timestamp = Math.floor(Date.now()
   if (!data || typeof data.to !== 'string' || data.to.length > 254 || !emailPattern.test(data.to) || !otpUsages.includes(data.type) || typeof data.payload?.code !== 'string' || !/^\d{6}$/u.test(data.payload.code)) throw new TencentSesError('InvalidVerificationMessage');
   const host = 'ses.tencentcloudapi.com';
   const body = JSON.stringify({ FromEmailAddress: config.fromEmail, Destination: [data.to], Subject: config.subject,
-    Template: { TemplateID: config.templateId, TemplateData: JSON.stringify({ [config.codeVariable]: data.payload.code }) } });
+    Template: { TemplateID: config.templateId, TemplateData: JSON.stringify({ [config.codeVariable]: data.payload.code, expireMinutes: config.expireMinutes }) } });
   const hash = (value) => createHash('sha256').update(value).digest('hex');
   const hmac = (key, value) => createHmac('sha256', key).update(value).digest();
   const date = new Date(timestamp * 1000).toISOString().slice(0, 10);

@@ -12,6 +12,17 @@ describe('unified auth configuration', () => {
     expect(unifiedPatch({},true).signIn.methods.map((m:any)=>m.identifier)).toEqual(['phone','email']);
     expect(unifiedPatch({},true).signIn.methods.find((m:any)=>m.identifier==='email')).toMatchObject({password:true,verificationCode:true});
   });
+  it('refuses an SES template expiration that differs from the login policy before mutations', async () => {
+    const request=vi.fn(async(path:string)=>{
+      if(path==='/api/sign-in-exp')return{signIn:{methods:[]},verificationCodePolicy:{expirationDuration:120}};
+      if(path==='/api/account-center')return{fields:{}};
+      if(path==='/api/connectors')return[{type:'Sms',connectorId:'delegate-tencent-sms-cn'},{type:'Email',connectorId:'delegate-tencent-ses',config:{expireMinutes:5}}];
+      if(path==='/api/custom-profile-fields')return[];
+      return{issuer:'http://127.0.0.1:3301/oidc'};
+    });
+    await expect(configureUnifiedAuth({LOGTO_ENDPOINT:'http://127.0.0.1:3301'},{apply:true},request)).rejects.toThrow('expiration does not match');
+    expect(request.mock.calls.every((call)=>call.length===1)).toBe(true);
+  });
   it('rejects a public fixed-code issuer before network calls', async () => {
     const request=vi.fn(); await expect(configureUnifiedAuth({LOGTO_ENDPOINT:'https://login.rag8.cn'},{mock:true,apply:true},request)).rejects.toThrow(); expect(request).not.toHaveBeenCalled();
   });

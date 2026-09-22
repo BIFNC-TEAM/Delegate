@@ -2,7 +2,7 @@ import { ConnectorError, ConnectorErrorCodes, ConnectorType, ConnectorConfigForm
 import { z } from 'zod';
 import { connectorId, sendSesVerification, TencentSesError } from './ses.js';
 const configGuard = z.object({ secretId: z.string().min(1), secretKey: z.string().min(1), region: z.enum(['ap-guangzhou','ap-hongkong']),
-  fromEmail: z.string().email(), templateId: z.number().int().positive(), codeVariable: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,31}$/u), subject: z.string().min(1).max(128) });
+  fromEmail: z.string().email(), templateId: z.number().int().positive(), codeVariable: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,31}$/u), expireMinutes: z.number().positive().max(60), subject: z.string().min(1).max(128) });
 export default async function createTencentSesConnector({ getConfig }) {
   return {
     type: ConnectorType.Email,
@@ -12,6 +12,7 @@ export default async function createTencentSesConnector({ getConfig }) {
       formItems:[
         ...['secretId','secretKey','region','fromEmail','codeVariable','subject'].map((key)=>({key,label:key,type:ConnectorConfigFormItemType.Text,required:true})),
         {key:'templateId',label:'Template ID',type:ConnectorConfigFormItemType.Number,required:true},
+        {key:'expireMinutes',label:'Verification policy expiration (minutes)',type:ConnectorConfigFormItemType.Number,required:true},
       ],
     },
     configGuard,

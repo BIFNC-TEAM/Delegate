@@ -7,7 +7,7 @@ import {AccountCenters,SignInExperiences} from '/etc/logto/packages/schemas/lib/
 import {unifiedPatch} from '../logto-unified-auth.mjs';
 const directory='/etc/logto/packages/core/connectors/@delegate-connector-tencent-ses';
 const factory=await loadConnector(directory,false);
-const config={secretId:'synthetic-id',secretKey:'synthetic-key',region:'ap-guangzhou',fromEmail:'noreply@example.com',templateId:1001,codeVariable:'code',subject:'Delegate verification'};
+const config={secretId:'synthetic-id',secretKey:'synthetic-key',region:'ap-guangzhou',fromEmail:'noreply@example.com',templateId:1001,codeVariable:'code',expireMinutes:5,subject:'Delegate verification'};
 const connector=await factory({getConfig:async()=>config});
 test('pinned Logto loads and validates Tencent SES metadata/config',async()=>{
  validateConnectorModule(connector);assert.equal(connector.type,'Email');connector.configGuard.parse(config);
@@ -18,7 +18,7 @@ test('native connector forwards email binding OTP to SES and propagates failures
  try{
   globalThis.fetch=async(url,init)=>{sent={url,body:JSON.parse(init.body)};return Response.json({Response:{MessageId:'synthetic-message'}});};
   await connector.sendMessage({to:'person@example.com',type:'BindNewIdentifier',payload:{code:'123456'}});
-  assert.equal(sent.url,'https://ses.tencentcloudapi.com/');assert.equal(sent.body.Template.TemplateData,'{"code":"123456"}');
+  assert.equal(sent.url,'https://ses.tencentcloudapi.com/');assert.equal(sent.body.Template.TemplateData,'{"code":"123456","expireMinutes":5}');
   globalThis.fetch=async()=>Response.json({Response:{Error:{Code:'FailedOperation.TemplateStatusNotApproved'}}});
   await assert.rejects(connector.sendMessage({to:'person@example.com',type:'BindNewIdentifier',payload:{code:'123456'}}),/TemplateStatusNotApproved/u);
  }finally{globalThis.fetch=original;}

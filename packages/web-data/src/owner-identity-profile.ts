@@ -1,5 +1,5 @@
 import { AvatarUploadError, MAX_AVATAR_FILE_BYTES, managedAvatarObjectKey, storeOwnerAvatar, deleteOwnerAvatarObject } from "./owner-avatar-storage";
-import { createLogtoManagementClient, readLogtoManagementConfig } from "./logto-management";
+import { createLogtoManagementClient, readLogtoManagementConfig, type AccountSocialConnector } from "./logto-management";
 import { prisma } from "./prisma";
 import { readLogtoAccountCenterUrl } from "./owner-settings";
 
@@ -10,6 +10,7 @@ export type OwnerIdentityProfile = {
   email: string | null;
   hasPassword: boolean;
   wechatLinked: boolean;
+  socialAccounts: { provider: string; name: AccountSocialConnector['name']; linked: boolean; actions: { bind: string; change: string; remove: string } | null }[];
   links: { phone: string; email: string | null; password: string; social: string } | null;
 };
 export type IdentityProfilePrincipal = { ownerId: string; issuer: string; subject: string };
@@ -20,7 +21,7 @@ function safeAvatar(value: unknown): string | null {
   if (typeof value !== "string" || !value) return null;
   try { const url = new URL(value); return (url.protocol === "https:" || managedAvatarObjectKey(value)) && !url.username && !url.password ? url.toString() : null; } catch { return null; }
 }
-export function serializeIdentityProfile(user: Record<string, unknown>, managementUrl: string | null, emailBindingAvailable = false): OwnerIdentityProfile {
+export function serializeIdentityProfile(user: Record<string, unknown>, managementUrl: string | null, emailBindingAvailable = false, connectors: AccountSocialConnector[] = []): OwnerIdentityProfile {
   const identities = user.identities && typeof user.identities === "object" && !Array.isArray(user.identities) ? user.identities as Record<string, unknown> : {};
   const center = managementUrl ? new URL(managementUrl) : null;
   return {
@@ -29,11 +30,19 @@ export function serializeIdentityProfile(user: Record<string, unknown>, manageme
     email: typeof user.primaryEmail === "string" && user.primaryEmail ? user.primaryEmail : null,
     hasPassword: user.hasPassword === true,
     wechatLinked: Boolean(identities.wechat),
+    socialAccounts: connectors.map((connector) => ({
+      provider: connector.target, name: connector.name, linked: Boolean(identities[connector.target]),
+      actions: center && connector.editable ? {
+        bind: new URL(`/account/social/${encodeURIComponent(connector.id)}`, center.origin).toString(),
+        change: new URL(`/account/social/${encodeURIComponent(connector.id)}/change`, center.origin).toString(),
+        remove: new URL(`/account/social/${encodeURIComponent(connector.id)}/remove`, center.origin).toString(),
+      } : null,
+    })),
     links: center ? {
       phone: new URL('/account/phone', center.origin).toString(),
       email: emailBindingAvailable ? new URL('/account/email', center.origin).toString() : null,
       password: new URL('/account/password', center.origin).toString(),
-      social: new URL('/account/security', center.origin).toString(),
+      social: '/dashboard?view=settings&settingsSection=profile#account-social-heading',
     } : null,
   };
 }
@@ -48,21 +57,21 @@ async function clientFor(principal: IdentityProfilePrincipal) {
 }
 export async function getOwnerIdentityProfile(principal: IdentityProfilePrincipal) {
   const client = await clientFor(principal);
-  const [user, emailBindingAvailable] = await Promise.all([client.getUserProfile(principal.subject), client.getEmailBindingAvailable()]);
+  const [user, capabilities] = await Promise.all([client.getUserProfile(principal.subject), client.getAccountBindingCapabilities()]);
   if (user.isSuspended === true) throw new IdentityProfileError(403, "Account is unavailable.");
-  return serializeIdentityProfile(user, readLogtoAccountCenterUrl(), emailBindingAvailable);
+  return serializeIdentityProfile(user, readLogtoAccountCenterUrl(), capabilities.emailEnabled, capabilities.socialConnectors);
 }
 export async function updateOwnerAvatar(principal: IdentityProfilePrincipal, avatar: unknown) {
   if (typeof avatar !== 'string' || avatar.length > 2048 || (avatar !== '' && !safeAvatar(avatar))) throw new IdentityProfileError(400, "Use a valid HTTPS avatar URL (up to 2048 characters).");
   const client = await clientFor(principal);
-  const [current, emailBindingAvailable] = await Promise.all([client.getUserProfile(principal.subject), client.getEmailBindingAvailable()]);
+  const [current, capabilities] = await Promise.all([client.getUserProfile(principal.subject), client.getAccountBindingCapabilities()]);
   if (current.isSuspended === true) throw new IdentityProfileError(403, "Account is unavailable.");
   await client.updateUserAvatar(principal.subject, avatar);
   const saved = await client.getUserProfile(principal.subject);
   if ((saved.avatar || '') !== avatar) throw new IdentityProfileError(502, "Avatar update could not be verified.");
   const oldKey = avatar === '' && typeof current.avatar === 'string' ? managedAvatarObjectKey(current.avatar, principal.ownerId) : null;
   const cleanupPending = oldKey ? !await cleanupAvatar(oldKey) : false;
-  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl(), emailBindingAvailable), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
+  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl(), capabilities.emailEnabled, capabilities.socialConnectors), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
 }
 
 async function cleanupAvatar(key: string): Promise<boolean> {
@@ -76,7 +85,7 @@ export async function uploadOwnerAvatar(principal: IdentityProfilePrincipal, inp
   const bytes = Buffer.from(input.base64, "base64");
   if (bytes.toString("base64") !== input.base64) throw new IdentityProfileError(400, "Invalid avatar encoding.");
   const client = await clientFor(principal);
-  const [current, emailBindingAvailable] = await Promise.all([client.getUserProfile(principal.subject), client.getEmailBindingAvailable()]);
+  const [current, capabilities] = await Promise.all([client.getUserProfile(principal.subject), client.getAccountBindingCapabilities()]);
   if (current.isSuspended === true) throw new IdentityProfileError(403, "Account is unavailable.");
   let stored;
   try { stored = await storeOwnerAvatar(principal.ownerId, bytes); }
@@ -100,5 +109,5 @@ export async function uploadOwnerAvatar(principal: IdentityProfilePrincipal, inp
   }
   const oldKey = typeof current.avatar === "string" ? managedAvatarObjectKey(current.avatar, principal.ownerId) : null;
   const cleanupPending = oldKey && oldKey !== stored.key ? !await cleanupAvatar(oldKey) : false;
-  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl(), emailBindingAvailable), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
+  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl(), capabilities.emailEnabled, capabilities.socialConnectors), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
 }

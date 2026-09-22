@@ -2,8 +2,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { OwnerIdentityProfile } from "@delegate/web-data/owner-identity-profile";
 import type { Locale } from "@delegate/web-ui";
+import { buildAccountCenterHref } from "./settings-section-navigation";
 
-export function DashboardAccountProfile({ locale, available = true, children }: { locale: Locale; available?: boolean; children: ReactNode }) {
+export function DashboardAccountProfile({ locale, available = true, children }: { locale: Locale; available?: boolean; children?: ReactNode }) {
   const zh = locale === 'zh';
   const [profile, setProfile] = useState<OwnerIdentityProfile | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -56,7 +57,12 @@ export function DashboardAccountProfile({ locale, available = true, children }: 
     } catch (e) { setError(e instanceof Error ? e.message : (zh ? '网络请求失败' : 'Network request failed')); }
     finally { setSaving(false); }
   };
-  const link = (href: string | undefined, label: string) => href ? <a className="dashboard-v2-button-secondary" href={href} target="_blank" rel="noreferrer">{label} ↗</a> : <span className="settings-action-note">{zh ? '管理入口未配置' : 'Management unavailable'}</span>;
+  const link = (href: string | undefined, label: string) => {
+    const destination = buildAccountCenterHref(href, window.location.origin, locale);
+    return destination ? <a className="dashboard-v2-button-secondary" href={destination}>{label}</a> : <span className="settings-action-note">{zh ? '管理入口未配置' : 'Management unavailable'}</span>;
+  };
+  const accounts = profile?.socialAccounts ?? [];
+  const providerName = (account: OwnerIdentityProfile['socialAccounts'][number]) => zh ? account.name['zh-CN'] || account.name.en : account.name.en;
   if (!available) return <>{children}</>;
   return <div className="account-profile-content">
     {error && <p role="alert" className="settings-field-error">{error} <button type="button" onClick={() => { void load(); }}>{zh ? '重试' : 'Retry'}</button></p>}
@@ -79,9 +85,17 @@ export function DashboardAccountProfile({ locale, available = true, children }: 
     {children}
     {profile && <>
       <div className="account-profile-method"><div><strong>{zh ? '绑定手机号' : 'Phone'}</strong><p>{profile.phone ?? (zh ? '尚未绑定' : 'Not linked')}</p></div>{link(profile.links?.phone, zh ? (profile.phone ? '更换手机号' : '绑定手机号') : 'Manage phone')}</div>
-      <div className="account-profile-method"><div><strong>{zh ? '登录密码' : 'Password'}</strong><p>{profile.hasPassword ? (zh ? '已设置' : 'Set') : (zh ? '尚未设置，可继续使用微信或验证码登录' : 'Not set; social or code sign-in remains available')}</p></div>{link(profile.links?.password, zh ? (profile.hasPassword ? '修改密码' : '设置密码') : 'Manage password')}</div>
-      <div className="account-profile-method"><div><strong>{zh ? '微信账号' : 'WeChat'}</strong><p>{profile.wechatLinked ? (zh ? '已绑定' : 'Linked') : (zh ? '尚未绑定' : 'Not linked')}</p></div>{link(profile.links?.social, zh ? '管理第三方账号' : 'Manage linked accounts')}</div>
       <div className="account-profile-method"><div><strong>{zh ? '绑定邮箱' : 'Email'}</strong><p>{profile.email ?? (zh ? '尚未绑定' : 'Not linked')}</p></div>{profile.links?.email ? link(profile.links.email, zh ? (profile.email ? '更换邮箱' : '绑定邮箱') : 'Manage email') : <span className="settings-action-note">{zh ? '邮箱验证服务暂未启用' : 'Email verification is not enabled yet'}</span>}</div>
+      <div className="account-profile-method"><div><strong>{zh ? '登录密码' : 'Password'}</strong><p>{profile.hasPassword ? (zh ? '已设置' : 'Set') : (zh ? '尚未设置，可继续使用微信或验证码登录' : 'Not set; social or code sign-in remains available')}</p></div>{link(profile.links?.password, zh ? (profile.hasPassword ? '修改密码' : '设置密码') : 'Manage password')}</div>
+      <div className="account-profile-method account-profile-social" role="group" aria-labelledby="account-social-heading">
+        <strong id="account-social-heading">{zh ? '三方账号绑定' : 'Third-party accounts'}</strong>
+        {accounts.length ? accounts.map((account) => <div className="account-profile-provider" key={account.provider}>
+          <p>{providerName(account)} · {account.linked ? (zh ? '已绑定' : 'Linked') : (zh ? '尚未绑定' : 'Not linked')}</p>
+          <div className="account-profile-upload-actions">
+            {account.actions ? account.linked ? <>{link(account.actions.change, zh ? '更换绑定' : 'Change account')}{link(account.actions.remove, zh ? '解除绑定' : 'Unlink')}</> : link(account.actions.bind, zh ? '绑定账号' : 'Link account') : <span className="settings-action-note">{zh ? '当前仅可查看' : 'Read only'}</span>}
+          </div>
+        </div>) : <p>{zh ? '暂无可用服务' : 'No providers available'}</p>}
+      </div>
     </>}
   </div>;
 }

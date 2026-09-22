@@ -134,3 +134,32 @@ describe('verified email binding capability', () => {
     await expect(createLogtoManagementClient(config,async()=>Response.json({})).getEmailBindingAvailable()).rejects.toThrow('Invalid Logto account settings');
   });
 });
+
+
+describe('third-party account capabilities', () => {
+  const config={endpoint:'https://auth.example.com',clientId:'app',clientSecret:'secret',resource:'https://default.logto.app/api',requestTimeoutMs:15000,pageSize:100,maxPages:100};
+  const connectors=[
+    {id:'wechat-native',target:'wechat',platform:'Native',name:{en:'WeChat'}},
+    {id:'wechat-universal',target:'wechat',platform:null,name:{en:'WeChat'}},
+    {id:'wechat-web',target:'wechat',platform:'Web',name:{en:'WeChat','zh-CN':'微信'},privateConfig:'must-not-return'},
+    {id:'github-web',target:'github',platform:'Web',name:{en:'GitHub'}},
+  ];
+  it.each(['Edit','ReadOnly'])('lists available providers, preferring Web and respecting %s controls',async(control)=>{
+    const request=vi.fn(async(url:string)=>Response.json(url.endsWith('sign-in-exp')?{signIn:{methods:[]},socialConnectors:connectors}:{enabled:true,fields:{social:control}}));
+    const result=await createLogtoManagementClient(config,request).getAccountBindingCapabilities();
+    expect(result.socialConnectors.map(c=>c.id)).toEqual(['wechat-web','github-web']);
+    expect(result.socialConnectors.every(c=>c.editable===(control==='Edit'))).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('must-not-return');
+  });
+  it.each([{enabled:false,fields:{social:'Edit'}},{enabled:true,fields:{social:'Off'}}])('hides disabled account providers',async(center)=>{
+    const request=vi.fn(async(url:string)=>Response.json(url.endsWith('sign-in-exp')?{signIn:{methods:[]},socialConnectors:connectors}:center));
+    expect((await createLogtoManagementClient(config,request).getAccountBindingCapabilities()).socialConnectors).toEqual([]);
+  });
+  it.each([{},[{id:'../bad',target:'wechat',name:{en:'WeChat'}}],[{id:'valid',target:'wechat',name:{}}]])('rejects malformed connector configuration',async(socialConnectors)=>{
+    const request=vi.fn(async(url:string)=>Response.json(url.endsWith('sign-in-exp')?{signIn:{methods:[]},socialConnectors}:{enabled:true,fields:{social:'Edit'}}));
+    await expect(createLogtoManagementClient(config,request).getAccountBindingCapabilities()).rejects.toThrow('Invalid Logto social');
+  });
+  it('reports unavailable provider settings without inventing binding status',async()=>{
+    await expect(createLogtoManagementClient(config,async()=>new Response('',{status:503})).getAccountBindingCapabilities()).rejects.toThrow('503');
+  });
+});

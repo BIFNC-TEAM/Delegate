@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ link: vi.fn(), get: vi.fn(), update: vi.fn(), config: vi.fn(), store: vi.fn(), remove: vi.fn(), managedKey: vi.fn(), emailAvailable: vi.fn() }));
 vi.mock('../src/prisma', () => ({ prisma: { ownerIdentityLink: { findFirst: mocks.link } } }));
-vi.mock('../src/logto-management', () => ({ readLogtoManagementConfig: mocks.config, createLogtoManagementClient: () => ({ getUserProfile: mocks.get, updateUserAvatar: mocks.update, getEmailBindingAvailable: mocks.emailAvailable }) }));
+vi.mock('../src/logto-management', () => ({ readLogtoManagementConfig: mocks.config, createLogtoManagementClient: () => ({ getUserProfile: mocks.get, updateUserAvatar: mocks.update, getAccountBindingCapabilities: async () => ({emailEnabled: await mocks.emailAvailable(),socialConnectors: []}) }) }));
 vi.mock('../src/owner-settings', () => ({ readLogtoAccountCenterUrl: () => 'https://login.example.com/account' }));
 vi.mock('../src/owner-avatar-storage', () => ({ MAX_AVATAR_FILE_BYTES: 5 * 1024 * 1024, storeOwnerAvatar: mocks.store, deleteOwnerAvatarObject: mocks.remove, managedAvatarObjectKey: mocks.managedKey, AvatarUploadError: class extends Error { constructor(readonly status: number, message: string) { super(message); } } }));
 import { getOwnerIdentityProfile, updateOwnerAvatar, uploadOwnerAvatar, serializeIdentityProfile } from '../src/owner-identity-profile';
@@ -79,5 +79,21 @@ describe('avatar upload and profile commit', () => {
   });
   it('rejects malformed encoding before any storage operation',async()=>{
     await expect(uploadOwnerAvatar(principal,{base64:'!not-base64'})).rejects.toMatchObject({status:400});expect(mocks.store).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('provider-specific binding actions',()=>{
+  const connectors=[{id:'wechat-web',target:'wechat',name:{en:'WeChat','zh-CN':'微信'},editable:true},{id:'github-web',target:'github',name:{en:'GitHub'},editable:true}];
+  it('returns independent provider status and exact native verified-flow routes',()=>{
+    const profile=serializeIdentityProfile({identities:{wechat:{userId:'private-id',accessToken:'private-token'}}},'https://login.example.com/account',false,connectors);
+    expect(profile.socialAccounts.map(a=>[a.provider,a.linked])).toEqual([['wechat',true],['github',false]]);
+    expect(profile.socialAccounts[0]?.actions).toEqual({bind:'https://login.example.com/account/social/wechat-web',change:'https://login.example.com/account/social/wechat-web/change',remove:'https://login.example.com/account/social/wechat-web/remove'});
+    expect(profile.links?.social).toBe('/dashboard?view=settings&settingsSection=profile#account-social-heading');
+    expect(JSON.stringify(profile)).not.toMatch(/private-id|private-token/);
+  });
+  it('does not offer mutations for read-only providers or an unavailable account center',()=>{
+    expect(serializeIdentityProfile({},'https://login.example.com/account',false,connectors.map(c=>({...c,editable:false}))).socialAccounts.every(a=>a.actions===null)).toBe(true);
+    expect(serializeIdentityProfile({},null,false,connectors).socialAccounts.every(a=>a.actions===null)).toBe(true);
   });
 });

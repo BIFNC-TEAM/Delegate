@@ -14,6 +14,13 @@ export type LogtoManagementUser = {
   updatedAt: number | null;
 };
 
+export type AccountSocialConnector = {
+  id: string;
+  target: string;
+  name: { en: string; "zh-CN"?: string };
+  editable: boolean;
+};
+
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export function readLogtoManagementConfig(
@@ -130,7 +137,7 @@ export function createLogtoManagementClient(
     return payload;
   };
 
-  const getEmailBindingAvailable = async () => {
+  const getAccountBindingCapabilities = async () => {
     const read = async (path: string) => {
       const response = await fetchImpl(new URL(path, config.endpoint).toString(), { redirect: "error", signal: AbortSignal.timeout(config.requestTimeoutMs) });
       if (!response.ok) throw new Error(`Logto account settings request failed (${response.status}).`);
@@ -138,12 +145,29 @@ export function createLogtoManagementClient(
     };
     const [experience, center] = await Promise.all([read("/api/.well-known/sign-in-exp"), read("/api/.well-known/account-center")]);
     if (!Array.isArray(experience?.signIn?.methods) || !isRecord(center?.fields)) throw new Error("Invalid Logto account settings response.");
-    return center.enabled === true && center.fields.email === "Edit"
+    const emailEnabled = center.enabled === true && center.fields.email === "Edit"
       && experience.signIn.methods.some((method: unknown) => isRecord(method) && method.identifier === "email" && method.password === true);
+    if (experience.socialConnectors !== undefined && !Array.isArray(experience.socialConnectors)) throw new Error("Invalid Logto social connectors response.");
+    const social = new Map<string, AccountSocialConnector>();
+    if (center.enabled === true && ['Edit', 'ReadOnly'].includes(center.fields.social)) {
+      for (const item of experience.socialConnectors ?? []) {
+        if (!isRecord(item) || typeof item.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(item.id)
+          || typeof item.target !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/u.test(item.target) || !isRecord(item.name)
+          || typeof item.name.en !== 'string' || !item.name.en.trim()) throw new Error("Invalid Logto social connector response.");
+        if (item.platform === 'Native') continue;
+        // Match Logto Account Center: one provider per target, preferring Web.
+        if (item.platform === 'Web' || !social.has(item.target)) social.set(item.target, {
+          id: item.id, target: item.target, editable: center.fields.social === 'Edit',
+          name: { en: item.name.en.slice(0, 80), ...(typeof item.name['zh-CN'] === 'string' ? { 'zh-CN': item.name['zh-CN'].slice(0, 80) } : {}) },
+        });
+      }
+    }
+    return { emailEnabled, socialConnectors: [...social.values()] };
   };
 
   return {
-    getEmailBindingAvailable,
+    getAccountBindingCapabilities,
+    getEmailBindingAvailable: async () => (await getAccountBindingCapabilities()).emailEnabled,
     getUserProfile: (subject: string) => userRequest(subject),
     updateUserAvatar: (subject: string, avatar: string) => userRequest(subject, "PATCH", { avatar }),
     async listAllUsers(): Promise<LogtoManagementUser[]> {

@@ -1,5 +1,6 @@
 "use client";
 
+import { DashboardAccountProfile } from "./dashboard-account-profile";
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
@@ -548,7 +549,6 @@ export function DashboardSettings({
         {(
           [
             ["profile", copy.profileTab],
-            ["security", copy.securityTab],
             ["notifications", copy.notificationsTab],
           ] as const
         ).map(([section, label]) => (
@@ -631,50 +631,52 @@ export function DashboardSettings({
             headingId="settings-profile-heading"
             title={copy.profileCardTitle}
           >
-            <div className="settings-field-grid">
-              <label className="settings-field settings-field-wide">
-                <span>{copy.displayNameLabel}</span>
-                <input
-                  aria-describedby={
-                    effectiveProfileErrors.displayName
-                      ? "settings-display-name-error"
-                      : "settings-display-name-help"
-                  }
-                  aria-invalid={
-                    effectiveProfileErrors.displayName ? true : undefined
-                  }
-                  disabled={
-                    !profileAvailable ||
-                    savingSection === "profile" ||
-                    navigationPending
-                  }
-                  maxLength={80}
-                  onChange={(event) => {
-                    setProfileDraft((current) => ({
-                      ...current,
-                      displayName: event.target.value,
-                    }));
-                    setProfileFieldErrors((current) => ({
-                      ...current,
-                      displayName: "",
-                    }));
-                  }}
-                  value={profileDraft.displayName}
-                />
-                {effectiveProfileErrors.displayName ? (
-                  <small
-                    className="settings-field-error"
-                    id="settings-display-name-error"
-                  >
-                    {effectiveProfileErrors.displayName}
-                  </small>
-                ) : (
-                  <small id="settings-display-name-help">
-                    {copy.displayNameHelp}
-                  </small>
-                )}
-              </label>
-            </div>
+            <DashboardAccountProfile locale={locale} available={profileAvailable}>
+              <div className="settings-field-grid account-profile-name">
+                <label className="settings-field settings-field-wide">
+                  <span>{copy.displayNameLabel}</span>
+                  <input
+                    aria-describedby={
+                      effectiveProfileErrors.displayName
+                        ? "settings-display-name-error"
+                        : "settings-display-name-help"
+                    }
+                    aria-invalid={
+                      effectiveProfileErrors.displayName ? true : undefined
+                    }
+                    disabled={
+                      !profileAvailable ||
+                      savingSection === "profile" ||
+                      navigationPending
+                    }
+                    maxLength={80}
+                    onChange={(event) => {
+                      setProfileDraft((current) => ({
+                        ...current,
+                        displayName: event.target.value,
+                      }));
+                      setProfileFieldErrors((current) => ({
+                        ...current,
+                        displayName: "",
+                      }));
+                    }}
+                    value={profileDraft.displayName}
+                  />
+                  {effectiveProfileErrors.displayName ? (
+                    <small
+                      className="settings-field-error"
+                      id="settings-display-name-error"
+                    >
+                      {effectiveProfileErrors.displayName}
+                    </small>
+                  ) : (
+                    <small id="settings-display-name-help">
+                      {copy.displayNameHelp}
+                    </small>
+                  )}
+                </label>
+              </div>
+            </DashboardAccountProfile>
           </SettingsCard>
 
           <SettingsCard
@@ -800,127 +802,25 @@ export function DashboardSettings({
         </form>
       ) : null}
 
-      {initialSection === "security" ? (
-        <div
-          aria-labelledby="settings-security-heading"
-          className="settings-form-stack"
-        >
-          <SettingsCard
-            description={copy.securityCardDescription}
-            eyebrow={copy.securityEyebrow}
-            headingId="settings-security-heading"
-            title={copy.securityCardTitle}
-          >
-            <dl className="settings-fact-list">
-              <SettingsFact
-                label={copy.providerLabel}
-                value={
-                  snapshot.security.provider === "logto"
-                    ? "Logto"
-                    : copy.notConnected
-                }
-              />
-              <SettingsFact
-                label={copy.connectionLabel}
-                tone={
-                  snapshot.security.connectionStatus === "connected"
-                    ? "safe"
-                    : "neutral"
-                }
-                value={
-                  snapshot.security.connectionStatus === "connected"
-                    ? copy.connected
-                    : copy.unavailable
-                }
-              />
-              <SettingsFact
-                detail={verificationLabel(
-                  snapshot.security.emailVerification,
-                  copy,
-                )}
-                label={copy.emailLabel}
-                tone={
-                  snapshot.security.emailVerification === "verified"
-                    ? "safe"
-                    : "neutral"
-                }
-                value={snapshot.security.email ?? copy.notProvided}
-              />
-              <SettingsFact
-                detail={verificationLabel(
-                  snapshot.security.phoneVerification,
-                  copy,
-                )}
-                label={copy.phoneLabel}
-                tone={
-                  snapshot.security.phoneVerification === "verified"
-                    ? "safe"
-                    : "neutral"
-                }
-                value={snapshot.security.phone ?? copy.notProvided}
-              />
-              <SettingsFact
-                label={copy.identityVerifiedAtLabel}
-                value={
-                  <SettingsTimestamp
-                    fallback={copy.notAvailable}
-                    locale={locale}
-                    timeZone={snapshot.profile?.timezone ?? "UTC"}
-                    value={snapshot.security.identityVerifiedAt}
-                  />
-                }
-              />
-            </dl>
-
-            <div className="settings-card-actions">
-              {snapshot.security.managementUrl ? (
-                <a
-                  className="dashboard-v2-button-primary"
-                  href={snapshot.security.managementUrl}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  {copy.manageLoginSecurity}
-                  <span aria-hidden="true">↗</span>
-                  <span className="sr-only">{copy.opensNewWindow}</span>
-                </a>
-              ) : (
-                <p className="settings-action-note">
-                  {copy.managementUnavailable}
-                </p>
-              )}
-            </div>
-          </SettingsCard>
-
+      {initialSection === "profile" ? (
+        <div className="settings-form-stack settings-sign-out">
           <SettingsCard
             description={copy.sessionCardDescription}
             eyebrow={copy.sessionEyebrow}
+            headingId="settings-sign-out-heading"
             title={copy.sessionCardTitle}
           >
-            <div className="settings-session-note">
-              <strong>
-                {logoutHref
-                  ? copy.currentBrowserSession
-                  : copy.sessionUnavailable}
-              </strong>
-              <p>
-                {logoutHref
-                  ? copy.currentSessionExplanation
-                  : copy.sessionUnavailableExplanation}
-              </p>
-            </div>
             {logoutHref ? (
               <div className="settings-card-actions">
                 <form action={logoutHref} method="post">
-                  <button
-                    className="dashboard-v2-button-secondary"
-                    type="submit"
-                  >
+                  <button className="dashboard-v2-button-secondary" type="submit">
                     {copy.signOutCurrentSession}
                   </button>
                 </form>
               </div>
-            ) : null}
+            ) : (
+              <p className="settings-action-note">{copy.sessionUnavailable}</p>
+            )}
           </SettingsCard>
         </div>
       ) : null}
@@ -1106,28 +1006,6 @@ function SettingsFormActions({
   );
 }
 
-function SettingsFact({
-  detail,
-  label,
-  tone = "neutral",
-  value,
-}: {
-  detail?: string;
-  label: string;
-  tone?: "safe" | "neutral";
-  value: ReactNode;
-}) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>
-        <strong>{value}</strong>
-        {detail ? <small className={`is-${tone}`}>{detail}</small> : null}
-      </dd>
-    </div>
-  );
-}
-
 function NotificationRule({
   alwaysOn = false,
   checked,
@@ -1300,38 +1178,6 @@ function validateProfileDraft(
   return errors;
 }
 
-function verificationLabel(
-  value: "verified" | "unknown",
-  copy: (typeof settingsCopy)[Locale],
-) {
-  return value === "verified" ? copy.verified : copy.verificationUnknown;
-}
-
-function SettingsTimestamp({
-  fallback,
-  locale,
-  timeZone,
-  value,
-}: {
-  fallback: string;
-  locale: Locale;
-  timeZone: string;
-  value: string | null;
-}) {
-  const renderKey = `${locale}\u0000${timeZone}\u0000${value ?? ""}`;
-  const [formatted, setFormatted] = useState<{
-    key: string;
-    value: string;
-  } | null>(null);
-  useEffect(() => {
-    setFormatted({
-      key: renderKey,
-      value: formatSettingsTimestamp(value, locale, timeZone, fallback),
-    });
-  }, [fallback, locale, renderKey, timeZone, value]);
-  return formatted?.key === renderKey ? formatted.value : fallback;
-}
-
 function localizeSettingsFieldErrors(
   fieldErrors: Record<string, string>,
   copy: (typeof settingsCopy)[Locale],
@@ -1378,43 +1224,19 @@ function operationalCount(
     : copy.countUnavailable;
 }
 
-function formatSettingsTimestamp(
-  value: string | null,
-  locale: Locale,
-  timeZone: string,
-  fallback: string,
-) {
-  if (!value) return fallback;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return fallback;
-  try {
-    return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      timeZone,
-    }).format(parsed);
-  } catch {
-    return fallback;
-  }
-}
-
 const settingsCopy = {
   zh: {
-    pageTitle: "管理你的账户资料、安全入口和 Dashboard 提醒。",
+    pageTitle: "管理你的账户信息、偏好和 Dashboard 提醒。",
     pageDescription:
       "这里的设置属于当前 Owner，不会改动任何对外代理的身份、知识、价格或发布版本。",
     sectionNavigationLabel: "设置分区",
     profileTab: "资料与偏好",
-    securityTab: "登录与安全",
     notificationsTab: "提醒",
-    profileEyebrow: "Owner profile",
-    profileCardTitle: "账户资料",
+    profileEyebrow: "Account information",
+    profileCardTitle: "账户信息",
     profileCardDescription:
-      "显示名称用于 Owner 控制面和需要明确操作者身份的业务记录。",
-    displayNameLabel: "显示名称",
+      "管理你的头像、昵称和登录方式。修改手机号、邮箱、密码或第三方账号时，需要验证身份。",
+    displayNameLabel: "昵称",
     displayNameHelp:
       "最多 80 个字符；不会修改对外代理名称或公开页面上的 Owner 署名。",
     displayNameRequired: "请输入显示名称。",
@@ -1433,37 +1255,11 @@ const settingsCopy = {
     languageInvalid: "请选择支持的界面语言。",
     profileSavedTitle: "资料已保存",
     profileSavedMessage: "Owner 资料与偏好已经更新。",
-    securityEyebrow: "Sign-in identity",
-    securityCardTitle: "登录身份",
-    securityCardDescription:
-      "Delegate 只显示真实的 Logto 连接信息；密码、通行密钥和 MFA 由身份提供商管理。",
-    providerLabel: "身份提供商",
-    connectionLabel: "连接状态",
-    emailLabel: "登录邮箱",
-    phoneLabel: "登录手机号",
-    identityVerifiedAtLabel: "身份最近验证",
-    connected: "已连接",
-    unavailable: "不可用",
-    notConnected: "未连接",
-    notProvided: "未提供",
-    notAvailable: "暂无",
-    verified: "已验证",
-    verificationUnknown: "验证状态未知",
-    manageLoginSecurity: "管理登录安全",
-    managementUnavailable:
-      "当前部署未配置 Logto 自助安全入口。Delegate 不会提供无效的管理按钮。",
-    opensNewWindow: "在新窗口打开",
-    sessionEyebrow: "Current session",
-    sessionCardTitle: "当前浏览器会话",
-    sessionCardDescription:
-      "当前版本只支持退出这个浏览器会话，不会虚构设备列表或其他会话的撤销能力。",
-    currentBrowserSession: "已签名的 Owner 会话",
-    currentSessionExplanation:
-      "Delegate 使用受保护的浏览器 Cookie 保持登录。其他设备和 MFA 状态仍由 Logto 管理。",
-    sessionUnavailable: "当前没有可验证的 Owner 会话",
-    sessionUnavailableExplanation:
-      "此环境可能启用了本地认证绕过。Delegate 不会把它描述成已签名的 Logto 会话。",
-    signOutCurrentSession: "退出当前会话",
+    sessionEyebrow: "Sign out",
+    sessionCardTitle: "退出登录",
+    sessionCardDescription: "退出当前浏览器的登录状态，下次访问工作台时需要重新登录。",
+    sessionUnavailable: "当前没有可退出的登录会话。",
+    signOutCurrentSession: "退出登录",
     notificationsEyebrow: "Dashboard navigation",
     notificationsCardTitle: "运营提醒",
     notificationsCardDescription:
@@ -1515,17 +1311,16 @@ const settingsCopy = {
       "当前环境无法读取或写入 Owner 设置。所有可写设置控件已禁用，页面不会把临时值伪装成已保存状态。",
   },
   en: {
-    pageTitle: "Manage your account, security entry point, and Dashboard alerts.",
+    pageTitle: "Manage your account, preferences, and Dashboard alerts.",
     pageDescription:
       "These settings belong to the current Owner. They do not change any representative identity, knowledge, pricing, or published version.",
     sectionNavigationLabel: "Settings sections",
     profileTab: "Profile & preferences",
-    securityTab: "Sign-in & security",
     notificationsTab: "Notifications",
-    profileEyebrow: "Owner profile",
-    profileCardTitle: "Account profile",
+    profileEyebrow: "Account information",
+    profileCardTitle: "Account information",
     profileCardDescription:
-      "Your display name identifies the Owner in the control plane and in business records that require a named actor.",
+      "Manage your avatar, display name, and sign-in methods. Changes to your phone, email, password, or linked accounts require identity verification.",
     displayNameLabel: "Display name",
     displayNameHelp:
       "Up to 80 characters. This does not rename a representative or change the public Owner attribution.",
@@ -1545,37 +1340,11 @@ const settingsCopy = {
     languageInvalid: "Choose a supported interface language.",
     profileSavedTitle: "Profile saved",
     profileSavedMessage: "The Owner profile and preferences are up to date.",
-    securityEyebrow: "Sign-in identity",
-    securityCardTitle: "Login identity",
-    securityCardDescription:
-      "Delegate shows only current Logto connection data. Passwords, passkeys, and MFA remain managed by the identity provider.",
-    providerLabel: "Identity provider",
-    connectionLabel: "Connection status",
-    emailLabel: "Login email",
-    phoneLabel: "Login phone",
-    identityVerifiedAtLabel: "Identity last verified",
-    connected: "Connected",
-    unavailable: "Unavailable",
-    notConnected: "Not connected",
-    notProvided: "Not provided",
-    notAvailable: "Not available",
-    verified: "Verified",
-    verificationUnknown: "Verification unknown",
-    manageLoginSecurity: "Manage login security",
-    managementUnavailable:
-      "This deployment has no configured Logto self-service security URL. Delegate does not render a non-functional management action.",
-    opensNewWindow: "Opens in a new window",
-    sessionEyebrow: "Current session",
-    sessionCardTitle: "Current browser session",
-    sessionCardDescription:
-      "The current release can sign out this browser session only. It does not invent a device list or remote-session revocation.",
-    currentBrowserSession: "Signed Owner session",
-    currentSessionExplanation:
-      "Delegate uses a protected browser cookie to maintain this login. Other devices and MFA status remain managed by Logto.",
-    sessionUnavailable: "No verifiable Owner session",
-    sessionUnavailableExplanation:
-      "This environment may be using a local authentication bypass. Delegate does not present it as a signed Logto session.",
-    signOutCurrentSession: "Sign out this session",
+    sessionEyebrow: "Sign out",
+    sessionCardTitle: "Sign out",
+    sessionCardDescription: "Sign out of this browser. You will need to sign in again to access the dashboard.",
+    sessionUnavailable: "There is no active session to sign out of.",
+    signOutCurrentSession: "Sign out",
     notificationsEyebrow: "Dashboard navigation",
     notificationsCardTitle: "Operational alerts",
     notificationsCardDescription:

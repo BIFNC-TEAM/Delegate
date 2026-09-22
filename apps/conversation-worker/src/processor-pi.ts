@@ -614,7 +614,7 @@ async function processPiConversationTurn(input: {
   const representativeKnowledgeRequired = requiresRepresentativeKnowledgeEvidence({
     userText: input.item.userText,
     representativeId: input.setup.id,
-    representativeRole: input.setup.tagline || `代表 ${input.setup.ownerName} 的数字代表`,
+    representativeRole: input.setup.tagline || `代表 ${input.setup.ownerName} 的对外代理`,
   });
   const knowledgeMustPrecedeDraft = currentKnowledgeProbe.status === "hit"
     || organizationKnowledgeRequired
@@ -679,7 +679,7 @@ async function processPiConversationTurn(input: {
       ...(input.item.representativeVersionId ? { versionId: input.item.representativeVersionId } : {}),
       name: input.item.representativeName,
       ownerName: input.setup.ownerName,
-      role: input.setup.tagline || `代表 ${input.setup.ownerName} 的数字代表`,
+      role: input.setup.tagline || `代表 ${input.setup.ownerName} 的对外代理`,
       instructions: [
         `语气：${input.setup.tone}`,
         ...(currentKnowledgeProbe.status === "hit"

@@ -85,6 +85,15 @@ import { GET as completeCreatorLogin } from "../app/auth/callback/route";
 import { GET as startCreatorLogin } from "../app/auth/login/route";
 
 describe("creator admission auth routes", () => {
+  it("signs Owner registration intent for unified login while opening sign-in", async () => {
+    vi.stubEnv("DELEGATE_UNIFIED_AUTH_ENABLED", "true");
+    try {
+      mocks.isLogtoOidcConfigured.mockReturnValue(true);
+      await startCreatorLogin(new Request("https://dashboard.example.com/auth/login"));
+      expect(mocks.createDelegateAuthState).toHaveBeenCalledWith(expect.objectContaining({ actor: "owner", creatorFlow: "register" }));
+      expect(mocks.buildLogtoAuthorizeUrl).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({ firstScreen: "sign_in" }));
+    } finally { vi.unstubAllEnvs(); }
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     const admissionError = Object.assign(
@@ -262,6 +271,22 @@ describe("creator admission auth routes", () => {
     );
   });
 
+  it.each([
+    null,
+    { version: 2, actor: "owner", state: "a-newer-login-state", returnTo: "/dashboard" },
+    { version: 2, actor: "audience", state: "state-1", returnTo: "/dashboard" },
+  ])("offers a fresh login for invalid callback state without exchanging codes or clearing another session", async (authState) => {
+    mocks.verifyDelegateAuthState.mockReturnValue(authState);
+    const response = await completeCreatorLogin(new Request("https://dashboard.example.com/auth/callback?code=untrusted-code&state=state-1"));
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("https://dashboard.example.com/auth/error?reason=login_state_invalid");
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(mocks.exchangeLogtoCodeForTokens).not.toHaveBeenCalled();
+    expect(mocks.resolveOwnerForAuth).not.toHaveBeenCalled();
+    expect(mocks.resolveOwnerForRegistration).not.toHaveBeenCalled();
+    expect(mocks.issueAccountSessionShadow).not.toHaveBeenCalled();
+  });
+
   it("creates a Creator only from signed registration state and permits explicit cross-persona enrollment", async () => {
     mocks.readAccountSessionMode.mockReturnValue("shadow");
     mocks.verifyDelegateAuthState.mockReturnValue({
@@ -351,6 +376,48 @@ describe("creator admission auth routes", () => {
           "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
       },
     );
+  });
+
+  it.each(["register", "sign_in"])("completes a verified phone-only %s callback without requiring username or email", async (creatorFlow) => {
+    mocks.readAccountSessionMode.mockReturnValue("enforce");
+    mocks.verifyDelegateAuthState.mockReturnValue({
+      version: 2, actor: "owner", creatorFlow, state: "state-1", nonce: "nonce-1",
+      codeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", returnTo: "/dashboard",
+    });
+    const profile = { provider: "logto", issuer: "https://auth.example.com/oidc", subject: "phone-principal", phone: "8613800138000", phoneVerified: true, name: "手机用户" };
+    mocks.buildVerifiedExternalAuthProfileFromLogtoIdToken.mockResolvedValue(profile);
+    mocks.resolveOwnerForAuth.mockResolvedValue({ owner: { id: "phone-owner" } });
+    mocks.resolveOwnerForRegistration.mockResolvedValue({ owner: { id: "phone-owner" } });
+    const response = await completeCreatorLogin(new Request("https://dashboard.example.com/auth/callback?code=code-1&state=state-1"));
+    expect(response.status).toBe(307);
+    expect(response.cookies.get("delegate_dashboard_session_v2")?.value).toBe("new-dashboard-v2-token");
+    expect(creatorFlow === "register" ? mocks.resolveOwnerForRegistration : mocks.resolveOwnerForAuth).toHaveBeenCalledWith(profile);
+    expect(mocks.issueAccountSessionShadow).toHaveBeenCalledWith(expect.objectContaining({
+      principal: expect.objectContaining({ phone: "8613800138000", phoneVerified: true, displayName: "手机用户" }),
+      persona: { kind: "owner", ownerId: "phone-owner" },
+      allowCrossPersonaEnrollment: creatorFlow === "register",
+    }));
+  });
+
+  it.each(["register", "sign_in"])("completes a WeChat-only %s without email, phone or password", async (creatorFlow) => {
+    mocks.readAccountSessionMode.mockReturnValue("enforce");
+    mocks.verifyDelegateAuthState.mockReturnValue({
+      version: 2, actor: "owner", creatorFlow, state: "state-1", nonce: "nonce-1",
+      codeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", returnTo: "/dashboard",
+    });
+    const profile = { provider: "logto", issuer: "https://auth.example.com/oidc", subject: "wechat-logto-user", name: "微信昵称" };
+    mocks.buildVerifiedExternalAuthProfileFromLogtoIdToken.mockResolvedValue(profile);
+    mocks.resolveOwnerForAuth.mockResolvedValue({ owner: { id: "existing-owner" } });
+    mocks.resolveOwnerForRegistration.mockResolvedValue({ owner: { id: "existing-owner" } });
+    const response = await completeCreatorLogin(new Request("https://dashboard.example.com/auth/callback?code=code-1&state=state-1"));
+    expect(response.status).toBe(307);
+    expect(response.cookies.get("delegate_dashboard_session_v2")?.value).toBe("new-dashboard-v2-token");
+    expect(creatorFlow === "register" ? mocks.resolveOwnerForRegistration : mocks.resolveOwnerForAuth).toHaveBeenCalledWith(profile);
+    expect(mocks.issueAccountSessionShadow).toHaveBeenCalledWith(expect.objectContaining({
+      principal: expect.objectContaining({ subject: profile.subject, displayName: "微信昵称", email: undefined, phone: undefined }),
+      persona: { kind: "owner", ownerId: "existing-owner" },
+      allowCrossPersonaEnrollment: creatorFlow === "register",
+    }));
   });
 
   it("fails closed without exposing internal callback errors", async () => {

@@ -12,6 +12,7 @@ STACK_NAME="${DELEGATE_STACK_NAME:-delegate}"
 STACK_FILE="${SCRIPT_DIR}/stack.yml"
 
 export DELEGATE_ENV_ROOT="$ENV_ROOT"
+export DELEGATE_LOGTO_CONNECTOR_ROOT="$REPO_ROOT/deploy/logto/connectors/connector-tencent-sms-cn"
 export DELEGATE_NODE_HOSTNAME="${DELEGATE_NODE_HOSTNAME:-$(hostname)}"
 export DELEGATE_APP_IMAGE="delegate-app:${RELEASE_ID}"
 export DELEGATE_OPENVIKING_IMAGE="delegate-openviking:${RELEASE_ID}"
@@ -25,6 +26,7 @@ require_file() {
 
 for file in \
   "$STACK_FILE" \
+  "$DELEGATE_LOGTO_CONNECTOR_ROOT/lib/index.js" \
   "$ENV_ROOT/state.env" \
   "$ENV_ROOT/routing.env" \
   "$ENV_ROOT/postgres.env" \

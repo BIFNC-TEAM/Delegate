@@ -11,6 +11,7 @@ export type ExternalAuthProfile = {
   subject: string;
   email?: string | null | undefined;
   phone?: string | null | undefined;
+  /** Initial display-name candidate; may fall back to the verified Logto username. */
   name?: string | null | undefined;
   emailVerified?: boolean | undefined;
   phoneVerified?: boolean | undefined;
@@ -38,6 +39,10 @@ type OwnerRecord = {
   id: string;
   displayName: string;
   handle?: string | null;
+  accountDisplayName?: string | null;
+  settingsVersion?: number;
+  createdAt?: Date;
+  updatedAt?: Date;
 };
 
 type AudienceIdentityRecord = {
@@ -74,6 +79,18 @@ type AuthIdentityClient = {
     }): Promise<OwnerIdentityLinkRecord>;
   };
   owner: {
+    updateMany(args: {
+      where: {
+        id: string;
+        displayName: string;
+        accountDisplayName: null;
+        settingsVersion: number;
+        createdAt: Date;
+        updatedAt: Date;
+      };
+      data: { displayName: string; settingsVersion: { increment: number } };
+    }): Promise<{ count: number }>;
+    findUnique(args: { where: { id: string } }): Promise<OwnerRecord | null>;
     create(args: {
       data: {
         displayName: string;
@@ -203,7 +220,7 @@ async function resolveOwnerForAuthOperation(
       },
     });
     return {
-      owner: existingLink.owner,
+      owner: await repairUntouchedGeneratedOwnerName(existingLink.owner, normalized, client),
       identityLink: refreshedLink,
       created: false,
     };
@@ -237,7 +254,7 @@ async function resolveOwnerForAuthOperation(
         },
       });
       return {
-        owner: evidencedLegacyLink.owner,
+        owner: await repairUntouchedGeneratedOwnerName(evidencedLegacyLink.owner, normalized, client),
         identityLink: refreshedLink,
         created: false,
       };
@@ -319,6 +336,48 @@ async function resolveOwnerForAuthOperation(
     identityLink,
     created: true,
   };
+}
+
+async function repairUntouchedGeneratedOwnerName(
+  owner: OwnerRecord,
+  profile: ReturnType<typeof normalizeExternalAuthProfile>,
+  client: AuthIdentityClient,
+): Promise<OwnerRecord> {
+  // Legacy rows have no name provenance. Only repair the exact subject-derived
+  // fallback when the Owner has never been updated. This intentionally leaves
+  // ambiguous rows (including account-session attachment) for explicit review.
+  if (
+    !profile.name
+    || profile.name === owner.displayName
+    || owner.displayName !== `Creator ${profile.subject.slice(0, 8)}`
+    || owner.accountDisplayName !== null
+    || owner.settingsVersion !== 0
+    || !owner.createdAt
+    || !owner.updatedAt
+    || owner.createdAt.getTime() !== owner.updatedAt.getTime()
+  ) {
+    return owner;
+  }
+
+  await client.owner.updateMany({
+    where: {
+      id: owner.id,
+      displayName: owner.displayName,
+      accountDisplayName: null,
+      settingsVersion: 0,
+      createdAt: owner.createdAt,
+      updatedAt: owner.updatedAt,
+    },
+    data: {
+      displayName: profile.name,
+      // Invalidate settings forms opened before this repair.
+      settingsVersion: { increment: 1 },
+    },
+  });
+  // A concurrent settings save or rename may win. Always return persisted data.
+  const currentOwner = await client.owner.findUnique({ where: { id: owner.id } });
+  if (!currentOwner) throw new Error("The authenticated owner no longer exists.");
+  return currentOwner;
 }
 
 export function isCreatorAdmissionRequiredError(
@@ -518,9 +577,9 @@ function buildOwnerDisplayName(profile: ReturnType<typeof normalizeExternalAuthP
   if (profile.email) {
     return profile.email.split("@")[0] ?? profile.email;
   }
-  if (profile.phone) {
-    return profile.phone;
-  }
+  // Phone is an authentication identifier, never a public Owner attribution.
+  // Hosted phone registration collects a name; incomplete upstream profiles
+  // retain a non-sensitive placeholder until the user chooses a name.
   return `Creator ${profile.subject.slice(0, 8)}`;
 }
 

@@ -114,6 +114,8 @@ type JwtClaims = {
   phone_number?: unknown;
   phone_number_verified?: unknown;
   name?: unknown;
+  username?: unknown;
+  preferred_username?: unknown;
   iss?: unknown;
   aud?: unknown;
   azp?: unknown;
@@ -503,8 +505,13 @@ function buildExternalAuthProfileFromLogtoClaims(claims: JwtClaims): ExternalAut
   if (typeof claims.phone_number_verified === "boolean") {
     profile.phoneVerified = claims.phone_number_verified;
   }
-  if (typeof claims.name === "string") {
-    profile.name = claims.name;
+  // This is the initial display-name candidate, not an authentication key.
+  // Logto username/password registration can leave `name` null. Preserve an
+  // explicit name, then use the registered username (or standard OIDC alias).
+  const displayName = [claims.name, claims.username, claims.preferred_username]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  if (displayName !== undefined) {
+    profile.name = displayName.trim();
   }
   return profile;
 }

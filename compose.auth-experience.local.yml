@@ -1,0 +1,24 @@
+# Opt-in local development only. Never include this file in a public deployment.
+services:
+  logto:
+    ports: !override
+      - 127.0.0.1:3303:3001
+      - 127.0.0.1:3302:3002
+    volumes:
+      - ./apps/auth-experience/dist:/etc/logto/packages/experience/dist:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  auth-mock-sms:
+    image: ${LOGTO_OSS_IMAGE:-svhd/logto:1.41.0}
+    entrypoint: []
+    profiles: [auth-mock]
+    command: [node, /app/auth-mock-sms.mjs]
+    env_file:
+      - ./.local/logto/auth-mock.env
+    environment:
+      AUTH_MOCK_BIND_HOST: 0.0.0.0
+    ports:
+      - 127.0.0.1:3301:3801
+    volumes:
+      - ./scripts/auth-mock-sms.mjs:/app/auth-mock-sms.mjs:ro
+    networks: [logto-local]

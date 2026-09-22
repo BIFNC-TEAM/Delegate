@@ -67,11 +67,11 @@ describe("compute conversation results", () => {
   it("removes legacy inline knowledge titles and internal version ids", () => {
     expect(renderPublicConversationMessageText({
       text: [
-        "我是地理课程数字代表。根据授权资料[地理代表——周行知]，我负责初中地理课程。",
+        "我是地理课程对外代理。根据授权资料[地理代表——周行知]，我负责初中地理课程。",
         "",
         "知识依据：Materials（cmu0kjori00019ku848jued5m）",
         "知识依据：Policies（cmu0kjori00019ku848jued5m）",
       ].join("\n"),
-    })).toBe("我是地理课程数字代表。我负责初中地理课程。");
+    })).toBe("我是地理课程对外代理。我负责初中地理课程。");
   });
 });

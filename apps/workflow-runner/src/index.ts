@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { handleOwnerProfile } from "./owner-profile";
 
 import {
   createServer,
@@ -72,6 +73,10 @@ async function handleHttpRequest(
   request: IncomingMessage,
   response: ServerResponse,
 ): Promise<void> {
+  if (request.url === "/internal/owner-profile") {
+    await handleOwnerProfile(request, response);
+    return;
+  }
   const isProbeMethod =
     request.method === "GET" || request.method === "HEAD";
   if (isProbeMethod && request.url === "/health") {

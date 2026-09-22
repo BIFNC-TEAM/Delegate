@@ -13,6 +13,7 @@ export const metadata: Metadata = {
 type AuthErrorReason =
   | "creator_access_required"
   | "creator_registration_required"
+  | "login_state_invalid"
   | "login_failed"
   | "signed_out";
 
@@ -26,6 +27,7 @@ export default async function CreatorAuthErrorPage({
   const denied = reason === "creator_access_required";
   const registrationRequired = reason === "creator_registration_required";
   const signedOut = reason === "signed_out";
+  const invalidState = reason === "login_state_invalid";
   const returnTo = sanitizeCreatorReturnTo(params?.returnTo);
   const loginHref = buildCreatorAuthHref("sign_in", returnTo);
   const registerHref = buildCreatorAuthHref("register", returnTo);
@@ -57,7 +59,9 @@ export default async function CreatorAuthErrorPage({
               ? "此账号还没有 Creator 工作区"
               : signedOut
                 ? "已退出当前 Delegate 会话"
-                : "登录暂未完成"}
+                : invalidState
+                  ? "请重新发起登录"
+                  : "登录暂未完成"}
         </h1>
         <p className="creator-auth-error-lead">
           {denied
@@ -66,7 +70,9 @@ export default async function CreatorAuthErrorPage({
               ? "你的身份已通过 Logto 验证。请明确完成 Creator 注册后再进入 Dashboard。"
               : signedOut
                 ? "这个浏览器中的 Dashboard 会话已清除，并已在 Delegate 侧撤销。"
-                : "Delegate 无法完成本次登录。请稍后重试；若问题持续，请联系管理员。"}
+                : invalidState
+                  ? "本次登录已过期，或已被另一次登录替换。请重新登录以继续；已经保存的微信绑定不会因此撤销。"
+                  : "Delegate 无法完成本次登录。请稍后重试；若问题持续，请联系管理员。"}
         </p>
         <p className="creator-auth-error-translation">
           {denied
@@ -75,15 +81,19 @@ export default async function CreatorAuthErrorPage({
               ? "Your identity is verified. Create a Creator workspace before entering the Dashboard."
               : signedOut
                 ? "The Dashboard session in this browser has been cleared and revoked by Delegate."
-                : "Delegate could not complete this sign-in. Try again or contact an administrator."}
+                : invalidState
+                  ? "This sign-in expired or was replaced. Start again to continue; saved account links remain intact."
+                  : "Delegate could not complete this sign-in. Try again or contact an administrator."}
         </p>
 
         <div className="creator-auth-error-boundary">
-          <strong>{signedOut ? "退出范围" : "身份与权限边界"}</strong>
+          <strong>{signedOut ? "退出范围" : invalidState ? "继续登录" : "身份与权限边界"}</strong>
           <p>
             {signedOut
               ? "本次操作只退出 Delegate 的当前浏览器会话；Logto 中央会话和其他应用会话不会在此步骤中结束。"
-              : "登录成功只确认账号身份，不会自动授予 Creator、Workspace 或业务数据访问权限。"}
+              : invalidState
+                ? "请使用下面的入口获取新的登录验证。无需重复绑定已经关联的微信，账号资料和工作区保持不变。"
+                : "登录成功只确认账号身份，不会自动授予 Creator、Workspace 或业务数据访问权限。"}
           </p>
         </div>
 
@@ -92,7 +102,7 @@ export default async function CreatorAuthErrorPage({
             <a href={registerHref}>免费注册 Creator · Sign up free</a>
           ) : (
             <a href={loginHref}>
-              {signedOut
+              {signedOut || invalidState
               ? "重新登录 · Sign in again"
               : "重新检查权限 · Check again"}
             </a>
@@ -117,6 +127,7 @@ function normalizeReason(reason: string | undefined): AuthErrorReason {
     reason === "creator_access_required"
     || reason === "creator_registration_required"
     || reason === "signed_out"
+    || reason === "login_state_invalid"
   ) {
     return reason;
   }

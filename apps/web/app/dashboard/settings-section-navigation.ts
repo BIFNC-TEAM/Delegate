@@ -1,6 +1,5 @@
 export const settingsSections = [
   "profile",
-  "security",
   "notifications",
 ] as const;
 
@@ -9,6 +8,7 @@ export type SettingsSection = (typeof settingsSections)[number];
 export function parseSettingsSection(
   value: string | null | undefined,
 ): SettingsSection {
+  // Legacy security links now open Profile & preferences, including sign-out.
   return settingsSections.includes(value as SettingsSection)
     ? (value as SettingsSection)
     : "profile";

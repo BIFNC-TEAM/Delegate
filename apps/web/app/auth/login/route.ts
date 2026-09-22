@@ -47,7 +47,10 @@ export async function GET(request: Request) {
 
     const accountSessionMode = readAccountSessionMode();
     const url = new URL(request.url);
-    const creatorFlow = readCreatorAuthFlow(url.searchParams.get("flow"));
+    // The combined page explicitly says sign in / register. Enrollment remains
+    // scoped to this Owner application and recorded in signed auth state.
+    const unifiedAuth = process.env.DELEGATE_UNIFIED_AUTH_ENABLED === "true";
+    const creatorFlow = unifiedAuth ? "register" : readCreatorAuthFlow(url.searchParams.get("flow"));
     const returnTo = sanitizeCreatorReturnTo(url.searchParams.get("returnTo"));
     const secret = readDelegateAuthSessionSecret();
 
@@ -153,7 +156,7 @@ export async function GET(request: Request) {
         state,
         nonce,
         codeChallenge: derivePkceCodeChallenge(codeVerifier),
-        firstScreen: creatorFlow,
+        firstScreen: unifiedAuth ? "sign_in" : creatorFlow,
         uiLocales: readLogtoUiLocales(url.searchParams.get("lang")),
       }),
     );

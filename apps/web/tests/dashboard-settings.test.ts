@@ -53,7 +53,7 @@ describe("dashboard owner settings", () => {
     expect(page).toContain("getOwnerSettingsSnapshot({ ownerId })");
     expect(component).toContain("buildSettingsSectionHref");
     expect(component).toContain('"profile", copy.profileTab');
-    expect(component).toContain('"security", copy.securityTab');
+    expect(component).not.toContain('"security", copy.securityTab');
     expect(component).toContain('"notifications", copy.notificationsTab');
     expect(component).toContain('fetch("/api/dashboard/settings"');
     expect(component).not.toContain("/api/dashboard/settings?rep=");
@@ -76,10 +76,10 @@ describe("dashboard owner settings", () => {
     expect(component).toContain("invalidStoredTimeZone");
     expect(component).not.toContain("supportedValuesOf");
     expect(framework).toContain("timeZones={props.settingsTimeZones}");
-    expect(component).toContain("snapshot.security.emailVerification");
-    expect(component).toContain("snapshot.security.phoneVerification");
-    expect(component).toContain("snapshot.security.managementUrl");
-    expect(component).toContain('rel="noreferrer"');
+    expect(component).toContain("<DashboardAccountProfile");
+    expect(component).toContain('className="settings-form-stack settings-sign-out"');
+    expect(component).toContain('<form action={logoutHref} method="post">');
+    expect(component).not.toContain('initialSection === "security"');
     expect(component).not.toContain("MFA enabled");
     expect(component).not.toContain("Security score");
     expect(component).not.toContain("Revoke other sessions");
@@ -132,7 +132,7 @@ describe("dashboard owner settings", () => {
     expect(component).toContain("persistenceUnavailableMessage");
     expect(component).toContain("localizeSettingsRequestError");
     expect(component).toContain("sessionExpiredMessage");
-    expect(component).toContain("<SettingsTimestamp");
+    expect(component).toContain('headingId="settings-sign-out-heading"');
     expect(component).toContain("SettingsFormActions");
     expect(component).toContain("window.location.assign");
     expect(css).toContain(".settings-feedback");

@@ -10,7 +10,7 @@ export type OwnerIdentityProfile = {
   email: string | null;
   hasPassword: boolean;
   wechatLinked: boolean;
-  links: { phone: string; password: string; social: string } | null;
+  links: { phone: string; email: string | null; password: string; social: string } | null;
 };
 export type IdentityProfilePrincipal = { ownerId: string; issuer: string; subject: string };
 export class IdentityProfileError extends Error {
@@ -20,7 +20,7 @@ function safeAvatar(value: unknown): string | null {
   if (typeof value !== "string" || !value) return null;
   try { const url = new URL(value); return (url.protocol === "https:" || managedAvatarObjectKey(value)) && !url.username && !url.password ? url.toString() : null; } catch { return null; }
 }
-export function serializeIdentityProfile(user: Record<string, unknown>, managementUrl: string | null): OwnerIdentityProfile {
+export function serializeIdentityProfile(user: Record<string, unknown>, managementUrl: string | null, emailBindingAvailable = false): OwnerIdentityProfile {
   const identities = user.identities && typeof user.identities === "object" && !Array.isArray(user.identities) ? user.identities as Record<string, unknown> : {};
   const center = managementUrl ? new URL(managementUrl) : null;
   return {
@@ -31,6 +31,7 @@ export function serializeIdentityProfile(user: Record<string, unknown>, manageme
     wechatLinked: Boolean(identities.wechat),
     links: center ? {
       phone: new URL('/account/phone', center.origin).toString(),
+      email: emailBindingAvailable ? new URL('/account/email', center.origin).toString() : null,
       password: new URL('/account/password', center.origin).toString(),
       social: new URL('/account/security', center.origin).toString(),
     } : null,
@@ -47,21 +48,21 @@ async function clientFor(principal: IdentityProfilePrincipal) {
 }
 export async function getOwnerIdentityProfile(principal: IdentityProfilePrincipal) {
   const client = await clientFor(principal);
-  const user = await client.getUserProfile(principal.subject);
+  const [user, emailBindingAvailable] = await Promise.all([client.getUserProfile(principal.subject), client.getEmailBindingAvailable()]);
   if (user.isSuspended === true) throw new IdentityProfileError(403, "Account is unavailable.");
-  return serializeIdentityProfile(user, readLogtoAccountCenterUrl());
+  return serializeIdentityProfile(user, readLogtoAccountCenterUrl(), emailBindingAvailable);
 }
 export async function updateOwnerAvatar(principal: IdentityProfilePrincipal, avatar: unknown) {
   if (typeof avatar !== 'string' || avatar.length > 2048 || (avatar !== '' && !safeAvatar(avatar))) throw new IdentityProfileError(400, "Use a valid HTTPS avatar URL (up to 2048 characters).");
   const client = await clientFor(principal);
-  const current = await client.getUserProfile(principal.subject);
+  const [current, emailBindingAvailable] = await Promise.all([client.getUserProfile(principal.subject), client.getEmailBindingAvailable()]);
   if (current.isSuspended === true) throw new IdentityProfileError(403, "Account is unavailable.");
   await client.updateUserAvatar(principal.subject, avatar);
   const saved = await client.getUserProfile(principal.subject);
   if ((saved.avatar || '') !== avatar) throw new IdentityProfileError(502, "Avatar update could not be verified.");
   const oldKey = avatar === '' && typeof current.avatar === 'string' ? managedAvatarObjectKey(current.avatar, principal.ownerId) : null;
   const cleanupPending = oldKey ? !await cleanupAvatar(oldKey) : false;
-  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl()), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
+  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl(), emailBindingAvailable), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
 }
 
 async function cleanupAvatar(key: string): Promise<boolean> {
@@ -75,7 +76,7 @@ export async function uploadOwnerAvatar(principal: IdentityProfilePrincipal, inp
   const bytes = Buffer.from(input.base64, "base64");
   if (bytes.toString("base64") !== input.base64) throw new IdentityProfileError(400, "Invalid avatar encoding.");
   const client = await clientFor(principal);
-  const current = await client.getUserProfile(principal.subject);
+  const [current, emailBindingAvailable] = await Promise.all([client.getUserProfile(principal.subject), client.getEmailBindingAvailable()]);
   if (current.isSuspended === true) throw new IdentityProfileError(403, "Account is unavailable.");
   let stored;
   try { stored = await storeOwnerAvatar(principal.ownerId, bytes); }
@@ -99,5 +100,5 @@ export async function uploadOwnerAvatar(principal: IdentityProfilePrincipal, inp
   }
   const oldKey = typeof current.avatar === "string" ? managedAvatarObjectKey(current.avatar, principal.ownerId) : null;
   const cleanupPending = oldKey && oldKey !== stored.key ? !await cleanupAvatar(oldKey) : false;
-  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl()), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
+  return { ...serializeIdentityProfile(saved, readLogtoAccountCenterUrl(), emailBindingAvailable), ...(cleanupPending ? { avatarCleanupPending: true } : {}) };
 }

@@ -1,17 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ link: vi.fn(), get: vi.fn(), update: vi.fn(), config: vi.fn(), store: vi.fn(), remove: vi.fn(), managedKey: vi.fn() }));
+const mocks = vi.hoisted(() => ({ link: vi.fn(), get: vi.fn(), update: vi.fn(), config: vi.fn(), store: vi.fn(), remove: vi.fn(), managedKey: vi.fn(), emailAvailable: vi.fn() }));
 vi.mock('../src/prisma', () => ({ prisma: { ownerIdentityLink: { findFirst: mocks.link } } }));
-vi.mock('../src/logto-management', () => ({ readLogtoManagementConfig: mocks.config, createLogtoManagementClient: () => ({ getUserProfile: mocks.get, updateUserAvatar: mocks.update }) }));
+vi.mock('../src/logto-management', () => ({ readLogtoManagementConfig: mocks.config, createLogtoManagementClient: () => ({ getUserProfile: mocks.get, updateUserAvatar: mocks.update, getEmailBindingAvailable: mocks.emailAvailable }) }));
 vi.mock('../src/owner-settings', () => ({ readLogtoAccountCenterUrl: () => 'https://login.example.com/account' }));
 vi.mock('../src/owner-avatar-storage', () => ({ MAX_AVATAR_FILE_BYTES: 5 * 1024 * 1024, storeOwnerAvatar: mocks.store, deleteOwnerAvatarObject: mocks.remove, managedAvatarObjectKey: mocks.managedKey, AvatarUploadError: class extends Error { constructor(readonly status: number, message: string) { super(message); } } }));
 import { getOwnerIdentityProfile, updateOwnerAvatar, uploadOwnerAvatar, serializeIdentityProfile } from '../src/owner-identity-profile';
 const principal = { ownerId: 'owner', issuer: 'https://login.example.com/oidc', subject: 'subject' };
-beforeEach(() => { vi.clearAllMocks(); vi.stubEnv('LOGTO_ENDPOINT', 'https://login.example.com'); mocks.link.mockResolvedValue({ id: 'link' }); mocks.config.mockReturnValue({}); mocks.get.mockResolvedValue({ id: 'subject', hasPassword: false }); mocks.managedKey.mockReturnValue(null); mocks.remove.mockResolvedValue(undefined); mocks.update.mockResolvedValue({}); mocks.store.mockResolvedValue({ key:'avatars/fixture/new.jpg', url:'https://dashboard.example.com/api/avatars/fixture/new' }); });
+beforeEach(() => { vi.clearAllMocks(); mocks.emailAvailable.mockResolvedValue(false); vi.stubEnv('LOGTO_ENDPOINT', 'https://login.example.com'); mocks.link.mockResolvedValue({ id: 'link' }); mocks.config.mockReturnValue({}); mocks.get.mockResolvedValue({ id: 'subject', hasPassword: false }); mocks.managedKey.mockReturnValue(null); mocks.remove.mockResolvedValue(undefined); mocks.update.mockResolvedValue({}); mocks.store.mockResolvedValue({ key:'avatars/fixture/new.jpg', url:'https://dashboard.example.com/api/avatars/fixture/new' }); });
 afterEach(() => vi.unstubAllEnvs());
 describe('Owner identity profile', () => {
   it('exposes bound-method status without returning identity tokens, password hashes, or provider IDs', () => {
     const result = serializeIdentityProfile({ primaryPhone: '8613800138000', hasPassword: true, identities: { wechat: { userId: 'private', accessToken: 'secret' } }, password: 'hash', avatar: 'javascript:alert(1)' }, 'https://login.example.com/account');
     expect(result).toMatchObject({ avatar: null, wechatLinked: true, hasPassword: true }); expect(JSON.stringify(result)).not.toMatch(/secret|private|hash/);
+  });
+  it('offers verified email binding only when the provider and account settings enable it', async () => {
+    mocks.emailAvailable.mockResolvedValue(true);
+    await expect(getOwnerIdentityProfile(principal)).resolves.toMatchObject({email:null,links:{email:'https://login.example.com/account/email'}});
+    mocks.emailAvailable.mockResolvedValue(false);
+    await expect(getOwnerIdentityProfile(principal)).resolves.toMatchObject({links:{email:null}});
   });
   it('requires exact Owner / issuer / subject linkage before accessing management API', async () => {
     mocks.link.mockResolvedValue(null); await expect(getOwnerIdentityProfile(principal)).rejects.toMatchObject({ status: 403 }); expect(mocks.get).not.toHaveBeenCalled();

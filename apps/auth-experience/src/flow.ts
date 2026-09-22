@@ -1,5 +1,5 @@
 export type Event = "SignIn" | "Register" | "ForgotPassword";
-export type Identifier = { type: "phone" | "email" | "username"; value: string };
+export type Identifier = { type: "phone" | "email"; value: string };
 export type Requester = <T = Record<string, unknown>>(path: string, method?: string, body?: unknown) => Promise<T>;
 export type Stage = "login" | "wechat-choice" | "link" | "onboarding" | "reset" | "reset-password" | "reset-success" | "mfa";
 export type State = { stage: Stage; busy: boolean; error: string; cooldownUntil: number; created: boolean };
@@ -11,8 +11,7 @@ export function identifier(value: string, phoneOnly = false): Identifier {
   if (/^(?:\+?86)?1[3-9]\d{9}$/u.test(text)) return { type: "phone", value: `86${text.replace(/^\+?86/u, "")}` };
   if (phoneOnly) throw new AuthError("phone_invalid", "请输入中国大陆 11 位手机号");
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(text)) return { type: "email", value: text };
-  if (text && !/\s/u.test(text)) return { type: "username", value: text };
-  throw new AuthError("identifier_invalid", "请输入手机号、邮箱或已有用户名");
+  throw new AuthError("identifier_invalid", "请输入手机号或邮箱，不支持用户名登录");
 }
 export function passwordError(value: string): string | null {
   if (value.length < 8 || value.length > 128) return "密码长度须为 8–128 个字符";
@@ -98,8 +97,7 @@ export class AuthFlow {
   }
   async sendCode(value: string) {
     if (Date.now() < this.state.cooldownUntil) throw new AuthError("local_cooldown", "请等待倒计时结束后再获取验证码");
-    const id = identifier(value, true);
-    if (this.state.stage === "reset" && id.type === "username") throw new AuthError("identifier_invalid", "重置密码需要已绑定的手机号或邮箱");
+    const id = identifier(value, this.state.stage !== "reset");
     const event: Event = this.state.stage === "reset" ? "ForgotPassword" : "SignIn";
     const result = await this.request<{ verificationId: string }>("/api/experience/verification/verification-code", "POST", { identifier: id, interactionEvent: event });
     if (!result.verificationId) throw new Error("Invalid verification response");
@@ -119,7 +117,7 @@ export class AuthFlow {
     }
   }
   async codeLogin(value: string, code: string) {
-    const id = identifier(value, true);
+    const id = identifier(value, this.state.stage !== "reset");
     if (!this.challenge || id.type !== this.challenge.identifier.type || id.value !== this.challenge.identifier.value) throw new AuthError("identifier_invalid", "手机号或邮箱已改变，请重新获取验证码");
     if (!/^\d{6}$/u.test(code)) throw new AuthError("code_invalid", "请输入 6 位验证码");
     const result = await this.request<{ verificationId: string }>("/api/experience/verification/verification-code/verify", "POST", {

@@ -8,7 +8,8 @@ describe('unified auth configuration', () => {
     expect(patch.socialSignIn.automaticAccountLinking).toBe(false);
   });
   it('keeps email login only with a working email connector and Logto-required code capability', () => {
-    expect(unifiedPatch({}).signIn.methods.map((m:any)=>m.identifier)).toEqual(['phone','username']);
+    expect(unifiedPatch({}).signIn.methods.map((m:any)=>m.identifier)).toEqual(['phone']);
+    expect(unifiedPatch({},true).signIn.methods.map((m:any)=>m.identifier)).toEqual(['phone','email']);
     expect(unifiedPatch({},true).signIn.methods.find((m:any)=>m.identifier==='email')).toMatchObject({password:true,verificationCode:true});
   });
   it('rejects a public fixed-code issuer before network calls', async () => {

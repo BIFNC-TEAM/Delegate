@@ -12,11 +12,10 @@ export function unifiedPatch(current, emailEnabled = false) {
     signIn: { methods: [
       { identifier: 'phone', password: true, verificationCode: true, isPasswordPrimary: false },
       ...(emailEnabled ? [{ identifier: 'email', password: true, verificationCode: true, isPasswordPrimary: true }] : []),
-      { identifier: 'username', password: true, verificationCode: false, isPasswordPrimary: true },
     ] },
     socialSignIn: { ...current.socialSignIn, skipRequiredIdentifiers: true, automaticAccountLinking: false },
     signUpProfileFields: [],
-    forgotPasswordMethods: ['PhoneVerificationCode'],
+    forgotPasswordMethods: ['PhoneVerificationCode', ...(emailEnabled ? ['EmailVerificationCode'] : [])],
     passwordPolicy: { ...current.passwordPolicy, length: { min: Math.max(8, current.passwordPolicy?.length?.min || 0), max: Math.min(128, current.passwordPolicy?.length?.max || 128) }, characterTypes: { min: Math.max(3, current.passwordPolicy?.characterTypes?.min || 0) } },
     verificationCodePolicy: { ...current.verificationCodePolicy, expirationDuration: Math.min(300, current.verificationCodePolicy?.expirationDuration || 300), maxRetryAttempts: Math.min(5, current.verificationCodePolicy?.maxRetryAttempts || 5) },
   };
@@ -34,10 +33,11 @@ export async function configureUnifiedAuth(env, { apply = false, mock = false } 
   const sms = connectors.find((c) => c.type === 'Sms');
   if (!mock && (!sms || sms.connectorId === 'http-sms')) throw new Error('Configure the real mainland SMS connector before real-mode activation.');
   if (mock && sms && !['http-sms','delegate-tencent-sms-cn'].includes(sms.connectorId)) throw new Error('Unexpected SMS connector; refusing to replace it.');
-  const patch = unifiedPatch(current, connectors.some((c) => c.type === 'Email'));
+  const emailEnabled = connectors.some((c) => c.type === 'Email');
+  const patch = unifiedPatch(current, emailEnabled);
   if (!connectors.some((c) => c.type === 'Email') && current.signIn?.methods?.some((m) => m.identifier === 'email')) throw new Error('An email connector is required to preserve existing email sign-in with optional registration passwords.');
-  const account = { enabled: true, fields: { ...center.fields, phone: 'Edit', email: 'ReadOnly', password: 'Edit', social: 'Edit', name: 'ReadOnly', avatar: 'Edit' } };
-  if (!apply) return { mode: mock ? 'LOCAL MOCK 123456' : 'real', applied: false, phoneOneClick: true, optionalProfile: true };
+  const account = { enabled: true, fields: { ...center.fields, phone: 'Edit', email: emailEnabled ? 'Edit' : 'ReadOnly', password: 'Edit', social: 'Edit', name: 'ReadOnly', avatar: 'Edit' } };
+  if (!apply) return { mode: mock ? 'LOCAL MOCK 123456' : 'real', applied: false, phoneOneClick: true, optionalProfile: true, emailEnabled, usernameEnabled: false };
   if (mock) {
     const config = { endpoint: 'http://auth-mock-sms:3801/deliver', authorization: `Bearer ${env.AUTH_MOCK_SMS_TOKEN}` };
     if (sms?.connectorId === 'http-sms') await request(`/api/connectors/${sms.id}`, 'PATCH', { config });
@@ -48,7 +48,8 @@ export async function configureUnifiedAuth(env, { apply = false, mock = false } 
   await request(nameField?'/api/custom-profile-fields/name':'/api/custom-profile-fields',nameField?'PUT':'POST',definition);
   await request('/api/account-center','PATCH',account);
   await request('/api/sign-in-exp','PATCH',patch);
-  const saved=await request('/api/sign-in-exp');
+  const [saved, savedAccount] = await Promise.all([request('/api/sign-in-exp'), request('/api/account-center')]);
+  if (savedAccount.enabled !== true || !isDeepStrictEqual(savedAccount.fields, account.fields)) throw new Error('Account-center configuration read-back mismatch.');
   if(Object.entries(patch).some(([k,v])=>!isDeepStrictEqual(saved[k],v)))throw new Error('Configuration read-back mismatch.');
   return { mode:mock?'LOCAL MOCK 123456':'real',applied:true };
 }

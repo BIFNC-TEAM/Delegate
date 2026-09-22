@@ -108,9 +108,11 @@
     "logto:wechat:configure": "node scripts/logto-wechat-auth.mjs",
     "test:logto:wechat": "vitest run scripts/tests/logto-wechat-auth.test.ts",
     "test:logto:wechat:runtime": "bash scripts/tests/logto-wechat-auth.runtime.sh",
-    "test:logto:unified": "vitest run scripts/tests/auth-mock-sms.test.ts scripts/tests/logto-unified-auth.test.ts scripts/tests/account-wechat-proxy.test.ts",
+    "test:logto:unified": "vitest run scripts/tests/auth-mock-sms.test.ts scripts/tests/logto-unified-auth.test.ts scripts/tests/account-wechat-proxy.test.ts scripts/tests/logto-ses-auth.test.ts",
     "logto:unified:configure": "node scripts/logto-unified-auth.mjs",
-    "test:terminology": "vitest run scripts/tests/product-terminology.test.ts"
+    "test:terminology": "vitest run scripts/tests/product-terminology.test.ts",
+    "test:logto:ses:runtime": "bash scripts/tests/logto-ses-auth.runtime.sh",
+    "logto:ses:configure": "node scripts/logto-ses-auth.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

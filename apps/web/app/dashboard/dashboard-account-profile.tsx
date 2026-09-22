@@ -77,7 +77,7 @@ export function DashboardAccountProfile({ locale }: { locale: Locale }) {
       <div className="account-profile-method"><div><strong>{zh ? '绑定手机号' : 'Phone'}</strong><p>{profile.phone ?? (zh ? '尚未绑定' : 'Not linked')}</p></div>{link(profile.links?.phone, zh ? (profile.phone ? '更换手机号' : '绑定手机号') : 'Manage phone')}</div>
       <div className="account-profile-method"><div><strong>{zh ? '登录密码' : 'Password'}</strong><p>{profile.hasPassword ? (zh ? '已设置' : 'Set') : (zh ? '尚未设置，可继续使用微信或验证码登录' : 'Not set; social or code sign-in remains available')}</p></div>{link(profile.links?.password, zh ? (profile.hasPassword ? '修改密码' : '设置密码') : 'Manage password')}</div>
       <div className="account-profile-method"><div><strong>{zh ? '微信账号' : 'WeChat'}</strong><p>{profile.wechatLinked ? (zh ? '已绑定' : 'Linked') : (zh ? '尚未绑定' : 'Not linked')}</p></div>{link(profile.links?.social, zh ? '管理第三方账号' : 'Manage linked accounts')}</div>
-      {profile.email && <div className="account-profile-method"><div><strong>{zh ? '登录邮箱' : 'Email'}</strong><p>{profile.email}</p></div></div>}
+      <div className="account-profile-method"><div><strong>{zh ? '绑定邮箱' : 'Email'}</strong><p>{profile.email ?? (zh ? '尚未绑定' : 'Not linked')}</p></div>{profile.links?.email ? link(profile.links.email, zh ? (profile.email ? '更换邮箱' : '绑定邮箱') : 'Manage email') : <span className="settings-action-note">{zh ? '邮箱验证服务暂未启用' : 'Email verification is not enabled yet'}</span>}</div>
     </>}
   </section>;
 }

@@ -122,3 +122,15 @@ describe('current-user profile management contract', () => {
     await expect(createLogtoManagementClient(config, request).getUserProfile('subject')).rejects.toThrow('Invalid Logto account profile');
   });
 });
+
+describe('verified email binding capability', () => {
+  const config = {endpoint:'https://auth.example.com',clientId:'app',clientSecret:'secret',resource:'https://default.logto.app/api',requestTimeoutMs:15000,pageSize:100,maxPages:100};
+  it.each([[true,'Edit',true],[false,'Edit',false],[true,'ReadOnly',false]])('requires enabled email login (%s) and editable account email (%s)',async(enabled,control,expected)=>{
+    const request=vi.fn(async(url:string,init?:RequestInit)=>Response.json(url.endsWith('sign-in-exp')?{signIn:{methods:enabled?[{identifier:'email',password:true}]:[{identifier:'phone',password:true}]}}:{enabled:true,fields:{email:control}}));
+    await expect(createLogtoManagementClient(config,request).getEmailBindingAvailable()).resolves.toBe(expected);
+    expect(request.mock.calls.every(([,init])=>!init?.headers)).toBe(true);
+  });
+  it('rejects malformed provider status instead of claiming email binding is ready',async()=>{
+    await expect(createLogtoManagementClient(config,async()=>Response.json({})).getEmailBindingAvailable()).rejects.toThrow('Invalid Logto account settings');
+  });
+});

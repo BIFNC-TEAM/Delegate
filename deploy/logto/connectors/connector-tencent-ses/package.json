@@ -1,0 +1,8 @@
+{
+  "name": "@delegate/connector-tencent-ses",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "dependencies": { "@logto/connector-kit": "5.1.0" }
+}

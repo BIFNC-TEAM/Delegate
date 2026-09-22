@@ -130,7 +130,20 @@ export function createLogtoManagementClient(
     return payload;
   };
 
+  const getEmailBindingAvailable = async () => {
+    const read = async (path: string) => {
+      const response = await fetchImpl(new URL(path, config.endpoint).toString(), { redirect: "error", signal: AbortSignal.timeout(config.requestTimeoutMs) });
+      if (!response.ok) throw new Error(`Logto account settings request failed (${response.status}).`);
+      return response.json();
+    };
+    const [experience, center] = await Promise.all([read("/api/.well-known/sign-in-exp"), read("/api/.well-known/account-center")]);
+    if (!Array.isArray(experience?.signIn?.methods) || !isRecord(center?.fields)) throw new Error("Invalid Logto account settings response.");
+    return center.enabled === true && center.fields.email === "Edit"
+      && experience.signIn.methods.some((method: unknown) => isRecord(method) && method.identifier === "email" && method.password === true);
+  };
+
   return {
+    getEmailBindingAvailable,
     getUserProfile: (subject: string) => userRequest(subject),
     updateUserAvatar: (subject: string, avatar: string) => userRequest(subject, "PATCH", { avatar }),
     async listAllUsers(): Promise<LogtoManagementUser[]> {

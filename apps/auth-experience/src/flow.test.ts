@@ -42,7 +42,7 @@ describe('verified account flows', () => {
     let first = true;
     const { flow, request } = fixture((path) => { if (path.endsWith('/identification') && first) { first = false; missingSocial(); } });
     await flow.wechatCallback('wechat', 'social-proof', { code: 'provider-code', state: 'nonce' });
-    flow.chooseExisting(); await flow.passwordLogin('existing', 'correct-password');
+    flow.chooseExisting(); await flow.passwordLogin('owner@example.com', 'correct-password');
     const calls = request.mock.calls;
     expect(calls.findIndex(([p]) => p.endsWith('/password'))).toBeLessThan(calls.findIndex(([p]) => p === '/api/experience/profile'));
     expect(request).toHaveBeenCalledWith('/api/experience/profile', 'POST', { type: 'social', verificationId: 'social-proof' });
@@ -65,8 +65,8 @@ describe('verified account flows', () => {
       if (phase === 'conflict' && path.endsWith('/profile')) throw new AuthError('user.identity_already_in_use', 'conflict');
     });
     await flow.wechatCallback('wechat', 'social-proof', { code: 'code', state: 'nonce' }); flow.chooseExisting();
-    phase = 'password'; await flow.run(() => flow.passwordLogin('existing', 'wrong')); expect(flow.state.error).toContain('密码不正确');
-    phase = 'conflict'; await flow.run(() => flow.passwordLogin('existing', 'right')); expect(flow.state.error).toContain('已关联');
+    phase = 'password'; await flow.run(() => flow.passwordLogin('owner@example.com', 'wrong')); expect(flow.state.error).toContain('密码不正确');
+    phase = 'conflict'; await flow.run(() => flow.passwordLogin('owner@example.com', 'right')); expect(flow.state.error).toContain('已关联');
     expect(navigate).not.toHaveBeenCalled();
   });
   it('signs in an already-linked WeChat identity without offering registration or changing its profile', async () => {
@@ -104,6 +104,13 @@ describe('verified account flows', () => {
     await expect(flow.codeLogin('13900138000', '123456')).rejects.toThrow('改变');
     await expect(flow.sendCode('13800138000')).rejects.toThrow('倒计时'); expect(request).toHaveBeenCalledTimes(count);
   });
+  it('uses verified email for password recovery without registering a new account', async () => {
+    const {flow,request,navigate}=fixture();
+    await flow.reset('reset'); await flow.sendCode('owner@example.com'); await flow.codeLogin('owner@example.com','123456');
+    expect(request).toHaveBeenCalledWith('/api/experience/verification/verification-code','POST',{identifier:{type:'email',value:'owner@example.com'},interactionEvent:'ForgotPassword'});
+    expect(flow.state.stage).toBe('reset-password');expect(navigate).not.toHaveBeenCalled();
+    expect(request.mock.calls.some(([, , body])=>body?.interactionEvent==='Register')).toBe(false);
+  });
   it('resets a password only after code verification, then returns to login', async () => {
     const { flow, request, navigate } = fixture(); await flow.reset('reset'); await flow.sendCode('13800138000');
     await flow.codeLogin('13800138000', '123456'); expect(flow.state.stage).toBe('reset-password');
@@ -115,6 +122,13 @@ describe('verified account flows', () => {
     await flow.run(() => flow.sendCode('13800138000')); expect(flow.state.error).toContain('网络'); expect(flow.state.busy).toBe(false);
     const navigate = vi.fn(); const invalid = new AuthFlow((async () => ({})) as Requester, navigate);
     await invalid.run(() => invalid.completeProfile('', '', true)); expect(invalid.state.error).not.toBe(''); expect(navigate).not.toHaveBeenCalled();
+  });
+  it('accepts phone/email only and rejects usernames before a request', async () => {
+    expect(identifier(' owner@example.com ')).toEqual({type:'email',value:'owner@example.com'});
+    const {flow,request}=fixture();
+    await expect(flow.passwordLogin('old_username','password')).rejects.toThrow('不支持用户名');
+    expect(request).not.toHaveBeenCalled();
+    expect(()=>identifier('owner@')).toThrow();
   });
   it('normalizes mainland phones and enforces password requirements', () => {
     expect(identifier('+8613800138000')).toEqual({ type: 'phone', value: '8613800138000' });

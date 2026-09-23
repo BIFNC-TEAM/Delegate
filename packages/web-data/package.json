@@ -9,7 +9,8 @@
     "./memory-settings": "./src/memory-settings.ts",
     "./owner-settings": "./src/owner-settings.ts",
     "./owner-identity-profile": "./src/owner-identity-profile.ts",
-    "./owner-avatar-storage": "./src/owner-avatar-storage.ts"
+    "./owner-avatar-storage": "./src/owner-avatar-storage.ts",
+    "./knowledge-web-capture": "./src/knowledge-web-capture.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

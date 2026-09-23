@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 
 import {
   KnowledgeLibraryError,
+  knowledgeBrowserCaptureSchema,
   checksumKnowledgeSource,
   createKnowledgeAsset,
   deleteKnowledgeSource,
@@ -149,6 +150,7 @@ export async function POST(request: Request) {
 
     const body = (await request.json()) as Record<string, unknown>;
     const {
+      browserCapture,
       sourceObjectBucket: _sourceObjectBucket,
       sourceObjectKey: _sourceObjectKey,
       sourceObjectEtag: _sourceObjectEtag,
@@ -156,8 +158,15 @@ export async function POST(request: Request) {
       sourceObjectChecksum: _sourceObjectChecksum,
       ...publicBody
     } = body;
+    const capture = browserCapture === undefined ? null : knowledgeBrowserCaptureSchema.parse(browserCapture);
+    if (capture && publicBody.kind !== "url") throw new KnowledgeLibraryError("浏览器采集仅适用于网址知识。", 422);
     const asset = await createKnowledgeAsset(ownerId, {
       ...(publicBody as KnowledgeAssetCreateInput),
+      ...(capture ? {
+        sourceUrl: capture.sourceUrl,
+        sourceText: capture.text,
+        metadata: { ingestionMethod: "browser_capture", capturedAt: capture.capturedAt },
+      } : {}),
       createdBy: session?.email ?? session?.ownerId ?? "dashboard-owner",
     }, { processingMode: "deferred" });
     const assetId = asset.id;

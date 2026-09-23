@@ -14,6 +14,37 @@ When `MINERU_API_BASE_URL` is configured, PDF, DOCX, PPTX, XLSX, PNG, JPG, and J
 
 The dashboard accepts up to 20 files in one queue and uploads at most three concurrently. Browser upload progress is reported per file; parsing and indexing are then polled separately. A failed upload can retransmit the original file, while an asset that was stored but failed during parsing/indexing uses the existing reprocess action.
 
+## Browser capture and manual verification
+
+The URL import dialog supports two paths:
+
+Local Docker development mounts both the source and the collector assets through `compose.local.yml`. After changing package subpath exports, restart the Dashboard so Turbopack reloads package metadata. After adding the public-assets mount, apply it with `bash scripts/docker-compose-local.sh up -d --no-deps dashboard`.
+
+- **Browser capture (default):** use the Owner's local Chrome or Edge session to open the source, sign in or complete website verification manually, and collect the visible text. Internal/VPN addresses and domains resolved through a local proxy are supported because the Dashboard receives a text snapshot rather than fetching that URL. HTTP/HTTPS source URLs without embedded credentials are accepted. The server's public-URL network checks remain in place for direct fetches.
+- **Direct fetch:** the existing unauthenticated server request for public pages. HTTP 401/403/429 and recognized verification-page titles direct the Owner to browser capture. The server does not solve CAPTCHAs or inherit browser cookies.
+
+Download the local collector from the import dialog, unzip it, and load the unpacked extension in Chrome or Edge's extension manager. The bundle lives in `apps/web/public/knowledge-collector/`; its only permissions are `activeTab` and `scripting`. It has no background worker, cookie access, persistent host access, or outbound upload endpoint. The Owner clicks the extension after verification, previews the text, and saves a `.delegate-webpage.json` file. The file contains the final source URL, title, text, and capture time; treat it with the same confidentiality as the source page.
+
+Select the capture file in the URL import dialog, inspect the final URL and editable text preview, choose visibility and representative bindings, then explicitly confirm import. Changing the preview requires confirmation again. Until submission there is no persisted knowledge job; closing the dialog cancels the pending import. The file is bounded to 3 MiB and the text to 20–400,000 characters. Known login/verification titles, unsupported formats, unknown fields, credential-bearing URLs, and non-HTTP schemes are rejected.
+
+Snapshots remain `kind=url` with `sourceUrl` and `sourceText` persisted. Reprocessing uses the saved text and records the extraction backend as `browser_capture`; it does not revisit the original website. For existing failed URL assets, **Capture in browser** in the details drawer supplies a snapshot in place via an authenticated, Owner-scoped endpoint. It preserves the asset ID, title, tags, visibility and bindings and claims the failed-to-processing transition atomically. Archived, already-processing, ready, non-URL and another Owner's assets cannot be replaced through this repair endpoint.
+
+For recognized Feishu/Slate document roots, the collector includes the editable document body and scans the actual scrolling container from top to bottom, merging virtualized blocks by stable identity (not by text). It restores the original scroll position, ignores partial editor selections, preserves repeated paragraphs, and fails if loading cannot settle within 60 seconds. It does not edit the source document. For other pages, it reads selected text or prefers visible `article`/`main` content before falling back to the body. The user must expand or scroll lazy-loaded content first. It does not capture browser PDF viewers, text drawn in canvas/images, cross-origin iframe bodies, closed shadow roots, or content the logged-in account cannot view. A capture is user-supplied knowledge, not cryptographic proof of a website's contents. Some sites will still refuse access even in a normal browser; keep manual text and file import available.
+
+### Verification
+
+```bash
+pnpm exec vitest run packages/web-data/tests/knowledge-web-capture.test.ts apps/web/tests/knowledge-browser-capture-routes.test.ts
+```
+
+For the actual Chromium/UI smoke test, start an isolated local Dashboard with no database and authentication optional (never change a shared deployment):
+
+```bash
+DATABASE_URL='' OPENVIKING_ENABLED=false DELEGATE_DASHBOARD_AUTH_MODE=optional NEXT_PUBLIC_DASHBOARD_URL=http://localhost:3311 pnpm --filter @delegate/dashboard exec next dev --hostname 127.0.0.1 --port 3311
+```
+
+In a second terminal run `node scripts/tests/knowledge-browser-capture.mjs`. It uses an existing Playwright installation; set `BROWSER_CAPTURE_PLAYWRIGHT_MODULE` to that installation's absolute `index.mjs` path if Playwright is supplied by local QA tooling. No browser dependency is added to the application. The smoke test runs a local login fixture, tests actual DOM capture, preview confirmation, import, and failed-asset repair. Its assets remain in the isolated demo process's memory. Screenshots and results are written to `/tmp/delegate-browser-capture-test` by default.
+
 ## Duplicate and overwrite behavior
 
 The API hashes file bytes before object storage and checks only active, non-archived assets owned by the current workspace owner:
@@ -24,7 +55,7 @@ The API hashes file bytes before object storage and checks only active, non-arch
 
 Archived assets do not participate in conflict detection. Uploading their former filename or content creates a new active asset; restoring an archive remains an explicit action.
 
-Reprocessing always reads the original object again, so parser upgrades apply to existing assets. Failed extraction or indexing leaves the asset in `FAILED` with an ordered processing log and a retry action.
+For uploaded files, reprocessing always reads the original object again, so parser upgrades apply to existing assets. Failed extraction or indexing leaves the asset in `FAILED` with an ordered processing log and a retry action.
 
 ## MinerU configuration
 
@@ -63,3 +94,11 @@ KNOWLEDGE_OBJECT_STORE_SECRET_KEY="..."
 ```
 
 Never commit cloud credentials. Local Compose uses the same bucket name in MinIO and keeps it private.
+
+The virtual-document regression can also be run with the same Playwright installation:
+
+```bash
+node scripts/tests/knowledge-collector-document.mjs
+```
+
+After updating the unpacked collector files, click **Reload** on its Chrome/Edge extension card. Version `1.0.1` fixes cloud-document body filtering and virtual scrolling.

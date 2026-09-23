@@ -832,6 +832,58 @@ describe("production Pi conversation processor", () => {
     expect(mocks.updatePiStream).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { kind: "faq", question: "你们的经营范围主要在哪里？", title: "你们的经营范围主要在哪里？", answer: "中国大陆、中国香港和中国澳门。", modelQuery: "Lin 的营业执照登记地址及主营业务覆盖区域", refined: false, remote: false },
+    { kind: "materials", question: "安装手册怎么下载？", title: "安装手册怎么下载？", answer: "在资料页面获取安装手册。", modelQuery: "部署说明文档", refined: false, remote: false },
+    { kind: "policies", question: "退货需要满足哪些条件？", title: "退货需要满足哪些条件？", answer: "未拆封商品可在七日内申请退货。", modelQuery: "订单取消条例", refined: false, remote: false },
+    { kind: "policies", question: "试用期也一样吗？", title: "试用期员工年假规则", answer: "试用期员工适用相同年假规则。", modelQuery: "试用期员工年假规则", refined: true, remote: false },
+  ])("retrieves published $kind evidence through the adapter (refined=$refined, remote=$remote)", async ({ kind, question, title, answer, modelQuery, refined, remote }) => {
+    mocks.claimGeneration.mockResolvedValueOnce(generationItem({ userText: question }));
+    const setup = await mocks.getSetup.getMockImplementation()!();
+    mocks.getSetup.mockResolvedValueOnce({
+      ...setup,
+      knowledgePack: {
+        identitySummary: "Lin provides AI automation services.",
+        faq: [{ title: "你有什么昵称吗？", summary: "小Lin。" }],
+        materials: [],
+        policies: [],
+        [kind]: [{ title, summary: answer }],
+      },
+    });
+    mocks.probeKnowledgeMetadata.mockImplementation(async ({ queryText }) => ({
+      status: queryText === (refined ? modelQuery : question) ? "hit" : "miss",
+      candidateCount: 1,
+      matchedTopics: [],
+      probeRevision: "probe-test",
+    }));
+    if (remote) {
+      mocks.recallContext.mockResolvedValueOnce({
+        items: [{ memoryUseItemId: "remote-identity", internalSource: { publicTitle: "Identity" }, abstract: "Lin provides AI automation services." }],
+        citations: [],
+      });
+    }
+    const baseResult = await mocks.piRun.getMockImplementation()!();
+    let evidence: { text: string; sources: Array<{ title: string }> } | undefined;
+    mocks.piRun.mockImplementationOnce(async (input) => {
+      evidence = await input.capabilities.knowledge.retrieve({
+        query: modelQuery,
+        maximumResults: 6,
+        context: {},
+        signal: new AbortController().signal,
+      });
+      return baseResult;
+    });
+
+    await expect(processNextPiConversationWork(config)).resolves.toMatchObject({ status: "completed" });
+    expect(evidence?.text).toContain(answer);
+    expect(evidence?.sources).toContainEqual(expect.objectContaining({ title }));
+    expect(mocks.recallContext).toHaveBeenCalledWith(expect.objectContaining({
+      queryText: refined ? modelQuery : question,
+      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
+    }));
+    expect(mocks.getSetup).toHaveBeenCalledWith("sktone", "version-pi");
+  });
+
   it("uses the exact visitor question when model query expansion misses the knowledge fence", async () => {
     mocks.probeKnowledgeMetadata.mockImplementation(async (input) => ({
       status: input.queryText === "世界上面积最大的大洲是什么？" ? "hit" : "miss",

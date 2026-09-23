@@ -1285,7 +1285,7 @@ function buildPiAdapters(input: {
           channel: "knowledge" as const,
         }));
         const snapshotItems = recalled.items.length
-          ? [] : retrievePublishedSnapshotKnowledge(input.setup.knowledgePack, query);
+          ? [] : retrievePublishedSnapshotKnowledge(input.setup.knowledgePack, retrievalQuery);
         const snapshotSources = snapshotItems.map((entry) => ({
           id: entry.id,
           title: entry.title,

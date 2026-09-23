@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>网页知识采集</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><span>KNOWLEDGE INTAKE</span><h1>采集当前网页</h1></header>
+  <p>在网页中完成登录或安全验证，并展开需要的正文。也可以先选中需要的段落，再打开此工具。</p>
+  <button id="capture" type="button">验证完成，采集正文</button>
+  <p id="status" role="status" aria-live="polite"></p>
+  <section id="preview" hidden>
+    <h2 id="title"></h2><p id="source"></p>
+    <label>正文预览<textarea id="text" rows="10" readonly></textarea></label>
+    <p id="count"></p>
+    <button id="download" type="button">保存采集文件</button>
+    <p>返回 Delegate → 导入网址 → 浏览器采集，选择此文件并确认导入。文件包含当前页面正文，请按内部资料要求保管。</p>
+  </section>
+  <footer>仅采集你主动选择的网页内容，不读取 Cookie、密码或其他标签页。内网页面需要当前浏览器已能访问。</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

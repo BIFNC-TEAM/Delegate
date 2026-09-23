@@ -146,3 +146,5 @@ export * from "./wallet-exceptions";
 export * from "./wechat-pay-api-v3";
 export * from "./wechat-pay-operations";
 export * from "./wechat-pay-release-flags";
+
+export * from "./knowledge-web-capture";

@@ -18,6 +18,7 @@ import { z } from "zod";
 import { demoRepresentative } from "@delegate/domain";
 
 import { prisma } from "./prisma";
+import { isKnowledgeVerificationPage, knowledgeBrowserCaptureSchema, knowledgeCaptureUrlSchema, type KnowledgeBrowserCapture } from "./knowledge-web-capture";
 import {
   extractDocumentWithMinerU,
   MinerUError,
@@ -704,6 +705,42 @@ export async function replaceKnowledgeAssetSource(
   return getKnowledgeAsset(scopedOwnerId, assetId);
 }
 
+export async function replaceFailedKnowledgeUrlWithBrowserCapture(
+  ownerId: string | null | undefined,
+  assetId: string,
+  input: KnowledgeBrowserCapture,
+): Promise<KnowledgeAssetRecord> {
+  const capture = knowledgeBrowserCaptureSchema.parse(input);
+  const asset = await getKnowledgeAsset(ownerId, assetId);
+  if (asset.kind !== "url" || asset.status !== "failed") {
+    throw new KnowledgeLibraryError("仅可补充处理失败的网址知识，请刷新状态后重试。", 409);
+  }
+  // Redirected pages are allowed, but the user must review their final URL and text.
+  const message = "已确认浏览器采集正文，等待重新构建摘要和索引。";
+  if (shouldUseDemoKnowledge(ownerId)) {
+    const stored = requireDemoAsset(assetId);
+    if (stored.status !== "failed") throw new KnowledgeLibraryError("知识正在处理中，请稍后重试。", 409);
+    Object.assign(stored, {
+      sourceUrl: capture.sourceUrl, sourceText: capture.text, status: "processing",
+      processingError: null, updatedAt: new Date().toISOString(),
+    });
+    stored.processingLogs.push(demoLog("browser_capture", "info", message));
+    return cloneDemoAsset(stored);
+  }
+  const scopedOwnerId = requireOwnerId(ownerId);
+  await prisma.$transaction(async (tx) => {
+    const updated = await tx.knowledgeAsset.updateMany({
+      where: { id: assetId, ownerId: scopedOwnerId, kind: KnowledgeAssetKind.URL, status: KnowledgeAssetStatus.FAILED },
+      data: { sourceUrl: capture.sourceUrl, sourceText: capture.text, status: KnowledgeAssetStatus.PROCESSING, processingError: null },
+    });
+    if (updated.count !== 1) throw new KnowledgeLibraryError("知识状态已变化，请刷新后重试。", 409);
+    await tx.knowledgeProcessingLog.create({
+      data: { assetId, stage: "browser_capture", message, metadata: { capturedAt: capture.capturedAt, captureTitle: capture.title } },
+    });
+  });
+  return getKnowledgeAsset(scopedOwnerId, assetId);
+}
+
 export async function createKnowledgeAsset(
   ownerId: string | null | undefined,
   input: KnowledgeAssetCreateInput,
@@ -1278,6 +1315,10 @@ export function inferKnowledgeTags(text: string, title = ""): string[] {
 }
 
 function validateCreateSource(input: z.output<typeof knowledgeAssetCreateSchema>) {
+  if (input.kind === "url" && input.sourceText !== undefined) {
+    knowledgeCaptureUrlSchema.parse(input.sourceUrl);
+    z.string().trim().min(20).max(MAX_SOURCE_CHARACTERS).parse(input.sourceText);
+  }
   if (input.kind === "url" && !input.sourceUrl) {
     throw new KnowledgeLibraryError("URL 知识必须提供有效网址。", 422);
   }
@@ -1301,7 +1342,8 @@ type KnowledgeExtractionBackend =
   | "docx_fallback"
   | "plain_text"
   | "authored_text"
-  | "public_url";
+  | "public_url"
+  | "browser_capture";
 
 async function resolveAssetText(input: {
   kind: z.infer<typeof assetKindSchema>;
@@ -1335,6 +1377,10 @@ async function resolveAssetText(input: {
     return { text: input.sourceText ?? "", backend: "authored_text" };
   }
   if (!input.sourceUrl) throw new KnowledgeLibraryError("URL 知识缺少来源网址。", 422);
+  if (input.sourceText?.trim()) {
+    knowledgeCaptureUrlSchema.parse(input.sourceUrl);
+    return { text: input.sourceText, backend: "browser_capture" };
+  }
   return { text: await fetchKnowledgeUrl(input.sourceUrl), backend: "public_url" };
 }
 
@@ -1348,6 +1394,7 @@ function extractionBackendLabel(backend: KnowledgeExtractionBackend) {
     plain_text: "纯文本",
     authored_text: "手工文本",
     public_url: "公开网页",
+    browser_capture: "浏览器采集快照",
   };
   return labels[backend];
 }
@@ -1362,12 +1409,19 @@ async function fetchKnowledgeUrl(rawUrl: string): Promise<string> {
       signal: controller.signal,
       headers: { "User-Agent": "Delegate-Knowledge-Ingest/1.0", Accept: "text/html,text/plain" },
     });
-    if (!response.ok) throw new KnowledgeLibraryError(`无法读取网址（HTTP ${response.status}）。`, 422);
+    if (!response.ok) throw new KnowledgeLibraryError(
+      `无法读取网址（HTTP ${response.status}）。${[401, 403, 429].includes(response.status) ? " 请使用浏览器采集，完成登录或验证后导入正文。" : ""}`,
+      422,
+    );
     const contentLength = Number(response.headers.get("content-length") || 0);
     if (contentLength > MAX_FILE_BYTES) throw new KnowledgeLibraryError("网址内容超过 15 MB 限制。", 413);
     const body = await response.text();
     if (body.length > MAX_SOURCE_CHARACTERS * 2) {
       throw new KnowledgeLibraryError("网址正文过长，请拆分后导入。", 413);
+    }
+    const pageTitle = body.match(/<title\b[^>]*>([\s\S]*?)<\/title>/iu)?.[1] ?? "";
+    if (isKnowledgeVerificationPage(htmlToText(pageTitle))) {
+      throw new KnowledgeLibraryError("网页要求登录或安全验证，请使用浏览器采集并确认正文。", 422);
     }
     return htmlToText(body);
   } catch (error) {

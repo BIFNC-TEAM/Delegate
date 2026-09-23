@@ -29,7 +29,7 @@ Select the capture file in the URL import dialog, inspect the final URL and edit
 
 Snapshots remain `kind=url` with `sourceUrl` and `sourceText` persisted. Reprocessing uses the saved text and records the extraction backend as `browser_capture`; it does not revisit the original website. For existing failed URL assets, **Capture in browser** in the details drawer supplies a snapshot in place via an authenticated, Owner-scoped endpoint. It preserves the asset ID, title, tags, visibility and bindings and claims the failed-to-processing transition atomically. Archived, already-processing, ready, non-URL and another Owner's assets cannot be replaced through this repair endpoint.
 
-The collector reads the selected text, or prefers visible `article`/`main` content before falling back to the page body. The user must expand or scroll lazy-loaded content first. It does not capture browser PDF viewers, text drawn in canvas/images, cross-origin iframe bodies, closed shadow roots, or content the logged-in account cannot view. A capture is user-supplied knowledge, not cryptographic proof of a website's contents. Some sites will still refuse access even in a normal browser; keep manual text and file import available.
+For recognized Feishu/Slate document roots, the collector includes the editable document body and scans the actual scrolling container from top to bottom, merging virtualized blocks by stable identity (not by text). It restores the original scroll position, ignores partial editor selections, preserves repeated paragraphs, and fails if loading cannot settle within 60 seconds. It does not edit the source document. For other pages, it reads selected text or prefers visible `article`/`main` content before falling back to the body. The user must expand or scroll lazy-loaded content first. It does not capture browser PDF viewers, text drawn in canvas/images, cross-origin iframe bodies, closed shadow roots, or content the logged-in account cannot view. A capture is user-supplied knowledge, not cryptographic proof of a website's contents. Some sites will still refuse access even in a normal browser; keep manual text and file import available.
 
 ### Verification
 
@@ -94,3 +94,11 @@ KNOWLEDGE_OBJECT_STORE_SECRET_KEY="..."
 ```
 
 Never commit cloud credentials. Local Compose uses the same bucket name in MinIO and keeps it private.
+
+The virtual-document regression can also be run with the same Playwright installation:
+
+```bash
+node scripts/tests/knowledge-collector-document.mjs
+```
+
+After updating the unpacked collector files, click **Reload** on its Chrome/Edge extension card. Version `1.0.1` fixes cloud-document body filtering and virtual scrolling.

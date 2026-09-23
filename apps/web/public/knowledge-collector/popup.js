@@ -6,7 +6,7 @@ captureButton.addEventListener("click", async () => {
   captureButton.disabled = true;
   snapshot = null;
   preview.hidden = true;
-  status.textContent = "正在读取当前网页…";
+  status.textContent = "正在读取正文；长文档会自动滚动，请保持窗口打开…";
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) throw new Error("请先打开要采集的网页。");
@@ -19,7 +19,7 @@ captureButton.addEventListener("click", async () => {
     document.getElementById("text").value = result.text;
     document.getElementById("count").textContent = `${result.text.length.toLocaleString()} 字符`;
     preview.hidden = false;
-    status.textContent = "采集完成，请检查正文是否包含你需要的内容。";
+    status.textContent = "正文已采集，请核对开头、末尾及需要的章节是否齐全。";
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : "无法读取此页面。";
   } finally { captureButton.disabled = false; }

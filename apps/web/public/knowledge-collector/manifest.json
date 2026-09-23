@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Delegate 网页知识采集",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "手动采集当前网页可见正文，预览后导入 Delegate 知识库。",
   "permissions": ["activeTab", "scripting"],
   "action": { "default_popup": "popup.html", "default_title": "采集当前网页" }

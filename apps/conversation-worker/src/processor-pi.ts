@@ -1284,26 +1284,39 @@ function buildPiAdapters(input: {
             ?? `知识资料 ${index + 1}`,
           channel: "knowledge" as const,
         }));
+        const snapshotMatches = retrievePublishedSnapshotKnowledge(
+          input.setup.knowledgePack,
+          retrievalQuery,
+        );
+        // A direct published answer must not disappear just because remote
+        // recall returned other, potentially less relevant, documents.
         const snapshotItems = recalled.items.length
-          ? [] : retrievePublishedSnapshotKnowledge(input.setup.knowledgePack, retrievalQuery);
+          ? snapshotMatches.filter((entry) =>
+              normalizeKnowledgeQuestion(entry.title) === normalizeKnowledgeQuestion(retrievalQuery))
+          : snapshotMatches;
         const snapshotSources = snapshotItems.map((entry) => ({
           id: entry.id,
           title: entry.title,
           channel: "knowledge" as const,
         }));
+        const evidence = [
+          ...snapshotItems.map((entry) => `[${entry.title}] ${entry.summary}`),
+          ...recalled.items.map((entry, index) => `[${sources[index]!.title}] ${entry.abstract}`),
+        ];
         return {
           status: recalled.items.length || snapshotItems.length
             ? "found" : recalled.memoryUseRunId ? "not_found" : "unavailable",
-          text: recalled.items.length
+          text: evidence.length
             ? [
                 "仅使用下列授权资料回答。正文不要列出资料标题、内部 ID、版本或来源清单；产品会在回答下方统一显示来源说明。不得补充或声称未在结果中出现的课程标准、教材、网站或其他权威来源。",
-                ...recalled.items.map((entry, index) => `[${sources[index]!.title}] ${entry.abstract}`),
+                ...evidence,
               ].join("\n\n")
-            : snapshotItems.length
-              ? snapshotItems.map((entry) => `[${entry.title}] ${entry.summary}`).join("\n\n")
-              : recalled.memoryUseRunId ? "授权知识库没有找到支持该问题的资料。" : "授权知识检索当前不可用。",
+            : recalled.memoryUseRunId ? "授权知识库没有找到支持该问题的资料。" : "授权知识检索当前不可用。",
           sources: [...sources, ...snapshotSources],
           details: {
+            retrievalPath: recalled.items.length
+              ? snapshotItems.length ? "recall_with_exact_snapshot" : "recall"
+              : "published_snapshot",
             querySource: retrievalQuery === input.item.userText.trim()
               ? "current_user_request"
               : "model_refinement",
@@ -1760,6 +1773,10 @@ function searchableTerms(value: string): Set<string> {
     for (let index = 0; index < run.length - 1; index += 1) terms.add(run.slice(index, index + 2));
   }
   return terms;
+}
+
+function normalizeKnowledgeQuestion(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\p{P}\p{Z}\s]/gu, "");
 }
 
 function isConfiguredStructuredDataSkill(skill: {

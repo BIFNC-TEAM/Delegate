@@ -834,6 +834,7 @@ describe("production Pi conversation processor", () => {
 
   it.each([
     { kind: "faq", question: "你们的经营范围主要在哪里？", title: "你们的经营范围主要在哪里？", answer: "中国大陆、中国香港和中国澳门。", modelQuery: "Lin 的营业执照登记地址及主营业务覆盖区域", refined: false, remote: false },
+    { kind: "faq", question: "你们的经营范围主要在哪里?", title: "你们的经营范围主要在哪里？", answer: "中国大陆、中国香港和中国澳门。", modelQuery: "Lin 的营业执照登记地址及主营业务覆盖区域", refined: false, remote: true },
     { kind: "materials", question: "安装手册怎么下载？", title: "安装手册怎么下载？", answer: "在资料页面获取安装手册。", modelQuery: "部署说明文档", refined: false, remote: false },
     { kind: "policies", question: "退货需要满足哪些条件？", title: "退货需要满足哪些条件？", answer: "未拆封商品可在七日内申请退货。", modelQuery: "订单取消条例", refined: false, remote: false },
     { kind: "policies", question: "试用期也一样吗？", title: "试用期员工年假规则", answer: "试用期员工适用相同年假规则。", modelQuery: "试用期员工年假规则", refined: true, remote: false },

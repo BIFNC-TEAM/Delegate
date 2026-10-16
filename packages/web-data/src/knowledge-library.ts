@@ -1,3 +1,4 @@
+import { knowledgeTitleSchema, knowledgeOriginalFileNameSchema } from "./knowledge-filenames";
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
@@ -70,14 +71,14 @@ const representativeKnowledgeBindingSchema = z.object({
 
 export const knowledgeAssetCreateSchema = z.object({
   kind: assetKindSchema,
-  title: z.string().trim().min(1).max(180),
+  title: knowledgeTitleSchema,
   visibility: assetVisibilitySchema.default("owner_only"),
   sourceUrl: z.string().trim().url().max(2_048).optional(),
   sourceText: z.string().max(MAX_SOURCE_CHARACTERS).optional(),
-  originalFileName: z.string().trim().max(260).optional(),
+  originalFileName: knowledgeOriginalFileNameSchema.optional(),
   mimeType: z.string().trim().max(160).optional(),
   sizeBytes: z.number().int().min(0).max(MAX_FILE_BYTES).optional(),
-  sourceObjectBucket: z.string().trim().min(1).max(180).optional(),
+  sourceObjectBucket: knowledgeTitleSchema.optional(),
   sourceObjectKey: z.string().trim().min(1).max(1_024).optional(),
   sourceObjectEtag: z.string().trim().max(180).optional(),
   sourceObjectVersion: z.string().trim().max(300).optional(),
@@ -89,7 +90,7 @@ export const knowledgeAssetCreateSchema = z.object({
 });
 
 export const knowledgeAssetUpdateSchema = z.object({
-  title: z.string().trim().min(1).max(180).optional(),
+  title: knowledgeTitleSchema.optional(),
   visibility: assetVisibilitySchema.optional(),
   tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
   representativeLinks: z.array(representativeLinkSchema).max(100).optional(),
@@ -97,10 +98,10 @@ export const knowledgeAssetUpdateSchema = z.object({
 
 const knowledgeAssetSourceReplacementSchema = z.object({
   kind: fileAssetKindSchema,
-  originalFileName: z.string().trim().min(1).max(260),
+  originalFileName: knowledgeOriginalFileNameSchema.min(1),
   mimeType: z.string().trim().max(160),
   sizeBytes: z.number().int().min(1).max(MAX_FILE_BYTES),
-  sourceObjectBucket: z.string().trim().min(1).max(180),
+  sourceObjectBucket: knowledgeTitleSchema,
   sourceObjectKey: z.string().trim().min(1).max(1_024),
   sourceObjectEtag: z.string().trim().max(180).optional(),
   sourceObjectVersion: z.string().trim().max(300).optional(),
@@ -546,7 +547,7 @@ export async function findKnowledgeFileConflicts(
   ownerId: string | null | undefined,
   input: { fileName: string; checksum: string },
 ): Promise<KnowledgeFileConflicts> {
-  const fileName = z.string().trim().min(1).max(260).parse(input.fileName);
+  const fileName = knowledgeOriginalFileNameSchema.min(1).parse(input.fileName);
   const checksum = z.string().trim().length(64).parse(input.checksum);
   if (shouldUseDemoKnowledge(ownerId)) {
     const candidates = demoKnowledgeAssets
@@ -587,7 +588,7 @@ export async function resolveUniqueKnowledgeAssetTitle(
   ownerId: string | null | undefined,
   requestedTitle: string,
 ): Promise<string> {
-  const baseTitle = z.string().trim().min(1).max(180).parse(requestedTitle);
+  const baseTitle = knowledgeTitleSchema.parse(requestedTitle);
   const titles = shouldUseDemoKnowledge(ownerId)
     ? demoKnowledgeAssets.map((asset) => asset.title)
     : (await prisma.knowledgeAsset.findMany({

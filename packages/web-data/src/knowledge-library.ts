@@ -19,6 +19,7 @@ import { z } from "zod";
 import { demoRepresentative } from "@delegate/domain";
 
 import { prisma } from "./prisma";
+import { nextObsidianFileName, obsidianImportSchema, type ObsidianImportMetadata } from "./knowledge-obsidian";
 import { isKnowledgeVerificationPage, knowledgeBrowserCaptureSchema, knowledgeCaptureUrlSchema, type KnowledgeBrowserCapture } from "./knowledge-web-capture";
 import {
   extractDocumentWithMinerU,
@@ -78,7 +79,7 @@ export const knowledgeAssetCreateSchema = z.object({
   originalFileName: knowledgeOriginalFileNameSchema.optional(),
   mimeType: z.string().trim().max(160).optional(),
   sizeBytes: z.number().int().min(0).max(MAX_FILE_BYTES).optional(),
-  sourceObjectBucket: knowledgeTitleSchema.optional(),
+  sourceObjectBucket: z.string().trim().min(1).max(180).optional(),
   sourceObjectKey: z.string().trim().min(1).max(1_024).optional(),
   sourceObjectEtag: z.string().trim().max(180).optional(),
   sourceObjectVersion: z.string().trim().max(300).optional(),
@@ -101,7 +102,7 @@ const knowledgeAssetSourceReplacementSchema = z.object({
   originalFileName: knowledgeOriginalFileNameSchema.min(1),
   mimeType: z.string().trim().max(160),
   sizeBytes: z.number().int().min(1).max(MAX_FILE_BYTES),
-  sourceObjectBucket: knowledgeTitleSchema,
+  sourceObjectBucket: z.string().trim().min(1).max(180),
   sourceObjectKey: z.string().trim().min(1).max(1_024),
   sourceObjectEtag: z.string().trim().max(180).optional(),
   sourceObjectVersion: z.string().trim().max(300).optional(),
@@ -145,6 +146,7 @@ export type RepresentativeKnowledgeBindingResult = {
 };
 
 export type KnowledgeAssetRecord = {
+  obsidianImport?: ObsidianImportMetadata;
   id: string;
   kind: z.infer<typeof assetKindSchema>;
   status: "processing" | "ready" | "failed" | "archived";
@@ -547,7 +549,7 @@ export async function findKnowledgeFileConflicts(
   ownerId: string | null | undefined,
   input: { fileName: string; checksum: string },
 ): Promise<KnowledgeFileConflicts> {
-  const fileName = knowledgeOriginalFileNameSchema.min(1).parse(input.fileName);
+  const fileName = z.string().trim().min(1).max(260).parse(input.fileName);
   const checksum = z.string().trim().length(64).parse(input.checksum);
   if (shouldUseDemoKnowledge(ownerId)) {
     const candidates = demoKnowledgeAssets
@@ -588,7 +590,7 @@ export async function resolveUniqueKnowledgeAssetTitle(
   ownerId: string | null | undefined,
   requestedTitle: string,
 ): Promise<string> {
-  const baseTitle = knowledgeTitleSchema.parse(requestedTitle);
+  const baseTitle = z.string().trim().min(1).max(180).parse(requestedTitle);
   const titles = shouldUseDemoKnowledge(ownerId)
     ? demoKnowledgeAssets.map((asset) => asset.title)
     : (await prisma.knowledgeAsset.findMany({
@@ -603,6 +605,15 @@ export async function resolveUniqueKnowledgeAssetTitle(
     if (!occupied.has(candidate.toLocaleLowerCase())) return candidate;
   }
   throw new KnowledgeLibraryError("无法为同名知识生成唯一标题。", 409);
+}
+
+export async function listKnowledgeImportNames(ownerId: string | null | undefined) {
+  return shouldUseDemoKnowledge(ownerId)
+    ? demoKnowledgeAssets.map(({ title, originalFileName }) => ({ title, originalFileName }))
+    : prisma.knowledgeAsset.findMany({
+      where: { ownerId: requireOwnerId(ownerId) },
+      select: { title: true, originalFileName: true },
+    });
 }
 
 export async function replaceKnowledgeAssetSource(
@@ -745,12 +756,17 @@ export async function replaceFailedKnowledgeUrlWithBrowserCapture(
 export async function createKnowledgeAsset(
   ownerId: string | null | undefined,
   input: KnowledgeAssetCreateInput,
-  options: { processingMode?: "inline" | "deferred" } = {},
+  options: { processingMode?: "inline" | "deferred"; numberFileName?: boolean } = {},
 ): Promise<KnowledgeAssetRecord> {
   const parsed = knowledgeAssetCreateSchema.parse(input);
   validateCreateSource(parsed);
+  const obsidian = parsed.metadata?.obsidianImport === undefined ? undefined : obsidianImportSchema.parse(parsed.metadata.obsidianImport);
   if (shouldUseDemoKnowledge(ownerId)) {
     validateDemoLinks(parsed.representativeLinks);
+    if (options.numberFileName && parsed.originalFileName) {
+      parsed.originalFileName = nextObsidianFileName(parsed.originalFileName, demoKnowledgeAssets);
+      parsed.title = parsed.originalFileName.replace(/\.[^.]+$/, "");
+    }
     const now = new Date().toISOString();
     const asset: KnowledgeAssetRecord = {
       id: `knowledge_${randomUUID()}`,
@@ -758,6 +774,7 @@ export async function createKnowledgeAsset(
       status: "processing",
       visibility: parsed.visibility,
       title: parsed.title,
+      ...(obsidian ? { obsidianImport: obsidian } : {}),
       originalFileName: parsed.originalFileName ?? null,
       mimeType: parsed.mimeType ?? null,
       sizeBytes: parsed.sizeBytes ?? null,
@@ -796,42 +813,49 @@ export async function createKnowledgeAsset(
     throw new KnowledgeLibraryError("不能引用其他工作区的知识对象。", 403);
   }
   await assertRepresentativeLinksBelongToOwner(scopedOwnerId, parsed.representativeLinks);
-  const created = await prisma.knowledgeAsset.create({
-    data: {
-      ownerId: scopedOwnerId,
-      kind: toAssetKind(parsed.kind),
-      status: KnowledgeAssetStatus.PROCESSING,
-      visibility: toVisibility(parsed.visibility),
-      title: parsed.title,
-      ...(parsed.originalFileName ? { originalFileName: parsed.originalFileName } : {}),
-      ...(parsed.mimeType ? { mimeType: parsed.mimeType } : {}),
-      ...(parsed.sizeBytes !== undefined ? { sizeBytes: parsed.sizeBytes } : {}),
-      ...(parsed.sourceUrl ? { sourceUrl: parsed.sourceUrl } : {}),
-      ...(parsed.sourceText ? { sourceText: parsed.sourceText } : {}),
-      ...(parsed.sourceObjectBucket ? { sourceObjectBucket: parsed.sourceObjectBucket } : {}),
-      ...(parsed.sourceObjectKey ? { sourceObjectKey: parsed.sourceObjectKey } : {}),
-      ...(parsed.sourceObjectEtag ? { sourceObjectEtag: parsed.sourceObjectEtag } : {}),
-      ...(parsed.sourceObjectVersion ? { sourceObjectVersion: parsed.sourceObjectVersion } : {}),
-      ...(parsed.sourceObjectChecksum ? { sourceObjectChecksum: parsed.sourceObjectChecksum } : {}),
-      tags: normalizeTags(parsed.tags),
-      processingVersion: 0,
-      ...(parsed.createdBy ? { createdBy: parsed.createdBy } : {}),
-      ...(parsed.metadata ? { metadata: parsed.metadata as Prisma.InputJsonValue } : {}),
-      representativeLinks: {
-        create: parsed.representativeLinks.map((link) => ({
-          representativeId: link.representativeId,
-          usageMode: toUsageMode(link.usageMode),
-          reviewStatus: toReviewStatus(link.reviewStatus),
-          enabled: link.enabled,
-          priority: link.priority,
-        })),
-      },
-      processingLogs: {
-        create: { stage: "queued", message: "知识资产已创建，等待内容处理。" },
-      },
+  const data: Prisma.KnowledgeAssetUncheckedCreateInput = {
+    ownerId: scopedOwnerId,
+    kind: toAssetKind(parsed.kind),
+    status: KnowledgeAssetStatus.PROCESSING,
+    visibility: toVisibility(parsed.visibility),
+    title: parsed.title,
+    ...(parsed.originalFileName ? { originalFileName: parsed.originalFileName } : {}),
+    ...(parsed.mimeType ? { mimeType: parsed.mimeType } : {}),
+    ...(parsed.sizeBytes !== undefined ? { sizeBytes: parsed.sizeBytes } : {}),
+    ...(parsed.sourceUrl ? { sourceUrl: parsed.sourceUrl } : {}),
+    ...(parsed.sourceText ? { sourceText: parsed.sourceText } : {}),
+    ...(parsed.sourceObjectBucket ? { sourceObjectBucket: parsed.sourceObjectBucket } : {}),
+    ...(parsed.sourceObjectKey ? { sourceObjectKey: parsed.sourceObjectKey } : {}),
+    ...(parsed.sourceObjectEtag ? { sourceObjectEtag: parsed.sourceObjectEtag } : {}),
+    ...(parsed.sourceObjectVersion ? { sourceObjectVersion: parsed.sourceObjectVersion } : {}),
+    ...(parsed.sourceObjectChecksum ? { sourceObjectChecksum: parsed.sourceObjectChecksum } : {}),
+    tags: normalizeTags(parsed.tags),
+    processingVersion: 0,
+    ...(parsed.createdBy ? { createdBy: parsed.createdBy } : {}),
+    ...(parsed.metadata ? { metadata: parsed.metadata as Prisma.InputJsonValue } : {}),
+    representativeLinks: {
+      create: parsed.representativeLinks.map((link) => ({
+        representativeId: link.representativeId,
+        usageMode: toUsageMode(link.usageMode),
+        reviewStatus: toReviewStatus(link.reviewStatus),
+        enabled: link.enabled,
+        priority: link.priority,
+      })),
     },
-    select: { id: true },
-  });
+    processingLogs: {
+      create: { stage: "queued", message: "知识资产已创建，等待内容处理。" },
+    },
+  };
+  const created = options.numberFileName && parsed.originalFileName
+    ? await prisma.$transaction(async (tx) => {
+      // Serialize naming and insertion across server processes, scoped to this owner.
+      const key = `delegate:knowledge-import-name:${scopedOwnerId}`;
+      await tx.$queryRaw`WITH acquired AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))) SELECT 1::int FROM acquired`;
+      const names = await tx.knowledgeAsset.findMany({ where: { ownerId: scopedOwnerId }, select: { title: true, originalFileName: true } });
+      const fileName = nextObsidianFileName(parsed.originalFileName!, names);
+      return tx.knowledgeAsset.create({ data: { ...data, originalFileName: fileName, title: fileName.replace(/\.[^.]+$/, "") }, select: { id: true } });
+    })
+    : await prisma.knowledgeAsset.create({ data, select: { id: true } });
   return options.processingMode === "deferred"
     ? getKnowledgeAsset(scopedOwnerId, created.id)
     : processKnowledgeAsset(scopedOwnerId, created.id);
@@ -1596,7 +1620,9 @@ const knowledgeAssetInclude = {
 } as const;
 
 function serializeAsset(asset: AssetWithRelations): KnowledgeAssetRecord {
+  const source = obsidianImportSchema.safeParse((asset.metadata as Record<string, unknown> | null)?.obsidianImport);
   return {
+    ...(source.success ? { obsidianImport: source.data } : {}),
     id: asset.id,
     kind: fromAssetKind(asset.kind),
     status: fromAssetStatus(asset.status),

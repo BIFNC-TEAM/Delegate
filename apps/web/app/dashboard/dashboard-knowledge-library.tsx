@@ -256,6 +256,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   const [visibility, setVisibility] = useState<Visibility>(repairAsset?.visibility ?? "owner_only");
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
+  const [obsidianBatch, setObsidianBatch] = useState(0);
   const [obsidianQueue, setObsidianQueue] = useState<UploadQueueItem[]>([]);
   const queue = mode === "obsidian" ? obsidianQueue : fileQueue;
   const setQueue = mode === "obsidian" ? setObsidianQueue : setFileQueue;
@@ -284,7 +285,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
 
   function preparedObsidian(items: ObsidianUpload[], removeSelection?: (path: string) => void) {
     removeObsidianSelection.current = removeSelection;
-    setObsidianQueue(items.map(({ file, metadata, previewText }): UploadQueueItem => ({ id: metadata.sourcePath, file, obsidianImport: metadata, previewText, status: "queued", progress: 0 })));
+    setObsidianQueue((current) => [...current.filter((item) => item.status !== "queued"), ...items.map(({ file, metadata, previewText }): UploadQueueItem => ({ id: metadata.sourcePath, file, obsidianImport: metadata, previewText, status: "queued", progress: 0 }))]);
   }
 
   function removeQueueItem(item: UploadQueueItem) {
@@ -396,6 +397,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     try {
       await runWithConcurrency(items, UPLOAD_CONCURRENCY, (item) => uploadQueueItem(item, policy));
     } finally {
+      if (mode === "obsidian") { setObsidianBatch((current) => current + 1); removeObsidianSelection.current = undefined; }
       setSubmitting(false);
     }
   }
@@ -486,7 +488,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       <header><div><span>Knowledge Intake</span><h2>{zh ? "导入新的知识" : "Import new knowledge"}</h2><p>{zh ? "支持批量上传、进度跟踪和失败重试；导入后会自动提取正文、生成摘要与标签。" : "Batch upload with progress and retry; Delegate then extracts, summarizes, tags, and indexes every source."}</p></div><button aria-label={zh ? "关闭" : "Close"} disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">×</button></header>
       <nav className="knowledge-import-tabs">{((repairAsset ? ["url"] : ["file", "url", "text", "obsidian"]) as ImportMode[]).map((item) => <button className={mode === item ? "is-active" : undefined} disabled={submitting || isUploading || preparing} key={item} onClick={() => setMode(item)} type="button"><span>{item === "file" ? "▤" : item === "url" ? "↗" : item === "obsidian" ? "⇥" : "Aa"}</span>{item === "file" ? (zh ? "上传文件" : "Upload files") : item === "url" ? (zh ? "导入网址" : "Import URL") : item === "obsidian" ? (zh ? "第三方导入" : "Third-party import") : (zh ? "手工文本" : "Manual text")}</button>)}</nav>
       <form onSubmit={submit}>
-        {!repairAsset ? <div hidden={mode !== "obsidian"}><KnowledgeObsidianImport activeSlug={activeSlug} zh={zh} disabled={submitting || obsidianQueue.some((item) => item.status === "uploading" || item.status === "processing")} onPrepared={preparedObsidian} onBusyChange={setPreparing} /></div> : null}
+        {!repairAsset ? <div hidden={mode !== "obsidian"}><KnowledgeObsidianImport key={obsidianBatch} activeSlug={activeSlug} zh={zh} disabled={submitting || obsidianQueue.some((item) => item.status === "uploading" || item.status === "processing")} onPrepared={preparedObsidian} onBusyChange={setPreparing} /></div> : null}
         {fileMode ? <>
           {mode === "file" ? <>
           <div className={`knowledge-dropzone${queue.length ? " has-file" : ""}`} onClick={() => { if (!submitting) fileRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!submitting) addFiles(Array.from(event.dataTransfer.files)); }}>

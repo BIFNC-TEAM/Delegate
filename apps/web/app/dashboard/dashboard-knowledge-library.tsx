@@ -257,6 +257,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
   const [obsidianBatch, setObsidianBatch] = useState(0);
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [obsidianQueue, setObsidianQueue] = useState<UploadQueueItem[]>([]);
   const queue = mode === "obsidian" ? obsidianQueue : fileQueue;
   const setQueue = mode === "obsidian" ? setObsidianQueue : setFileQueue;
@@ -274,10 +275,12 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   const queuedCount = queue.filter((item) => item.status === "queued").length;
   const failedCount = queue.filter((item) => item.status === "failed").length;
   const completedCount = queue.filter((item) => item.status === "completed" || item.status === "skipped").length;
+  const previewItem = queue.find((item) => item.id === previewingId);
   const closeDialog = useCallback(() => {
+    if (previewingId) { setPreviewingId(null); return; }
     if (!submitting && !isUploading && !preparing) onClose();
-  }, [isUploading, onClose, submitting, preparing]);
-  useModalBehavior(closeDialog, ".knowledge-import-dialog");
+  }, [isUploading, onClose, submitting, preparing, previewingId]);
+  useModalBehavior(closeDialog, previewItem ? ".knowledge-preview-dialog" : ".knowledge-import-dialog");
 
   function updateQueueItem(itemId: string, patch: Partial<Omit<UploadQueueItem, "id" | "file">>) {
     setQueue((current) => current.map((item) => item.id === itemId ? { ...item, ...patch } : item));
@@ -285,6 +288,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
 
   function preparedObsidian(items: ObsidianUpload[], removeSelection?: (path: string) => void) {
     removeObsidianSelection.current = removeSelection;
+    setPreviewingId((current) => items.some(({ metadata }) => metadata.sourcePath === current) ? current : null);
     setObsidianQueue((current) => [...current.filter((item) => item.status !== "queued"), ...items.map(({ file, metadata, previewText }): UploadQueueItem => ({ id: metadata.sourcePath, file, obsidianImport: metadata, previewText, status: "queued", progress: 0 }))]);
   }
 
@@ -484,7 +488,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   }
 
   return <div className="knowledge-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) closeDialog(); }} role="presentation">
-    <section aria-label={zh ? "导入知识" : "Import knowledge"} aria-modal="true" className="knowledge-import-dialog" role="dialog">
+    <section aria-label={zh ? "导入知识" : "Import knowledge"} aria-modal={previewItem ? undefined : true} inert={Boolean(previewItem)} className="knowledge-import-dialog" role="dialog">
       <header><div><span>Knowledge Intake</span><h2>{zh ? "导入新的知识" : "Import new knowledge"}</h2><p>{zh ? "支持批量上传、进度跟踪和失败重试；导入后会自动提取正文、生成摘要与标签。" : "Batch upload with progress and retry; Delegate then extracts, summarizes, tags, and indexes every source."}</p></div><button aria-label={zh ? "关闭" : "Close"} disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">×</button></header>
       <nav className="knowledge-import-tabs">{((repairAsset ? ["url"] : ["file", "url", "text", "obsidian"]) as ImportMode[]).map((item) => <button className={mode === item ? "is-active" : undefined} disabled={submitting || isUploading || preparing} key={item} onClick={() => setMode(item)} type="button"><span>{item === "file" ? "▤" : item === "url" ? "↗" : item === "obsidian" ? "⇥" : "Aa"}</span>{item === "file" ? (zh ? "上传文件" : "Upload files") : item === "url" ? (zh ? "导入网址" : "Import URL") : item === "obsidian" ? (zh ? "第三方导入" : "Third-party import") : (zh ? "手工文本" : "Manual text")}</button>)}</nav>
       <form onSubmit={submit}>
@@ -506,6 +510,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
               <span className="knowledge-upload-file-icon">{fileMark(uploadFileKind(item.file.name))}</span>
               <div className="knowledge-upload-item-main"><header><strong title={item.obsidianImport?.sourcePath ?? item.file.name}>{item.displayName ?? item.file.name}</strong><span>{uploadStatusLabel(item.status, zh)}</span></header><small>{formatBytes(item.file.size)}{item.message ? ` · ${item.message}` : ""}</small><div className="knowledge-upload-progress"><i style={{ width: `${item.progress}%` }} /></div></div>
               <div className="knowledge-upload-actions">
+                {item.previewText !== undefined ? <button type="button" disabled={preparing} aria-label={zh ? `预览 ${item.file.name}` : `Preview ${item.file.name}`} aria-haspopup="dialog" onClick={() => setPreviewingId(item.id)}>{zh ? "预览" : "Preview"}</button> : null}
                 {item.status === "failed" ? <button disabled={submitting || preparing} onClick={() => void runWithRetry(item)} type="button">↻ {item.assetId ? (zh ? "重新处理" : "Reprocess") : (zh ? "重传" : "Retry")}</button> : null}
                 {item.status === "skipped" ? <button onClick={() => void runUploads([item], "replace_existing")} type="button">↻ {zh ? "覆盖重传" : "Replace"}</button> : null}
                 {!(["uploading", "processing"] as UploadQueueStatus[]).includes(item.status) ? <button aria-label={zh ? `移除 ${item.file.name}` : `Remove ${item.file.name}`} className="is-remove" disabled={submitting || preparing} onClick={() => removeQueueItem(item)} type="button">×</button> : null}
@@ -525,6 +530,16 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
         <footer><button disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">{fileMode && completedCount ? (zh ? "完成" : "Done") : (zh ? "取消" : "Cancel")}</button><button className="is-primary" disabled={submitting || preparing || (fileMode && !queuedCount) || (!repairAsset && visibility === "selected_representatives" && !linkedIds.length) || (mode === "url" && urlMethod === "browser" && (!capture || capture.text.trim().length < 20 || !captureConfirmed))} type="submit">{preparing ? <><i className="knowledge-spinner" />{zh ? "正在准备…" : "Preparing…"}</> : submitting ? <><i className="knowledge-spinner" />{mode === "obsidian" && !isUploading ? (zh ? "正在处理知识…" : "Processing knowledge…") : (zh ? "正在上传…" : "Uploading…")}</> : fileMode ? <>{zh ? `开始上传${queuedCount ? ` (${queuedCount})` : ""}` : `Start upload${queuedCount ? ` (${queuedCount})` : ""}`}<span>→</span></> : <>{zh ? "开始处理" : "Start processing"}<span>→</span></>}</button></footer>
       </form>
     </section>
+    {previewItem ? <div className="knowledge-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setPreviewingId(null); }}>
+      <section className="knowledge-import-dialog knowledge-preview-dialog" role="dialog" aria-modal="true" aria-label={zh ? "笔记预览" : "Note preview"}>
+        <header><div><span>{zh ? "笔记预览" : "Note preview"}</span><h2>{previewItem.displayName ?? previewItem.file.name}</h2></div><button type="button" aria-label={zh ? "关闭预览" : "Close preview"} onClick={() => setPreviewingId(null)}>×</button></header>
+        <div className="knowledge-preview-content knowledge-obsidian-preview">
+                {previewItem.obsidianImport?.warnings.length ? <ul className="knowledge-obsidian-warnings">{previewItem.obsidianImport.warnings.map((warning) => <li key={warning}>{warning.replace(/selected\/[^/]+\//g, "").replace("引用重名，请明确路径", "引用重名，请区分笔记名称后重新选择")}</li>)}</ul> : null}
+                <pre>{previewItem.previewText}</pre>
+                {previewItem.obsidianImport && Object.keys(previewItem.obsidianImport.properties).length ? <details><summary>{zh ? "笔记属性" : "Note properties"}</summary><pre>{JSON.stringify(previewItem.obsidianImport.properties, null, 2)}</pre></details> : null}
+        </div>
+      </section>
+    </div> : null}
   </div>;
 }
 

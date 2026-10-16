@@ -1029,6 +1029,9 @@
 .knowledge-upload-list article { display: grid; grid-template-columns: 34px minmax(0,1fr) auto; gap: 10px; align-items: center; min-height: 66px; padding: 10px 12px; border-bottom: 1px solid var(--v2-line); }
 .knowledge-upload-list article:last-child { border-bottom: 0; }
 .knowledge-upload-file-icon { display: grid; width: 34px; height: 38px; place-items: center; border: 1px solid #bfdbfe; border-radius: 7px; color: #2563eb; background: #eff6ff; font-family: var(--font-mono),monospace; font-size: .52rem; font-weight: 850; }
+.knowledge-preview-dialog h2 { overflow-wrap: anywhere; }
+.knowledge-preview-content { padding: 0 24px 24px; }
+.knowledge-preview-content pre { max-height: 60vh; margin: 0; }
 .knowledge-upload-item-main { display: grid; min-width: 0; gap: 5px; }
 .knowledge-upload-item-main > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .knowledge-upload-item-main strong { overflow: hidden; font-size: .64rem; text-overflow: ellipsis; white-space: nowrap; }

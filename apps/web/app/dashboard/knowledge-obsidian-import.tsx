@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  KNOWLEDGE_TITLE_MAX_LENGTH, renameKnowledgeMarkdownFile,
   isObsidianNotePath, MAX_OBSIDIAN_NOTES, MAX_OBSIDIAN_SELECTION_BYTES,
   nextObsidianFileName, parseObsidianNote, prepareObsidianNotes,
   type KnowledgeName, type ObsidianImportMetadata, type PreparedObsidianNote,
@@ -14,6 +15,8 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
   onPrepared: (items: ObsidianUpload[], removeSelection?: (path: string) => void) => void; onBusyChange: (busy: boolean) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const customNames = useRef<Record<string, string>>({});
+  const [nameErrors, setNameErrors] = useState<Record<string, string>>({});
   const preparationRef = useRef<AbortController | null>(null);
   useEffect(() => () => preparationRef.current?.abort(), []);
   const [files, setFiles] = useState<NoteFile[]>([]);
@@ -22,7 +25,7 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
   const [ignoredCount, setIgnoredCount] = useState(0);
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const renames = preview.filter((note) => note.fileName !== note.path.split("/").pop());
+  const renames = preview.filter((note) => note.fileName !== note.path.split("/").pop() || customNames.current[note.path]);
   const requestedPaths = [...new Set(preview.flatMap((note) => note.requestedPaths))];
   const locked = disabled || busy;
 
@@ -55,6 +58,19 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
     if (notes.length) updateSelection([...files, ...notes], new Set([...selected, ...notes.map(({ path }) => path)]));
   }
 
+  function saveName(note: PreparedObsidianNote, input: HTMLInputElement) {
+    try {
+      const fileName = renameKnowledgeMarkdownFile(note.fileName, input.value);
+      setNameErrors((current) => ({ ...current, [note.path]: "" }));
+      if (fileName === note.fileName) return;
+      customNames.current[note.path] = fileName;
+      void prepare(files, selected);
+    } catch (error) {
+      input.value = note.fileName.replace(/\.[^.]+$/, "");
+      setNameErrors((current) => ({ ...current, [note.path]: error instanceof Error ? error.message : "名称无效。" }));
+    }
+  }
+
   async function prepare(noteFiles: NoteFile[], selection: Set<string>) {
     preparationRef.current?.abort();
     const controller = new AbortController();
@@ -77,7 +93,7 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
       controller.signal.throwIfAborted();
       const names = [...payload.names];
       for (const note of prepared) {
-        note.fileName = nextObsidianFileName(note.fileName, names);
+        note.fileName = nextObsidianFileName(customNames.current[note.path] ?? note.fileName, names);
         names.push({ originalFileName: note.fileName, title: note.fileName.replace(/\.[^.]+$/, "") });
       }
       setPreview(prepared);
@@ -113,7 +129,7 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
     </fieldset> : null}
     {errors.length ? <div className="knowledge-form-error" role="alert">{errors.map(displayMessage).join("\n")}<button type="button" disabled={locked || !selected.size} onClick={() => void prepare(files, selected)}>{zh ? "重新准备" : "Retry preparation"}</button></div> : null}
     {renames.length || requestedPaths.length ? <div className="knowledge-obsidian-preview">
-      {renames.length ? <div className="knowledge-obsidian-notice" role="status"><p>{zh ? "下列上传文件与已有文件或本批其他文件重名，已自动更改名称：" : "These filenames have been renamed to avoid duplicates:"}</p><ul>{renames.map((note) => <li key={note.path}>{note.path.split("/").pop()} → <strong>{note.fileName}</strong></li>)}</ul></div> : null}
+      {renames.length ? <div className="knowledge-obsidian-notice" role="status"><p>{zh ? "下列上传文件与已有文件或本批其他文件重名，已自动更改名称，也可自行修改名称：" : "These filenames have been renamed to avoid duplicates. You can also edit them:"}</p><ul>{renames.map((note) => <li key={note.path} className="knowledge-rename-item"><span>{note.path.split("/").pop()} →</span><label className="knowledge-rename-input"><input key={note.fileName} aria-label={zh ? `修改 ${note.path.split("/").pop()} 的名称` : `Rename ${note.path.split("/").pop()}`} disabled={locked} maxLength={KNOWLEDGE_TITLE_MAX_LENGTH} defaultValue={note.fileName.replace(/\.[^.]+$/, "")} onBlur={(event) => saveName(note, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /><span>{note.fileName.match(/\.[^.]+$/)?.[0]}</span></label>{nameErrors[note.path] ? <small role="alert">{nameErrors[note.path]}</small> : null}</li>)}</ul></div> : null}
       {requestedPaths.length ? <div className="knowledge-obsidian-notice"><p>{zh ? "以下引用笔记尚未获准导入。可以逐项允许，待上传内容会自动更新；未允许的内容不会上传。" : "These referenced notes are not selected. Allow individual notes to update the upload automatically; unselected content is never uploaded."}</p><ul>{requestedPaths.map((path) => <li key={path}><span>{path.split("/").pop()}</span><button type="button" disabled={locked} onClick={() => selectPaths([path], true)}>{zh ? "允许并勾选" : "Allow and select"}</button></li>)}</ul></div> : null}
 
     </div> : null}

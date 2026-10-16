@@ -82,7 +82,7 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
       if (includeArchived) params.set("includeArchived", "true");
       const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets?${params}`, { cache: "no-store", signal: controller.signal });
       const payload = await readResponse<LibraryResponse>(response);
-      setAssets(payload.assets);
+      setAssets(sortKnowledgeAssets(payload.assets));
       setRepresentatives(payload.representatives);
       setSelectedId((current) => current && !payload.assets.some((asset) => asset.id === current) ? null : current);
     } catch (loadError) {
@@ -221,7 +221,7 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
       </section>
 
       </div>
-      {importOpen ? <KnowledgeImportDialog repairAsset={captureAsset ?? undefined} activeSlug={activeSlug} locale={locale} onClose={() => { setImportOpen(false); setCaptureAsset(null); }} onCreated={(asset) => { setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]); }} representatives={representatives} /> : null}
+      {importOpen ? <KnowledgeImportDialog repairAsset={captureAsset ?? undefined} activeSlug={activeSlug} locale={locale} onClose={() => { setImportOpen(false); setCaptureAsset(null); }} onCreated={(asset) => { setAssets((current) => sortKnowledgeAssets(current.some((item) => item.id === asset.id) ? current.map((item) => item.id === asset.id ? asset : item) : [...current, asset])); }} representatives={representatives} /> : null}
       {selected ? <KnowledgeDetailDrawer onBrowserCapture={() => { setCaptureAsset(selected); setSelectedId(null); setImportOpen(true); }} activeSlug={activeSlug} asset={selected} locale={locale} onAction={runAssetAction} onClose={() => setSelectedId(null)} onDelete={permanentlyDelete} onUpdated={(asset) => setAssets((current) => current.map((item) => item.id === asset.id ? asset : item))} representatives={representatives} /> : null}
     </>
   );
@@ -629,4 +629,8 @@ function useModalBehavior(onClose: () => void, selector: string) {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [onClose, selector]);
+}
+
+function sortKnowledgeAssets(assets: KnowledgeAssetRecord[]) {
+  return [...assets].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
 }

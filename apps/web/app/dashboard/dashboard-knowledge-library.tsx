@@ -295,7 +295,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     for (let attempt = 0; attempt < PROCESSING_POLL_ATTEMPTS; attempt += 1) {
       await waitFor(PROCESSING_POLL_INTERVAL_MS);
       try {
-        const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets/${assetId}`, { cache: "no-store" });
+        const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets/${assetId}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
         const { asset } = await readResponse<{ asset: KnowledgeAssetRecord }>(response);
         transientFailures = 0;
         onCreated(asset);
@@ -307,7 +307,13 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
           updateQueueItem(itemId, { status: "failed", progress: 100, assetId, message: asset.processingError ?? (zh ? "知识处理失败" : "Knowledge processing failed") });
           return;
         }
-        updateQueueItem(itemId, { status: "processing", progress: Math.min(96, 82 + Math.floor(attempt / 8)), assetId, message: zh ? "正在解析并写入向量索引" : "Parsing and indexing" });
+        const indexing = asset.processingLogs.at(-1)?.stage === "vectorize";
+        updateQueueItem(itemId, {
+          status: "processing", progress: Math.min(96, 82 + Math.floor(attempt / 8)), assetId,
+          message: zh
+            ? `文件已上传，${indexing ? "正在建立检索索引" : "正在解析知识内容"}`
+            : `File uploaded; ${indexing ? "building search index" : "processing content"}`,
+        });
       } catch (pollError) {
         transientFailures += 1;
         if (transientFailures >= 4) {

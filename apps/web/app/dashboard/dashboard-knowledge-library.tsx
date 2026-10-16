@@ -578,7 +578,27 @@ function KnowledgeDetailDrawer({ activeSlug, asset, locale, representatives, onC
   </aside></div>;
 }
 
-function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: Locale }) { const zh = locale === "zh"; const facts = [[zh ? "来源类型" : "Source type", kindLabel(asset.kind)], [zh ? "文件大小" : "File size", asset.sizeBytes ? formatBytes(asset.sizeBytes) : "—"], [zh ? "处理版本" : "Processing version", `v${asset.processingVersion}`], [zh ? "最近处理" : "Last processed", asset.processedAt ? formatDate(asset.processedAt, locale) : "—"], [zh ? "创建时间" : "Created", formatDate(asset.createdAt, locale)], [zh ? "可见范围" : "Visibility", visibilityLabel(asset.visibility, zh)]]; return <section className="knowledge-detail-facts">{facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>; }
+function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: Locale }) {
+  const zh = locale === "zh";
+  const facts = [
+    [zh ? "来源类型" : "Source type", asset.obsidianImport ? "Obsidian" : kindLabel(asset.kind)],
+    [zh ? "文件大小" : "File size", asset.sizeBytes ? formatBytes(asset.sizeBytes) : "—"],
+    [zh ? "处理版本" : "Processing version", `v${asset.processingVersion}`],
+    [zh ? "最近处理" : "Last processed", asset.processedAt ? formatDate(asset.processedAt, locale) : "—"],
+    [zh ? "创建时间" : "Created", formatDate(asset.createdAt, locale)],
+    [zh ? "可见范围" : "Visibility", visibilityLabel(asset.visibility, zh)],
+  ];
+  return <>
+    <section className="knowledge-detail-facts">{facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>
+    {asset.obsidianImport ? <section className="knowledge-obsidian-preview">
+      <details><summary>{zh ? "Obsidian 来源与属性" : "Obsidian source and properties"}</summary>
+        <p>{asset.obsidianImport.sourcePath}</p>
+        <pre>{JSON.stringify(asset.obsidianImport.properties, null, 2)}</pre>
+        {asset.obsidianImport.warnings.length ? <ul className="knowledge-obsidian-warnings">{asset.obsidianImport.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
+      </details>
+    </section> : null}
+  </>;
+}
 function StatusBadge({ status, zh }: { status: KnowledgeAssetRecord["status"]; zh: boolean }) { const labels = { ready: zh ? "已完成" : "Ready", processing: zh ? "处理中" : "Processing", failed: zh ? "异常" : "Failed", archived: zh ? "已归档" : "Archived" }; return <span className={`knowledge-status is-${status}`}><i />{labels[status]}</span>; }
 function RepresentativeStack({ links, zh }: { links: KnowledgeAssetRecord["representativeLinks"]; zh: boolean }) { const enabled = links.filter((link) => link.enabled); return enabled.length ? <div className="knowledge-rep-stack" title={enabled.map((link) => link.representativeName).join(", ")}>{enabled.slice(0, 3).map((link) => <span key={link.representativeId}>{link.representativeName.slice(0, 1)}</span>)}{enabled.length > 3 ? <b>+{enabled.length - 3}</b> : null}<small>{enabled.length}</small></div> : <span className="knowledge-unlinked">{zh ? "未关联" : "Not linked"}</span>; }
 function LoadingRows() { return <>{[0, 1, 2].map((item) => <tr className="knowledge-loading-row" key={item}><td colSpan={7}><span /></td></tr>)}</>; }

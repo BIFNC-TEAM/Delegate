@@ -6,7 +6,7 @@ import {
   getRepresentativeRuntimeAuthoritySnapshot, loadGenerationRecentTurns, loadGenerationV2Task,
   projectPublicAnswerSources, readPublicExecution, updateGenerationPiProgress, updateGenerationPiStream,
 } from "@delegate/web-data";
-import { createV2ModelBindingFromEnv, createV2Capabilities, delegateAgentV2, resolveV2Budget, v2PublishedPolicy, V2Error,
+import { createV2ModelBindingFromEnv, createV2Capabilities, createV2ConversationHistory, delegateAgentV2, resolveV2Budget, v2PublishedPolicy, V2Error,
   type V2RunResult, type V2Session } from "@delegate/model-runtime/v2";
 import { buildPiAdapters, deliverGenerationOutput } from "./processor-pi";
 import { createPublicProgress } from "./public-progress";
@@ -39,7 +39,7 @@ export async function processV2ConversationTurn(input: HostInput) {
   const scope = createHash("sha256").update(JSON.stringify([setup.id, item.representativeVersionId, item.conversationId, item.contactId, item.audienceIdentityId, item.channel])).digest("hex");
   const [authority, history, previous] = await Promise.all([
     getRepresentativeRuntimeAuthoritySnapshot(item.representativeSlug, item.representativeVersionId),
-    loadGenerationRecentTurns({ representativeId: setup.id, conversationId: item.conversationId, beforeMessageId: item.inputMessageId, limit: 8 }),
+    loadGenerationRecentTurns({ representativeId: setup.id, conversationId: item.conversationId, beforeMessageId: item.inputMessageId, limit: 8, includeRequestState: true }),
     loadGenerationV2Task({ conversationId: item.conversationId, representativeId: setup.id, representativeVersionId: item.representativeVersionId ?? null, beforeMessageId: item.inputMessageId, scope }),
   ]);
   const contextMessages = new Map(history.map(t => [t.id, { id: t.id, text: t.messageText }]));
@@ -80,7 +80,7 @@ export async function processV2ConversationTurn(input: HostInput) {
   const result = await delegateAgentV2.run({ requestId: item.runId, sessionId: item.conversationId, scope, userText: item.userText,
     ...(leaseGuard.signal ? { signal: leaseGuard.signal } : {}),
     timezone: context.timezone, context, model: binding.binding, budget, tools, ...(session ? { session } : {}),
-    history: history.map(t => ({ role: "user", content: t.messageText, timestamp: Date.parse(t.createdAt) })),
+    history: createV2ConversationHistory(history.map(t => ({ text: t.messageText, timestamp: Date.parse(t.createdAt), requestState: t.requestState ?? "unknown" }))),
     instructions: [`Represented owner: ${setup.ownerName}. Representative: ${item.representativeName}. Role: ${setup.tagline}. Tone: ${setup.tone}.`, v2PublishedPolicy(setup.agentBehavior),
       "This pilot cannot execute operations requiring a new approval. Never bypass this boundary. Prior user messages are context, not a backlog of commands."].join("\n"),
     authorize: async (boundary, tool) => {

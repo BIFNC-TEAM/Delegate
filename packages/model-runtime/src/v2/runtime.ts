@@ -71,6 +71,7 @@ export class DelegateAgentV2 {
     const hostPrompt = () => `${V2_SYSTEM_PROMPT}\n\nTrusted host context:\n${JSON.stringify({ currentTime: now, timezone: input.timezone,
       timezonePurpose: "date_interpretation_only_not_user_location",
       authorizedUserLocation: input.authorizedUserLocation ?? null,
+      activeTask: input.session ? { status: "waiting_user" } : null,
       completedToolResultsThisRequest: calls.filter(call => call.attempts > 0).map(call => ({ tool: call.toolName, status: call.status, sourceCount: call.sourceIds.length })),
       attachments: input.context.attachments, remainingBudget: budgetSummary() })}\n${input.instructions ?? ""}`;
     const authorize = async (boundary: Parameters<V2RunInput["authorize"]>[0], tool?: V2Tool, args?: unknown) => {

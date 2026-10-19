@@ -5317,6 +5317,8 @@ export async function loadGenerationRecentTurns(input: {
   beforeMessageId: string;
   limit?: number;
   focusCurrentTask?: boolean;
+  /** V2 reference metadata only; never replays prior assistant/tool bodies. */
+  includeRequestState?: boolean;
 }) {
   const [before, policy] = await Promise.all([
     prisma.message.findUnique({
@@ -5386,12 +5388,32 @@ export async function loadGenerationRecentTurns(input: {
     // context, never present all old topics as a backlog of user commands.
     if (!anchorId) selected = selected.slice(-3);
   }
+  const requestStates = new Map<string, string>();
+  if (input.includeRequestState && selected.length) {
+    const requests = await prisma.generationRun.findMany({ where: {
+      conversationId: input.conversationId, episodeId: before.episodeId,
+      conversation: { representativeId: input.representativeId },
+      inputMessageId: { in: selected.map(message => message.id) }, createdAt: { lt: before.createdAt },
+    }, orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { inputMessageId: true, status: true, contextSnapshot: true } });
+    for (const request of requests) {
+      if (requestStates.has(request.inputMessageId)) continue;
+      const snapshot = isJsonRecord(request.contextSnapshot) ? request.contextSnapshot : {};
+      const trace = isJsonRecord(snapshot.agentTrace) ? snapshot.agentTrace : {};
+      const state = request.status === "CANCELED" ? "cancelled" : request.status === "FAILED" ? "failed"
+        : trace.runtime === "delegate-agent-v2" && typeof trace.status === "string"
+        && ["completed", "partial", "waiting_user", "failed", "cancelled"].includes(trace.status) ? trace.status
+        : request.status === "COMPLETED" ? "answered" : "in_progress";
+      requestStates.set(request.inputMessageId, state);
+    }
+  }
   return selected.map((message, index) => ({
     id: message.id ?? `recent-${index + 1}`,
     direction: "inbound" as const,
     messageText: message.text || "",
     createdAt: message.createdAt?.toISOString() ?? new Date(0).toISOString(),
     ...(input.focusCurrentTask ? { taskAnchor: message.id === anchorId } : {}),
+    ...(input.includeRequestState ? { requestState: requestStates.get(message.id) ?? "unknown" } : {}),
   }));
 }
 

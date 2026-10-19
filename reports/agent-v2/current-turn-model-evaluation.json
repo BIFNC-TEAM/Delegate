@@ -1,0 +1,149 @@
+{
+  "mode": "real-model-controlled-tools",
+  "model": "qwen3.8-27b",
+  "repeats": 3,
+  "promptSha256": "98c502c6692d55a82b1e5af2b5064b08f02cfe2b0a1e9c8bd6b88cbda9603f11",
+  "conditions": "Prior weather request is marked completed. No prescribed model tool sequence. Followup checks tool selection only because the synthetic weather tool always returns Shanghai.",
+  "rows": [
+    {
+      "repeat": 0,
+      "question": "你好",
+      "text": "\n\n你好！我是周行知，很高兴为你服务。请问有什么可以帮你的吗？",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 1109.935416
+    },
+    {
+      "repeat": 0,
+      "question": "谢谢",
+      "text": "\n\n不客气！如果之后还想了解深圳或其他地方的天气、出行安排，随时告诉我。",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 989.5670829999999
+    },
+    {
+      "repeat": 0,
+      "question": "只翻译成英文：明天深圳天气怎么样？",
+      "text": "\n\nHow's the weather in Shenzhen tomorrow?",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 487.493375
+    },
+    {
+      "repeat": 0,
+      "question": "那北京呢？",
+      "text": "我查询了当前实时观测源，但两次返回的观测数据都只包含上海（20°C，多云，观测时间 2026-10-19 09:00 +08:00）[S:202da9cac8a6f3a4aa852888]，没有返回北京的天气记录，因此目前无法确认北京今天的天气。建议稍后再试或从正式气象渠道核实。",
+      "status": "partial",
+      "modelCalls": 3,
+      "toolCalls": 2,
+      "toolNames": [
+        "search_current_web",
+        "search_current_web"
+      ],
+      "expectedPathPassed": true,
+      "durationMs": 4891.471084
+    },
+    {
+      "repeat": 1,
+      "question": "你好",
+      "text": "\n\n你好！我是周行知，很高兴为你服务。请问今天有什么可以帮你的吗？",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 747.8746250000004
+    },
+    {
+      "repeat": 1,
+      "question": "谢谢",
+      "text": "\n\n不客气！如果之后还想了解深圳或其他地方的天气、出行安排，随时告诉我。",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 787.268709
+    },
+    {
+      "repeat": 1,
+      "question": "只翻译成英文：明天深圳天气怎么样？",
+      "text": "\n\nHow's the weather in Shenzhen tomorrow?",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 451.2987499999999
+    },
+    {
+      "repeat": 1,
+      "question": "那北京呢？",
+      "text": "我查询了北京今天的天气，但返回的实时观测数据实际记录的是上海（20°C，多云，观测时间 2026-10-19 09:00 +08:00）[S:202da9cac8a6f3a4aa852888]，与北京这一查询目标不符。因此目前无法据此确认北京的天气，建议以正式气象来源核实。",
+      "status": "partial",
+      "modelCalls": 3,
+      "toolCalls": 2,
+      "toolNames": [
+        "search_current_web",
+        "search_current_web"
+      ],
+      "expectedPathPassed": true,
+      "durationMs": 5112.480167
+    },
+    {
+      "repeat": 2,
+      "question": "你好",
+      "text": "\n\n你好！我是周行知，很高兴为你服务。请问有什么可以帮你的吗？",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 734.217541
+    },
+    {
+      "repeat": 2,
+      "question": "谢谢",
+      "text": "\n\n不客气！如果之后还想了解深圳或其他地方的天气、出行安排，随时告诉我。",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 764.6511660000015
+    },
+    {
+      "repeat": 2,
+      "question": "只翻译成英文：明天深圳天气怎么样？",
+      "text": "\n\nHow's the weather in Shenzhen tomorrow?",
+      "status": "completed",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "expectedPathPassed": true,
+      "durationMs": 449.71795900000143
+    },
+    {
+      "repeat": 2,
+      "question": "那北京呢？",
+      "text": "\n\n我查了实时观测，但返回的数据对不上：查询目标是北京，可实际返回的观测是**上海 20°C、多云**（观测时间 2026-10-19 09:00，来源 [S:202da9cac8a6f3a4aa852888]）。\n\n也就是说，这次拿到的并不是北京的天气，我无法据此确认北京的情况。需要的话我可以再试一次，或你确认下是否要按上海这条数据来看。",
+      "status": "completed",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "search_current_web"
+      ],
+      "expectedPathPassed": true,
+      "durationMs": 6621.880125
+    }
+  ]
+}

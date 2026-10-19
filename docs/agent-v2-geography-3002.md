@@ -1,5 +1,7 @@
 # 地理代表切换 V2：3002 部署记录
 
+后续已修复“完成天气后说你好又查天气”的上下文问题，当前 worker 配置与新镜像见[当前轮次修复记录](agent-v2-current-turn-fix.md)。下文保留最初切换和配置保留证据。
+
 2026-10-19，按用户明确要求，将现有本机 `3002` 的 `founder-representative-2` 切换为最新 V2，主模型使用用户提供的 `qwen3.8-27b` 端点。
 
 入口：<http://localhost:3002/reps/founder-representative-2?lang=zh>。刷新原页面后发送新消息即可；旧消息和已固定为旧流程的历史运行不会被改写或重跑。

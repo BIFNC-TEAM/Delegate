@@ -147,6 +147,8 @@ V2 默认对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus`
 
 SDK 的 `authorizedUserLocation` 只能由可信主机提供已获授权的位置，缺省为 `null`；worker 不从时区、IP 或检索结果推断位置。模型同时收到本次真实工具结果摘要（不含原始参数），避免把工具描述或计划当成已经执行。
 
+会话历史以带真实请求状态的参考数据提供，当前消息单独作为本轮目标；不重放旧助手事实或把已完成的历史请求当待办。等待澄清的任务单独标记，正常指代与续问仍由主模型判断，见[连续对话修复与复测](agent-v2-current-turn-fix.md)。
+
 ## 来源、状态与数据保存
 
 返回 `text / sources / artifacts / status / calls / events / spans / usage / taskUsage / firstTextMs`。来源 ID 由范围、来源身份、版本和 URL 稳定派生；模型使用 `[S:id]`，worker 映射为允许公开的来源标题，真实链接通过既有来源栏显示。内部 ledger 映射 `sourceBindings` 不进入公开 API 或审计。

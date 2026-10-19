@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
     findMany: vi.fn(),
     findFirst: vi.fn(),
   },
-  generationRun: { findFirst: vi.fn() },
+  generationRun: { findFirst: vi.fn(), findMany: vi.fn() },
   representativeMemoryPolicy: {
     findUnique: vi.fn(),
   },
@@ -27,6 +27,7 @@ describe("generation recent-turn recall boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.generationRun.findFirst.mockResolvedValue(null);
+    mocks.generationRun.findMany.mockResolvedValue([]);
     mocks.message.findFirst.mockResolvedValue(null);
     mocks.message.findUnique.mockResolvedValue({
       createdAt: new Date("2026-08-04T10:05:00.000Z"),
@@ -87,6 +88,45 @@ describe("generation recent-turn recall boundary", () => {
       },
     ]);
     expect(recentTurns.every((turn) => turn.direction === "inbound")).toBe(true);
+    expect(mocks.generationRun.findMany).not.toHaveBeenCalled();
+  });
+
+  it("adds only real request state from the same bounded episode, never previous answer bodies", async () => {
+    mocks.generationRun.findMany.mockResolvedValue([
+      { inputMessageId: "message-second", status: "COMPLETED", contextSnapshot: { agentTrace: {
+        runtime: "delegate-agent-v2", status: "completed", text: "revoked answer body" } } },
+      { inputMessageId: "message-second", status: "FAILED", contextSnapshot: null },
+      { inputMessageId: "message-first", status: "COMPLETED", contextSnapshot: { agentTrace: { runtime: "delegate-agent-v2", status: "waiting_user" } } },
+    ]);
+    const turns = await loadGenerationRecentTurns({ representativeId: "representative-1", conversationId: "conversation-1",
+      beforeMessageId: "message-current", includeRequestState: true });
+    expect(turns.find(t => t.id === "message-second")?.requestState).toBe("completed");
+    expect(turns.find(t => t.id === "message-first")?.requestState).toBe("waiting_user");
+    expect(JSON.stringify(turns)).not.toContain("revoked answer body");
+    expect(mocks.generationRun.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {
+      conversationId: "conversation-1", episodeId: "episode-1", conversation: { representativeId: "representative-1" },
+      inputMessageId: { in: ["message-second", "message-first"] }, createdAt: { lt: new Date("2026-08-04T10:05:00.000Z") },
+    } }));
+  });
+
+  it("does not invent success for a missing or legacy execution record", async () => {
+    mocks.generationRun.findMany.mockResolvedValue([{ inputMessageId: "message-first", status: "COMPLETED", contextSnapshot: null }]);
+    const turns = await loadGenerationRecentTurns({ representativeId: "representative-1", conversationId: "conversation-1", beforeMessageId: "current", includeRequestState: true });
+    expect(turns.find(t => t.id === "message-first")?.requestState).toBe("answered");
+    expect(turns.find(t => t.id === "message-second")?.requestState).toBe("unknown");
+    mocks.representativeMemoryPolicy.findUnique.mockResolvedValue({ shortTermMemoryEnabled: false });
+    mocks.generationRun.findMany.mockClear();
+    expect(await loadGenerationRecentTurns({ representativeId: "representative-1", conversationId: "conversation-1", beforeMessageId: "current", includeRequestState: true })).toEqual([]);
+    expect(mocks.generationRun.findMany).not.toHaveBeenCalled();
+  });
+  it("does not label canceled or failed delivery as complete just because model generation finished", async () => {
+    mocks.generationRun.findMany.mockResolvedValue([
+      { inputMessageId: "message-first", status: "CANCELED", contextSnapshot: { agentTrace: { runtime: "delegate-agent-v2", status: "completed" } } },
+      { inputMessageId: "message-second", status: "FAILED", contextSnapshot: { agentTrace: { runtime: "delegate-agent-v2", status: "completed" } } },
+    ]);
+    const turns = await loadGenerationRecentTurns({ representativeId: "representative-1", conversationId: "conversation-1", beforeMessageId: "current", includeRequestState: true });
+    expect(turns.find(t => t.id === "message-first")?.requestState).toBe("cancelled");
+    expect(turns.find(t => t.id === "message-second")?.requestState).toBe("failed");
   });
 
   it("returns no prior turns when short-term memory is disabled", async () => {

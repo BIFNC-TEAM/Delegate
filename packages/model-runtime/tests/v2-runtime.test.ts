@@ -1,6 +1,6 @@
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { DelegateAgentV2, V2Error, createV2Capabilities, V2_SYSTEM_PROMPT, type V2RunInput, type V2Tool } from "../src/v2";
+import { DelegateAgentV2, V2Error, createV2Capabilities, createV2ConversationHistory, V2_SYSTEM_PROMPT, type V2RunInput, type V2Tool } from "../src/v2";
 import { toolExecutionRequestSchema } from "../../compute-protocol/src";
 
 const call = (name: string, args: Record<string, unknown> = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
@@ -61,6 +61,22 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
       return fauxAssistantMessage("done");
     }], { tools: [tool()] }));
   });
+  it("separates historical requests from the latest user message without an intent router", async () => {
+    const history = createV2ConversationHistory([
+      { text: "今天天气如何", timestamp: 1, requestState: "waiting_user" },
+      { text: "深圳", timestamp: 2, requestState: "completed" },
+    ]);
+    const result = await new DelegateAgentV2().run(input([context => {
+      expect(context.messages).toHaveLength(2);
+      expect(context.messages.at(-1)).toMatchObject({ role: "user", content: "你好" });
+      expect(JSON.stringify(context.messages[0])).toContain("conversation_reference");
+      expect(JSON.stringify(context.messages[0])).toContain("completed");
+      const host = JSON.parse(context.systemPrompt!.split("Trusted host context:\n")[1]!.split("\n")[0]!);
+      expect(host.activeTask).toBeNull();
+      return fauxAssistantMessage("你好！");
+    }], { userText: "你好", history }));
+    expect(result.modelCalls).toBe(1); expect(result.toolCalls).toBe(0);
+  });
   it("saves a clarification, resumes with new active time and cumulative limits", async () => {
     const saved = vi.fn(async () => undefined);
     const first = await new DelegateAgentV2().run(input([call("request_clarification", { question: "请提供城市。" })], { userText: "今天天气如何", saveSession: saved }));
@@ -68,6 +84,7 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
     expect(first.session!.messages.at(-1)!.role).toBe("assistant");
     const result = await new DelegateAgentV2().run(input([context => {
       expect(JSON.stringify(context.messages)).toContain("今天天气如何"); expect(context.systemPrompt).toContain("Asia/Shanghai");
+      expect(context.systemPrompt).toContain('"activeTask":{"status":"waiting_user"}');
       return fauxAssistantMessage("上海。");
     }], { requestId: "resume", userText: "上海", session: first.session! }));
     expect(result.taskUsage.modelTurns).toBe(2); expect(result.modelCalls).toBe(1);

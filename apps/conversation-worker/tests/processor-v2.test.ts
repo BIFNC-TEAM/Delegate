@@ -48,6 +48,19 @@ describe("V2 worker integration", () => {
       v2Task: expect.objectContaining({ taskId: "first-run", status: "completed", inputMessageIds: ["prior", "message"] }),
     }) }));
   });
+  it("passes prior user turns as status-tagged reference data, while authorizing the original messages", async () => {
+    mocks.history.mockResolvedValue([{ id: "prior-weather", messageText: "深圳天气", createdAt: new Date(0).toISOString(), requestState: "completed" }]);
+    const host = makeHost(); host.item.userText = "你好";
+    await processV2ConversationTurn(host as any);
+    expect(mocks.history).toHaveBeenCalledWith(expect.objectContaining({ includeRequestState: true }));
+    expect(mocks.contextAuthorization).toHaveBeenCalledWith(expect.objectContaining({ history: [{ id: "prior-weather", text: "深圳天气" }] }));
+    const run = mocks.run.mock.calls[0]![0];
+    expect(run.userText).toBe("你好"); expect(run.session).toBeUndefined();
+    expect(run.history).toHaveLength(1);
+    expect(run.history[0].content).toContain('"kind":"conversation_reference"');
+    expect(run.history[0].content).toContain('"requestState":"completed"');
+    expect(run.history[0].content).not.toContain("prior-weather");
+  });
   it("fails closed if history and the resumed task disagree on the same message", async () => {
     mocks.history.mockResolvedValue([{ id: "prior", messageText: "edited" }]);
     mocks.prior.mockResolvedValue({ messages: [{ id: "prior", text: "original" }] });

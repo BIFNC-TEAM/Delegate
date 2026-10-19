@@ -2062,7 +2062,9 @@ export async function acceptInboundConversationMessage(
             representativeVersionId: episode.representativeVersionId,
             status: GenerationRunStatus.QUEUED,
             idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}`,
-            contextSnapshot: { piExecutionProtocol: "goal_v2" },
+            // Select the agent under the worker lease. A PI protocol here would
+            // incorrectly make a never-executed request look like pinned PI work.
+            contextSnapshot: {},
             ...(accessPolicySnapshot
               ? {
                   runtimePolicySnapshot: {
@@ -10127,7 +10129,8 @@ export async function editConversationMessage(input: {
           representativeVersionId: run.representativeVersionId,
           status: GenerationRunStatus.QUEUED,
           idempotencyKey: `reply:${message.conversationId}:${message.id}:revision:${revision.version}`,
-          contextSnapshot: { piExecutionProtocol: "goal_v2" },
+          // A replacement is a new request; its worker pins the selected runtime.
+          contextSnapshot: {},
           ...(run.runtimePolicySnapshot !== null
             ? { runtimePolicySnapshot: run.runtimePolicySnapshot }
             : {}),

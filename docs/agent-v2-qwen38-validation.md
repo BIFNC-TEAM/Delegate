@@ -1,5 +1,7 @@
 # V2 切换 qwen3.8-27b 与行为复测
 
+后续已按用户要求完成[独立本地部署](agent-v2-local-deployment.md)，并提供 [10 个人工验收用例](agent-v2-local-acceptance.md)。下文保留模型切换阶段的受控工具评估；实际产品接入修复和真实 RAG/MCP 自检在部署记录中另列。
+
 2026-10-19，在 `codex/agent-architecture` 的独立 worktree `/Users/neo/.codex/worktrees/agent-v2/Delegate` 中，按用户提供的端点切换为 `qwen3.8-27b`。本地模型配置已实际保存到被 Git 忽略的 `.env`，权限为 `0600`，没有复制原工作区的生产配置。密钥不进入源码、报告或提交。此变更没有部署或替换生产默认入口。
 
 ## 连接与必要的能力适配

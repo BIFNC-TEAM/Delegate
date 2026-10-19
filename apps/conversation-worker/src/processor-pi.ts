@@ -1609,6 +1609,7 @@ export function buildPiAdapters(input: {
           generationRunId: input.item.runId,
           queryText: retrievalQuery,
           allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
+          ...(input.orchestration === "model_v2" ? { queryMode: "model_selected" as const } : {}),
         }).catch(() => ({ items: [], citations: [], memoryUseRunId: undefined }));
         // Short identifiers need an explicit mention in the material returned
         // to the model; a profile/policy hit cannot identify an unrelated code.

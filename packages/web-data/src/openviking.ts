@@ -1149,10 +1149,21 @@ const MAX_PUBLIC_KNOWLEDGE_TOPIC_TERMS = 16;
  * admitted later only when they also occur in an authorized published corpus;
  * visitor-only text stays inside the conversation privacy boundary.
  */
-function classifyRecallQuery(rawQueryText: string): RecallQueryClassification {
+function classifyRecallQuery(rawQueryText: string, modelSelected = false): RecallQueryClassification {
   const queryText = rawQueryText.trim();
   if (!queryText) return { kind: "empty" };
   if (recallQueryContainsRestrictedData(queryText)) return { kind: "blocked" };
+
+  if (modelSelected) {
+    // Keep privacy minimization, but do not route a V2 query through legacy
+    // business keywords or merge adjacent Chinese words into semantic gates.
+    const terms = normalizePublicKnowledgeTopicTerms(
+      [...new Intl.Segmenter("zh-CN", { granularity: "word" }).segment(queryText.normalize("NFKC"))]
+        .filter(part => part.isWordLike).map(part => part.segment.toLocaleLowerCase("en-US")),
+    ).slice(0, MAX_PUBLIC_KNOWLEDGE_TOPIC_TERMS);
+    return safeRecallQuery(SAFE_RECALL_QUERIES.general, SAFE_RECALL_QUERIES.general,
+      terms.length ? `${PUBLIC_KNOWLEDGE_TOPIC_PREFIX}${terms.join(" ")}` : SAFE_RECALL_QUERIES.general);
+  }
 
   const normalized = queryText.toLocaleLowerCase("en-US");
   const topicQuery = buildSanitizedPublicKnowledgeQuery(queryText);
@@ -1326,6 +1337,7 @@ function authorizePublicKnowledgeQueryAgainstPublishedCorpus(params: {
   baseQuery: string;
   topicQuery?: string;
   grants: ReadonlyMap<string, PublicKnowledgeRecallGrant>;
+  modelSelected?: boolean;
 }): {
   query: string | null;
   authorizedTopicTerms: string[];
@@ -1351,6 +1363,13 @@ function authorizePublicKnowledgeQueryAgainstPublishedCorpus(params: {
   const authorizedTerms = queryTerms.filter((term) =>
     authorizedResources.some((resource) => resource.includes(term))
   );
+  if (params.modelSelected) {
+    // Only corpus-authorized terms leave the privacy boundary. Relevance and
+    // sufficiency remain model decisions; source scope/hash/revocation checks
+    // below remain mandatory for every result.
+    return { query: authorizedTerms.length ? `${PUBLIC_KNOWLEDGE_TOPIC_PREFIX}${authorizedTerms.join(" ")}` : null,
+      authorizedTopicTerms: authorizedTerms, topicMatchTerms: [] };
+  }
   const corpusMatchesTopic = publicKnowledgeSourceMatchesAuthorizedTopic(
     authorizedResources.join("\n"),
     queryTerms,
@@ -1572,8 +1591,9 @@ export async function recallRepresentativeContext(params: {
   generationRunId: string;
   queryText: string;
   allowedSourceKinds?: readonly RepresentativeRecallSourceKind[];
+  queryMode?: "model_selected";
 }): Promise<RepresentativeRecallContext> {
-  const recallQuery = classifyRecallQuery(params.queryText);
+  const recallQuery = classifyRecallQuery(params.queryText, params.queryMode === "model_selected");
   if (recallQuery.kind === "empty" || !isRecallSourceChannel(params.sourceChannel)) {
     return { items: [], citations: [] };
   }
@@ -1736,6 +1756,7 @@ export async function recallRepresentativeContext(params: {
           ? { topicQuery: recallQuery.publicKnowledgeTopicQuery }
           : {}),
         grants: publicAuthorization.publicKnowledgeGrantsByUri,
+        modelSelected: params.queryMode === "model_selected",
       })
     : {
         query: SAFE_RECALL_QUERIES.general,

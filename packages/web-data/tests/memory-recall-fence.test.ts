@@ -340,6 +340,32 @@ describe("governed memory recall fence", () => {
     }));
   });
 
+  it("lets V2 assess partial topic coverage while only sending corpus-authorized query terms", async () => {
+    const resource = installPublicKnowledgeAsset("星河科技正式员工每年年假 12 天；试用期不适用。", "v2-policy");
+    clientMocks.search.mockResolvedValue({ resources: [remoteMatch(resource, "resource", "untrusted remote text")], memories: [] });
+    const recalled = await recallRepresentativeContext({ representativeSlug, conversationId: "conversation-1", contactId,
+      sourceChannel: "web", generationRunId: "generation-run-1", allowedSourceKinds: ["PUBLIC_KNOWLEDGE"], queryMode: "model_selected",
+      queryText: "星河科技正式员工年假天数及适用条件 NebulaCipher" });
+    expect(recalled.items).toHaveLength(1);
+    expect(recalled.items[0]?.content).toContain("12 天");
+    const query = clientMocks.search.mock.calls[0]?.[0].query;
+    expect(query).toContain("年假");
+    expect(query).not.toContain("NebulaCipher");
+    expect(query).not.toContain("nebulacipher");
+    expect(recalled.items[0]?.content).not.toContain("untrusted remote text");
+  });
+
+  it("still blocks secrets and withdrawn sources in V2 query mode", async () => {
+    installPublicKnowledgeAsset("星河科技年假 12 天。", "v2-private-policy");
+    const args = { representativeSlug, conversationId: "conversation-1", contactId, sourceChannel: "web" as const,
+      generationRunId: "generation-run-1", allowedSourceKinds: ["PUBLIC_KNOWLEDGE"] as const, queryMode: "model_selected" as const };
+    await recallRepresentativeContext({ ...args, queryText: "星河科技年假 api_key: sk-testcredential123456789" });
+    expect(clientMocks.search).not.toHaveBeenCalled();
+    mockPrisma.knowledgeAssetRepresentative.findMany.mockResolvedValue([]);
+    await recallRepresentativeContext({ ...args, queryText: "星河科技年假" });
+    expect(clientMocks.search).not.toHaveBeenCalled();
+  });
+
   it("denies a knowledge probe when the active episode no longer matches the pinned version", async () => {
     const probe = await probeRepresentativeKnowledgeMetadata({
       representativeSlug,

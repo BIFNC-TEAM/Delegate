@@ -42,10 +42,16 @@ export async function processV2ConversationTurn(input: HostInput) {
     loadGenerationRecentTurns({ representativeId: setup.id, conversationId: item.conversationId, beforeMessageId: item.inputMessageId, limit: 8 }),
     loadGenerationV2Task({ conversationId: item.conversationId, representativeId: setup.id, representativeVersionId: item.representativeVersionId ?? null, beforeMessageId: item.inputMessageId, scope }),
   ]);
+  const contextMessages = new Map(history.map(t => [t.id, { id: t.id, text: t.messageText }]));
+  for (const message of previous?.messages ?? []) {
+    const existing = contextMessages.get(message.id);
+    if (existing && existing.text !== (message.text ?? "")) throw new AgentContextAuthorizationError();
+    contextMessages.set(message.id, { id: message.id, text: message.text ?? "" });
+  }
   const contextAuthorization = await createAgentContextAuthorization({ runId: item.runId, ...workLease, representativeId: setup.id,
     representativeVersionId: item.representativeVersionId ?? null, conversationId: item.conversationId, contactId: item.contactId,
     audienceIdentityId: item.audienceIdentityId ?? null, sourceChannel: item.channel, userText: item.userText,
-    history: [...history.map(t => ({ id: t.id, text: t.messageText })), ...(previous?.messages.map(m => ({ id: m.id, text: m.text ?? "" })) ?? [])], restoring: false });
+    history: [...contextMessages.values()], restoring: false });
   let memoryUseRunId: string | undefined;
   const memoryItems = new Set<string>();
   const computeAttachments: Parameters<typeof buildPiAdapters>[0]["computeAttachments"] = [];
@@ -109,7 +115,7 @@ export async function processV2ConversationTurn(input: HostInput) {
           modelCalls: result.modelCalls, toolCalls: result.toolCalls, ...(result.firstTextMs !== undefined ? { firstTextMs: result.firstTextMs } : {}),
           events: result.events.map(e => ({ ...e })), spans: result.spans.map(s => ({ ...s })), calls: result.calls,
           sources: result.sources.map(s => ({ id: auditReference(s.id), channel: s.channel })),
-          v2Task: { version: 1 as const, scope, taskId: result.session?.taskId ?? item.runId, status: result.status,
+          v2Task: { version: 1 as const, scope, taskId: result.session?.taskId ?? previous?.record.taskId ?? item.runId, status: result.status,
             inputMessageIds: [...(previous?.record.inputMessageIds ?? []), item.inputMessageId],
             attemptedWrites: result.session?.attemptedWrites ?? [], usage: result.taskUsage } },
         ...(memoryUseRunId ? { memoryUse: { runId: memoryUseRunId, outcome: "completed" as const, injectedItemIds: [...memoryItems],

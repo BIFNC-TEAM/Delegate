@@ -1,15 +1,15 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn() }));
+const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn() }));
 vi.mock("../src/processor-pi", () => ({ buildPiAdapters: mocks.adapters, deliverGenerationOutput: mocks.deliver }));
 vi.mock("@delegate/model-runtime/v2", async original => ({ ...await original<typeof import("@delegate/model-runtime/v2")>(),
   createV2ModelBindingFromEnv: () => ({ ok: true, binding: { provider: "faux", modelId: "faux" } }), delegateAgentV2: { run: mocks.run } }));
 vi.mock("@delegate/web-data", () => ({
   buildRepresentativeRuntimeProfile: () => ({ contract: { freeReplyLimit: 2 } }), buildSandboxAttachmentPath: () => "/attachments/a",
-  createAgentContextAuthorization: async () => ({ check: mocks.gate, registerKnowledge: vi.fn(), registerToolResult: vi.fn() }),
+  createAgentContextAuthorization: mocks.contextAuthorization,
   authorizeGenerationRunFreeUsage: mocks.authorizeUsage, reserveGenerationConversationWalletUsage: async () => false,
   completeInlineGenerationRun: mocks.complete, getRepresentativeRuntimeAuthoritySnapshot: async () => ({ compute: { capabilityModes: { exec: "ask", write: "ask", browser: "allow" } } }),
-  loadGenerationRecentTurns: async () => [], loadGenerationV2Task: mocks.prior,
+  loadGenerationRecentTurns: mocks.history, loadGenerationV2Task: mocks.prior,
   projectPublicAnswerSources: (sources: unknown) => sources, readPublicExecution: () => [], updateGenerationPiProgress: async () => undefined, updateGenerationPiStream: mocks.stream,
 }));
 import { processV2ConversationTurn, shouldUseAgentV2 } from "../src/processor-v2";
@@ -18,6 +18,8 @@ const makeHost = () => ({ config: {}, item: { runId: "run", conversationId: "con
 const usage = { modelTurns: 1, toolCalls: 0, attempts: 0, tokens: 10, inputTokens: 8, outputTokens: 2, costUsd: 0, activeMs: 5 };
 beforeEach(() => {
   vi.clearAllMocks(); mocks.adapters.mockReturnValue({}); mocks.prior.mockResolvedValue(null); mocks.authorizeUsage.mockResolvedValue(false);
+  mocks.history.mockResolvedValue([]);
+  mocks.contextAuthorization.mockResolvedValue({ check: mocks.gate, registerKnowledge: vi.fn(), registerToolResult: vi.fn() });
   mocks.complete.mockResolvedValue({ message: { id: "reply", text: "answer" } });
   mocks.run.mockResolvedValue({ runtime: "delegate-agent-v2", traceId: "trace", status: "completed", text: "answer", sources: [], artifacts: [], sourceBindings: {},
     events: [], spans: [], calls: [], modelCalls: 1, toolCalls: 0, totalDurationMs: 5, usage, taskUsage: usage });
@@ -34,6 +36,24 @@ describe("V2 worker integration", () => {
     expect(mocks.adapters).toHaveBeenCalledWith(expect.objectContaining({ orchestration: "model_v2" }));
     expect(mocks.complete).toHaveBeenCalledWith(expect.objectContaining({ intent: "agent_v2", agentTrace: expect.objectContaining({ runtime: "delegate-agent-v2", v2Task: expect.objectContaining({ inputMessageIds: ["message"], usage }) }) }));
     expect(mocks.deliver).toHaveBeenCalledOnce();
+  });
+  it("authorizes a resumed user message once when it is also in recent history", async () => {
+    mocks.history.mockResolvedValue([{ id: "prior", messageText: "今天气温多少？", createdAt: new Date(0).toISOString() }]);
+    mocks.prior.mockResolvedValue({ record: { taskId: "first-run", inputMessageIds: ["prior"], usage, attemptedWrites: [] },
+      messages: [{ id: "prior", text: "今天气温多少？", createdAt: new Date(0) }] });
+    await processV2ConversationTurn(makeHost() as any);
+    expect(mocks.contextAuthorization).toHaveBeenCalledWith(expect.objectContaining({ history: [{ id: "prior", text: "今天气温多少？" }] }));
+    expect(mocks.run.mock.calls[0]![0].session).toMatchObject({ taskId: "first-run", usage });
+    expect(mocks.complete).toHaveBeenCalledWith(expect.objectContaining({ agentTrace: expect.objectContaining({
+      v2Task: expect.objectContaining({ taskId: "first-run", status: "completed", inputMessageIds: ["prior", "message"] }),
+    }) }));
+  });
+  it("fails closed if history and the resumed task disagree on the same message", async () => {
+    mocks.history.mockResolvedValue([{ id: "prior", messageText: "edited" }]);
+    mocks.prior.mockResolvedValue({ messages: [{ id: "prior", text: "original" }] });
+    await expect(processV2ConversationTurn(makeHost() as any)).rejects.toThrow();
+    expect(mocks.contextAuthorization).not.toHaveBeenCalled();
+    expect(mocks.run).not.toHaveBeenCalled();
   });
   it("blocks unclassified or approval-required operations at the host gate", async () => {
     await processV2ConversationTurn(makeHost() as any);

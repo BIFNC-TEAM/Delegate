@@ -1,7 +1,9 @@
+import { readPublicAgentProgress, readPublicAnswerSources, readPublicExecution, type PublicExecutionCall, type PublicAnswerSource, type PublicAgentStage } from "./public-agent-presentation";
 import { createHash, randomUUID } from "node:crypto";
 
-import { normalizeRepresentativeHandoffPrompt } from "@delegate/domain";
+import { normalizeRepresentativeHandoffPrompt, readAgentBehavior } from "@delegate/domain";
 
+import { revalidateAgentContextDeliveryInTransaction } from "./agent-context-authorization";
 import {
   ChannelDesiredState,
   ChannelHealthStatus,
@@ -51,7 +53,7 @@ import {
   type AgentUsageChargeSnapshot,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
-import { markPiApprovalContinuationPending } from "./pi-approval-continuation";
+import { markPiApprovalContinuationPending, readPiApprovalContinuation } from "./pi-approval-continuation";
 import { prisma } from "./prisma";
 import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
@@ -117,6 +119,7 @@ import {
 } from "./handoff-entitlements";
 import { readArtifactObject } from "./artifact-store";
 import { buildWebConversationThreadId } from "./web-audience";
+import { enforcePublicChatPrincipalAdmission } from "./public-chat-rate-limit";
 
 export {
   processNextMemoryExtractionWork,
@@ -153,6 +156,9 @@ export type GenerationRuntimeOutcome =
     };
 
 export type GenerationAgentTrace = {
+  calls?: Array<Record<string, unknown>>;
+  sources?: Array<{ id: string; channel: string }>;
+  v2Task?: import("./agent-v2-session").V2TaskRecord;
   runtime: string;
   traceId: string;
   status: string;
@@ -1265,7 +1271,9 @@ export async function getConversationDetailSnapshot(
           ...(message.editedAt ? { editedAt: message.editedAt.toISOString() } : {}),
           ...(message.redactedAt ? { redactedAt: message.redactedAt.toISOString() } : {}),
           createdAt: message.createdAt.toISOString(),
-          citations: message.citations.map((citation) => ({
+          sources: readPublicAnswerSources(message.content),
+        execution: message.redactedAt ? [] : readPublicExecution(message.content),
+        citations: message.citations.map((citation) => ({
             title: citation.title,
             ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
           })),
@@ -2054,6 +2062,9 @@ export async function acceptInboundConversationMessage(
             representativeVersionId: episode.representativeVersionId,
             status: GenerationRunStatus.QUEUED,
             idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}`,
+            // Select the agent under the worker lease. A PI protocol here would
+            // incorrectly make a never-executed request look like pinned PI work.
+            contextSnapshot: {},
             ...(accessPolicySnapshot
               ? {
                   runtimePolicySnapshot: {
@@ -2561,6 +2572,8 @@ export async function completeInlineGenerationRun(input: {
   runtimeOutcome?: GenerationRuntimeOutcome;
   /** Operational Pi lifecycle/timing evidence. It contains no hidden reasoning or raw tool payloads. */
   agentTrace?: GenerationAgentTrace;
+  publicSources?: PublicAnswerSource[];
+  publicExecution?: PublicExecutionCall[];
   turnTrace?: ConversationTurnTrace;
   completeOutbox?: boolean;
   countUsage: boolean;
@@ -3007,12 +3020,16 @@ export async function completeInlineGenerationRun(input: {
           : MessageContentType.TEXT,
         text: resolvedReplyText,
         ...(input.intent
+          || input.publicSources?.length
+          || input.publicExecution?.length
           || input.humanHandoff
           || input.evidenceIndependentSystemFailure
           || input.sourceIndependentPublicRecovery
           ? {
               content: {
                 ...(input.intent ? { intent: input.intent } : {}),
+                ...(input.publicSources?.length ? { publicSources: readPublicAnswerSources({ publicSources: input.publicSources }) as unknown as Prisma.InputJsonArray } : {}),
+                ...(input.publicExecution?.length ? { publicExecution: readPublicExecution({ publicExecution: input.publicExecution }) as unknown as Prisma.InputJsonArray } : {}),
                 ...(input.humanHandoff
                   || input.evidenceIndependentSystemFailure
                   || input.sourceIndependentPublicRecovery
@@ -3355,6 +3372,7 @@ export async function waitGenerationRunForComputeApproval(input: {
   replyText: string;
   senderDisplayName: string;
   turnTrace?: ConversationTurnTrace;
+  checkpoint?: Record<string, unknown>;
 }) {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Approval waiting reply text is required.");
@@ -3435,6 +3453,7 @@ export async function waitGenerationRunForComputeApproval(input: {
               )
             : run.contextSnapshot,
           input.approvalId,
+          input.checkpoint,
         ),
       },
     });
@@ -3677,17 +3696,119 @@ export async function updateGenerationTurnExecutionProgress(input: {
   });
 }
 
+/** Cancel only unapproved work in the caller's own conversation. Winning the
+ * PENDING -> REJECTED CAS prevents a concurrent approval from dispatching it. */
+export async function cancelGenerationPendingApprovals(input: {
+  conversationId: string; runId: string; outboxId: string; leaseAttempt: number;
+}) {
+  return runConversationWriteTransaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
+    await fenceGenerationWorkLease(tx, input);
+    const caller = await tx.generationRun.findUnique({ where: { id: input.runId }, select: { conversationId: true } });
+    if (caller?.conversationId !== input.conversationId) throw new Error("Cancellation conversation mismatch.");
+    const runs = await tx.generationRun.findMany({ where: {
+      conversationId: input.conversationId, id: { not: input.runId }, status: GenerationRunStatus.WAITING_APPROVAL,
+    }, orderBy: { id: "asc" } });
+    let canceledCount = 0;
+    for (const run of runs) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${run.id}))`;
+      const approvals = await tx.approvalRequest.findMany({ where: { generationRunId: run.id, status: "PENDING" }, select: { id: true, toolExecutionId: true } });
+      if (!approvals.length) continue;
+      const now = new Date();
+      const claimed = await tx.approvalRequest.updateMany({ where: { id: { in: approvals.map(a => a.id) }, status: "PENDING" }, data: {
+        status: "REJECTED", resolvedAt: now, resolvedBy: "audience", decisionNote: "The audience canceled the pending task.",
+      } });
+      if (claimed.count !== approvals.length) throw new Error("Approval changed during cancellation; retry after checking its state.");
+      const reservation = readGenerationWalletReservation(run.runtimePolicySnapshot);
+      const releasedSnapshot = reservation ? markGenerationWalletReleased(run.runtimePolicySnapshot, now) : null;
+      const canceled = await tx.generationRun.updateMany({ where: { id: run.id, status: GenerationRunStatus.WAITING_APPROVAL }, data: {
+        status: GenerationRunStatus.CANCELED, canceledAt: now, errorCode: "audience_canceled_pending_approval",
+        ...(releasedSnapshot ? { runtimePolicySnapshot: releasedSnapshot } : {}),
+      } });
+      if (canceled.count !== 1) throw new Error("Generation changed during cancellation.");
+      await tx.toolExecution.updateMany({ where: { id: { in: approvals.flatMap(a => a.toolExecutionId ? [a.toolExecutionId] : []) }, status: { in: ["QUEUED", "BLOCKED"] } }, data: { status: "CANCELED", finishedAt: now } });
+      await tx.outboxEvent.updateMany({ where: { aggregateType: "generation_run", aggregateId: run.id, status: { in: ["PENDING", "PROCESSING", "FAILED"] } }, data: { status: "PROCESSED", processedAt: now } });
+      await releaseConversationEntitlementByGenerationRunId({ generationRunId: run.id, reason: "audience_canceled_pending_approval" }, tx as unknown as ServiceEntitlementClient);
+      if (reservation) await releaseConversationWalletUsage({ usageChargeId: reservation.usageChargeId, expectedGenerationRunId: run.id, reason: "audience_canceled_pending_approval", idempotencyKey: `generation:${run.id}:release` }, tx as unknown as UsageChargeClient);
+      canceledCount += 1;
+    }
+    return { canceledCount };
+  });
+}
+
+/** Pin once under the work lease so retries/approval continuations cannot switch loops. */
+export function resolveGenerationAgentVariant(snapshot: unknown, preferV2: boolean): "pi" | "v2" {
+  const value = isJsonRecord(snapshot) ? snapshot : {};
+  if (value.agentVariant === "v2" || value.agentVariant === "pi") return value.agentVariant;
+  if (value.piExecutionProtocol || value.agentTrace || value.piStream || readPiApprovalContinuation(value)) return "pi";
+  return preferV2 ? "v2" : "pi";
+}
+
+export async function pinGenerationAgentVariant(input: { runId: string; outboxId: string; leaseAttempt: number; preferV2: boolean }): Promise<"pi" | "v2"> {
+  return runConversationWriteTransaction(async tx => {
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({ where: { id: input.runId }, select: { contextSnapshot: true } });
+    if (!run) throw new GenerationWorkLeaseLostError(input.outboxId, input.leaseAttempt);
+    const snapshot = isJsonRecord(run.contextSnapshot) ? run.contextSnapshot : {};
+    const agentVariant = resolveGenerationAgentVariant(snapshot, input.preferV2);
+    await tx.generationRun.update({ where: { id: input.runId }, data: { contextSnapshot: { ...snapshot, agentVariant,
+      ...(agentVariant === "v2" ? { piActionIdentityVersion: 1 } : {}) } } });
+    return agentVariant;
+  });
+}
+
+/** Pin once under the work lease so retries/approval continuations cannot switch loops. */
+export async function pinGenerationPiExecutionProtocol(input: {
+  runId: string; outboxId: string; leaseAttempt: number;
+}): Promise<"legacy_v1" | "goal_v2"> {
+  return runConversationWriteTransaction(async tx => {
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({ where: { id: input.runId }, select: { contextSnapshot: true } });
+    if (!run) throw new GenerationWorkLeaseLostError(input.outboxId, input.leaseAttempt);
+    const snapshot = isJsonRecord(run.contextSnapshot) ? run.contextSnapshot : {};
+    const continuation = readPiApprovalContinuation(snapshot);
+    const protocol = continuation?.version === 1 ? "legacy_v1"
+      : continuation?.version === 2 ? "goal_v2"
+      : snapshot.piExecutionProtocol === "legacy_v1" || snapshot.piExecutionProtocol === "goal_v2" ? snapshot.piExecutionProtocol
+      : snapshot.piStream || snapshot.agentTrace ? "legacy_v1" : "goal_v2";
+    const actionIdentityVersion = snapshot.piActionIdentityVersion === 1 || continuation?.checkpoint?.["actionIdentityVersion"] === 1 ? 1
+      : continuation || protocol === "legacy_v1" || snapshot.agentTrace || snapshot.piStream ? 0 : 1;
+    if (snapshot.piExecutionProtocol !== protocol || snapshot.piActionIdentityVersion !== actionIdentityVersion) await tx.generationRun.update({ where: { id: input.runId }, data: { contextSnapshot: { ...snapshot, piExecutionProtocol: protocol, piActionIdentityVersion: actionIdentityVersion } } });
+    return protocol;
+  });
+}
+
+export async function updateGenerationPiProgress(input: {
+  runId: string; outboxId: string; leaseAttempt: number; sequence: number; stage: PublicAgentStage;
+}) {
+  const now = new Date().toISOString();
+  const frame = readPublicAgentProgress({ ...input, startedAt: now, updatedAt: now });
+  if (!frame) throw new Error("Invalid public progress frame.");
+  return runConversationWriteTransaction(async tx => {
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({ where: { id: input.runId }, select: { contextSnapshot: true, createdAt: true } });
+    if (!run) throw new GenerationWorkLeaseLostError(input.outboxId, input.leaseAttempt);
+    const snapshot = isJsonRecord(run.contextSnapshot) ? run.contextSnapshot : {};
+    const previous = isJsonRecord(snapshot.piProgress) ? snapshot.piProgress : {};
+    if (previous.leaseAttempt === input.leaseAttempt && Number(previous.sequence) >= input.sequence) return;
+    await tx.generationRun.update({ where: { id: input.runId }, data: { contextSnapshot: {
+      ...snapshot, piProgress: { ...frame, startedAt: run.createdAt.toISOString(), leaseAttempt: input.leaseAttempt },
+    } } });
+  });
+}
+
 export async function updateGenerationPiStream(input: {
   runId: string;
   outboxId: string;
   leaseAttempt: number;
   sequence: number;
   text: string;
+  previewPhase?: "generating" | "verifying" | "revising" | "withheld";
 }) {
   if (!Number.isSafeInteger(input.sequence) || input.sequence < 1) {
     throw new Error("Pi stream sequence must be a positive integer.");
   }
-  const text = input.text.slice(-32_000);
+  const text = input.previewPhase === "withheld" || input.previewPhase === "revising" ? "" : input.text.slice(-32_000);
   return runConversationWriteTransaction(async (tx) => {
     await fenceGenerationWorkLease(tx, input);
     const run = await tx.generationRun.findUnique({
@@ -3703,7 +3824,7 @@ export async function updateGenerationPiStream(input: {
     const previous = isJsonRecord(snapshot.piStream)
       ? snapshot.piStream
       : null;
-    const previousSequence = typeof previous?.sequence === "number"
+    const previousSequence = typeof previous?.sequence === "number" && (!input.previewPhase || previous.leaseAttempt === input.leaseAttempt)
       ? previous.sequence
       : 0;
     if (previousSequence >= input.sequence) {
@@ -3715,10 +3836,11 @@ export async function updateGenerationPiStream(input: {
         contextSnapshot: {
           ...snapshot,
           piStream: {
-            version: 1,
+            version: input.previewPhase ? 2 : 1,
             sequence: input.sequence,
             text,
             updatedAt: new Date().toISOString(),
+            ...(input.previewPhase ? { phase: input.previewPhase, leaseAttempt: input.leaseAttempt } : {}),
           },
         },
       },
@@ -5194,6 +5316,9 @@ export async function loadGenerationRecentTurns(input: {
   conversationId: string;
   beforeMessageId: string;
   limit?: number;
+  focusCurrentTask?: boolean;
+  /** V2 reference metadata only; never replays prior assistant/tool bodies. */
+  includeRequestState?: boolean;
 }) {
   const [before, policy] = await Promise.all([
     prisma.message.findUnique({
@@ -5232,11 +5357,63 @@ export async function loadGenerationRecentTurns(input: {
     take: input.limit || 10,
     select: { id: true, senderType: true, text: true, createdAt: true },
   });
-  return rows.reverse().map((message, index) => ({
+  let selected = rows.reverse();
+  let anchorId: string | undefined;
+  if (input.focusCurrentTask) {
+    const previous = await prisma.generationRun.findFirst({
+      where: { conversationId: input.conversationId, episodeId: before.episodeId, createdAt: { lt: before.createdAt } },
+      orderBy: { createdAt: "desc" }, select: { contextSnapshot: true },
+    });
+    const stored = previous?.contextSnapshot as { agentTrace?: { conversationFocus?: { anchorMessageId?: unknown; parameterMessageId?: unknown } } } | null;
+    const reference = stored?.agentTrace?.conversationFocus?.anchorMessageId;
+    if (typeof reference === "string") {
+      // A model-picked reference is only a hint. Re-read the visitor's original
+      // message under the same episode/deletion/identity boundaries before use.
+      const anchor = await prisma.message.findFirst({ where: {
+        id: reference, conversationId: input.conversationId, episodeId: before.episodeId,
+        senderType: MessageSenderType.AUDIENCE, redactedAt: null, text: { not: null }, createdAt: { lt: before.createdAt },
+      }, select: { id: true, senderType: true, text: true, createdAt: true } });
+      if (anchor) {
+        anchorId = anchor.id;
+        selected = [anchor, ...selected.filter(row => row.id !== anchor.id && row.createdAt >= anchor.createdAt)];
+        const parameterId=stored?.agentTrace?.conversationFocus?.parameterMessageId;
+        if (typeof parameterId==='string' && !selected.some(row=>row.id===parameterId)) {
+          const parameter=await prisma.message.findFirst({where:{id:parameterId,conversationId:input.conversationId,episodeId:before.episodeId,
+            senderType:MessageSenderType.AUDIENCE,redactedAt:null,text:{not:null},createdAt:{lt:before.createdAt}},select:{id:true,senderType:true,text:true,createdAt:true}});
+          if(parameter) selected.splice(1,0,parameter);
+        }
+      }
+    }
+    // Legacy conversations have no focus reference. Bootstrap from recent
+    // context, never present all old topics as a backlog of user commands.
+    if (!anchorId) selected = selected.slice(-3);
+  }
+  const requestStates = new Map<string, string>();
+  if (input.includeRequestState && selected.length) {
+    const requests = await prisma.generationRun.findMany({ where: {
+      conversationId: input.conversationId, episodeId: before.episodeId,
+      conversation: { representativeId: input.representativeId },
+      inputMessageId: { in: selected.map(message => message.id) }, createdAt: { lt: before.createdAt },
+    }, orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { inputMessageId: true, status: true, contextSnapshot: true } });
+    for (const request of requests) {
+      if (requestStates.has(request.inputMessageId)) continue;
+      const snapshot = isJsonRecord(request.contextSnapshot) ? request.contextSnapshot : {};
+      const trace = isJsonRecord(snapshot.agentTrace) ? snapshot.agentTrace : {};
+      const state = request.status === "CANCELED" ? "cancelled" : request.status === "FAILED" ? "failed"
+        : trace.runtime === "delegate-agent-v2" && typeof trace.status === "string"
+        && ["completed", "partial", "waiting_user", "failed", "cancelled"].includes(trace.status) ? trace.status
+        : request.status === "COMPLETED" ? "answered" : "in_progress";
+      requestStates.set(request.inputMessageId, state);
+    }
+  }
+  return selected.map((message, index) => ({
     id: message.id ?? `recent-${index + 1}`,
     direction: "inbound" as const,
     messageText: message.text || "",
     createdAt: message.createdAt?.toISOString() ?? new Date(0).toISOString(),
+    ...(input.focusCurrentTask ? { taskAnchor: message.id === anchorId } : {}),
+    ...(input.includeRequestState ? { requestState: requestStates.get(message.id) ?? "unknown" } : {}),
   }));
 }
 
@@ -5257,6 +5434,7 @@ export async function loadConversationOperationalContext(input: {
         where: {
           id: input.conversationId,
           representativeId: input.representativeId,
+          ...(input.audienceIdentityId ? { audienceIdentityId: input.audienceIdentityId } : {}),
         },
         select: { state: true, collectorState: true },
       }),
@@ -5271,7 +5449,7 @@ export async function loadConversationOperationalContext(input: {
           ],
         },
         orderBy: [{ requestedAt: "desc" }, { id: "desc" }],
-        select: { requestedActionSummary: true, expiresAt: true },
+        select: { expiresAt: true },
       }),
       prisma.handoffRequest.findFirst({
         where: {
@@ -5325,7 +5503,9 @@ export async function loadConversationOperationalContext(input: {
     ...(pendingApproval
       ? {
           pendingApproval: {
-            requestedActionSummary: pendingApproval.requestedActionSummary,
+            // This control endpoint may run after source withdrawal and without
+            // a new model budget. Never echo a derived action title or filename.
+            requestedActionSummary: "An action is waiting for approval.",
             ...(pendingApproval.expiresAt
               ? { expiresAt: pendingApproval.expiresAt.toISOString() }
               : {}),
@@ -5814,14 +5994,15 @@ async function revalidateGenerationMessageMemoryDeliveryInTransaction(
     sourceIndependentMessage?.content,
     input.runId,
   )) return true;
-  const memoryDelivery = await revalidateMemoryUseDeliverySourcesInTransaction(
+  const contextAuthorized = await revalidateAgentContextDeliveryInTransaction(tx, input);
+  const memoryDelivery = contextAuthorized ? await revalidateMemoryUseDeliverySourcesInTransaction(
     tx,
     {
       generationRunId: input.runId,
       conversationId: input.conversationId,
       outputMessageId: input.outputMessageId,
     },
-  );
+  ) : { authorized: false as const };
   if (memoryDelivery.authorized) return true;
 
   const canceledAt = new Date();
@@ -8139,11 +8320,87 @@ export async function failGenerationRun(input: {
   });
 }
 
+type PublicTaskControlPrincipal = {
+  representativeSlug: string;
+  audienceIdentityId: string;
+  audienceId: string;
+};
+
+function publicTaskConversationWhere(input: PublicTaskControlPrincipal): Prisma.ConversationWhereInput {
+  return {
+    representative: { slug: input.representativeSlug },
+    audienceIdentityId: input.audienceIdentityId,
+    audienceIdentity: { status: { in: ["ANONYMOUS", "REGISTERED"] }, mergedIntoId: null },
+    sourceChannel: "web",
+    channelThreadId: buildWebConversationThreadId(input.audienceId),
+  };
+}
+
+/** Task management can outlive new-service admission. Never load answer bodies. */
+export async function getPublicGenerationRunControlSnapshot(input: PublicTaskControlPrincipal & { runId: string }) {
+  const run = await prisma.generationRun.findFirst({
+    where: { id: input.runId, conversation: publicTaskConversationWhere(input) },
+    select: { id: true, status: true, updatedAt: true },
+  });
+  return run ? { id: run.id, status: run.status.toLowerCase(), updatedAt: run.updatedAt.toISOString(), statusOnly: true as const } : null;
+}
+
+export async function controlPublicAudienceTask(input: PublicTaskControlPrincipal & { kind: "status" | "cancel"; runId?: string }) {
+  const scope = publicTaskConversationWhere(input);
+  const conversation = await prisma.conversation.findFirst({ where: scope, select: { id: true, representativeId: true } });
+  const absent = { outcome: "not_found", text: "当前会话没有可访问的对应任务。", tasks: [] as Array<{ id: string; status: string }> };
+  if (!conversation) return absent;
+  await enforcePublicChatPrincipalAdmission({ representativeId: conversation.representativeId, audienceIdentityId: input.audienceIdentityId, operation: "task_control" });
+  return runConversationWriteTransaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${conversation.id}))`;
+    const current = await tx.conversation.findFirst({ where: { ...scope, id: conversation.id }, select: { id: true } });
+    if (!current) return absent;
+    const candidates = await tx.generationRun.findMany({
+      where: {
+        conversationId: current.id,
+        ...(input.runId ? { id: input.runId } : input.kind === "cancel" ? { status: { in: cancellableGenerationStatuses } } : {}),
+      },
+      select: { id: true, status: true }, orderBy: { createdAt: "desc" }, take: input.kind === "status" ? 5 : 2,
+    });
+    const tasks = candidates.map(run => ({ id: run.id, status: run.status.toLowerCase() }));
+    if (!tasks.length) return absent;
+    if (input.kind === "status") return { outcome: "status", text: tasks.map(task => `任务 ${task.id}：${task.status}`).join("\n"), tasks };
+    if (tasks.length > 1) return { outcome: "needs_target", text: `当前有多个任务，请用 /cancel 任务编号 明确要停止哪一项：${tasks.map(task => task.id).join("、")}`, tasks };
+    const targetId = tasks[0]!.id;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${targetId}))`;
+    const run = await tx.generationRun.findFirst({ where: { id: targetId, conversationId: current.id }, select: { id: true, status: true, runtimePolicySnapshot: true } });
+    if (!run) return absent;
+    if (run.status === GenerationRunStatus.WAITING_HUMAN) return { outcome: "needs_handoff_control", text: "该任务已进入人工服务，请明确是否取消人工排队或结束人工服务。", tasks };
+    if (!cancellableGenerationStatuses.includes(run.status)) return { outcome: "unchanged", text: `任务当前为 ${run.status.toLowerCase()}；取消请求不能撤销已经发生的操作。`, tasks: [{ id: run.id, status: run.status.toLowerCase() }] };
+    const now = new Date();
+    const approvals = await tx.approvalRequest.findMany({ where: { generationRunId: run.id, status: "PENDING" }, select: { id: true } });
+    if (approvals.length) {
+      const rejected = await tx.approvalRequest.updateMany({ where: { id: { in: approvals.map(approval => approval.id) }, status: "PENDING" }, data: { status: "REJECTED", resolvedAt: now, resolvedBy: "audience", decisionNote: "The audience requested cancellation of this task." } });
+      if (rejected.count !== approvals.length) throw new Error("public_task_control_conflict");
+    }
+    const reservation = readGenerationWalletReservation(run.runtimePolicySnapshot);
+    const releasedSnapshot = reservation ? markGenerationWalletReleased(run.runtimePolicySnapshot, now) : null;
+    const canceled = await tx.generationRun.updateMany({ where: { id: run.id, conversationId: current.id, status: run.status }, data: {
+      status: GenerationRunStatus.CANCELED, canceledAt: now, errorCode: "audience_cancel_requested",
+      errorMessage: "Cancellation requested; effects already dispatched may still complete.",
+      ...(releasedSnapshot ? { runtimePolicySnapshot: releasedSnapshot } : {}),
+    } });
+    if (canceled.count !== 1) throw new Error("public_task_control_conflict");
+    await tx.toolExecution.updateMany({ where: { session: { generationRunId: run.id }, status: { in: ["QUEUED", "BLOCKED"] } }, data: { status: "CANCELED", finishedAt: now } });
+    await tx.outboxEvent.updateMany({ where: { aggregateType: "generation_run", aggregateId: run.id, status: { in: ["PENDING", "PROCESSING", "FAILED"] } }, data: { status: "PROCESSED", processedAt: now, lastError: "audience_cancel_requested" } });
+    await cancelStartedMemoryUseForGeneration(tx, run.id, "memory_generation_canceled", now);
+    await releaseConversationEntitlementByGenerationRunId({ generationRunId: run.id, reason: "audience_cancel_requested" }, tx as unknown as ServiceEntitlementClient);
+    if (reservation) await releaseConversationWalletUsage({ usageChargeId: reservation.usageChargeId, expectedGenerationRunId: run.id, reason: "audience_cancel_requested", idempotencyKey: `generation:${run.id}:release` }, tx as unknown as UsageChargeClient);
+    return { outcome: "cancel_requested", text: "已记录停止请求；尚未派发的工作已停止。正在派发或已提交的外部操作不一定能撤销，仍需以实际回执为准。", tasks: [{ id: run.id, status: "canceled" }] };
+  });
+}
+
 export async function getPublicGenerationRunSnapshot(input: {
   representativeSlug: string;
   runId: string;
   audienceIdentityId: string;
   audienceId: string;
+  allowDraftPreview?: boolean;
 }) {
   const run = await prisma.generationRun.findFirst({
     where: {
@@ -8166,7 +8423,7 @@ export async function getPublicGenerationRunSnapshot(input: {
             },
             orderBy: { createdAt: "desc" },
             take: 1,
-            select: { status: true, processedAt: true },
+            select: { status: true, processedAt: true, attemptCount: true },
           },
         },
       },
@@ -8182,7 +8439,7 @@ export async function getPublicGenerationRunSnapshot(input: {
             select: {
               title: true,
               excerpt: true,
-              memoryUseItem: { select: { id: true } },
+              memoryUseItem: { select: { id: true, sourceKind: true } },
             },
           },
           attachments: {
@@ -8218,7 +8475,8 @@ export async function getPublicGenerationRunSnapshot(input: {
         ),
       })
     : null;
-  const piStream = readGenerationPiStream(run.contextSnapshot);
+  let piStream = readGenerationPiStream(run.contextSnapshot);
+  const progressSnapshot = isJsonRecord(run.contextSnapshot) && isJsonRecord(run.contextSnapshot.piProgress) ? run.contextSnapshot.piProgress : undefined;
   const generationOutbox = run.conversation.outboxEvents[0];
   const retryPending = presentationRun.status === GenerationRunStatus.FAILED
     && Boolean(
@@ -8226,6 +8484,21 @@ export async function getPublicGenerationRunSnapshot(input: {
       && generationOutbox.processedAt === null
       && ["PENDING", "PROCESSING", "FAILED"].includes(generationOutbox.status),
     );
+  if (presentationRun.status !== GenerationRunStatus.PROCESSING || memoryDeliveryBlocked || retryPending) piStream = null;
+  if (isJsonRecord(run.contextSnapshot) && run.contextSnapshot.piExecutionProtocol === "goal_v2" && !piStream?.phase) piStream = null;
+  if (piStream?.phase) {
+    const snapshot = isJsonRecord(run.contextSnapshot) ? run.contextSnapshot : {};
+    if (!input.allowDraftPreview || snapshot.piExecutionProtocol !== "goal_v2" || !isJsonRecord(snapshot.agentContextAuthorization)
+      || piStream.leaseAttempt !== generationOutbox?.attemptCount) piStream = null;
+    else if (piStream.text) {
+      try {
+        // Preview is a disclosure boundary too; check the existing complete
+        // source manifest for the requesting audience before returning bytes.
+        const { assertAgentContextForExecution } = await import("./agent-context-authorization");
+        await assertAgentContextForExecution(run.id);
+      } catch { piStream = null; }
+    }
+  }
 
   return {
     id: run.id,
@@ -8239,6 +8512,9 @@ export async function getPublicGenerationRunSnapshot(input: {
       ? { errorMessage: presentationRun.errorMessage }
       : {}),
     ...(piStream ? { stream: piStream } : {}),
+    ...(!memoryDeliveryBlocked && !retryPending && presentationRun.status === GenerationRunStatus.PROCESSING
+      && progressSnapshot?.leaseAttempt === generationOutbox?.attemptCount
+      && readPublicAgentProgress(progressSnapshot) ? { progress: readPublicAgentProgress(progressSnapshot) } : {}),
     ...(outputMessage && !memoryDeliveryBlocked
       ? {
           message: {
@@ -8247,8 +8523,12 @@ export async function getPublicGenerationRunSnapshot(input: {
             status: outputMessage.deliveryStatus.toLowerCase(),
             createdAt: outputMessage.createdAt.toISOString(),
             ...(sourceDisclosure ? { sourceDisclosure } : {}),
+            sources: readPublicAnswerSources(outputMessage.content),
+            execution: readPublicExecution(outputMessage.content),
             citations: outputMessage.citations.map((citation) => ({
               title: citation.title,
+              kind: citation.memoryUseItem?.sourceKind === "PUBLIC_KNOWLEDGE" ? "knowledge" as const
+                : citation.memoryUseItem?.sourceKind ? "memory" as const : "authorized" as const,
               ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
             })),
             ...(outputMessage.citations.some(
@@ -8278,21 +8558,26 @@ function readGenerationPiStream(value: unknown): {
   sequence: number;
   text: string;
   updatedAt: string;
+  phase?: "generating" | "verifying" | "revising" | "withheld";
+  leaseAttempt?: number;
 } | null {
   if (!isJsonRecord(value) || !isJsonRecord(value.piStream)) return null;
   const stream = value.piStream;
   if (
-    stream.version !== 1
+    (stream.version !== 1 && stream.version !== 2)
     || typeof stream.sequence !== "number"
     || !Number.isSafeInteger(stream.sequence)
     || stream.sequence < 1
     || typeof stream.text !== "string"
     || typeof stream.updatedAt !== "string"
   ) return null;
+  if (stream.version === 2 && (!['generating', 'verifying', 'revising', 'withheld'].includes(String(stream.phase))
+    || !Number.isSafeInteger(stream.leaseAttempt) || Number(stream.leaseAttempt) < 1)) return null;
   return {
     sequence: stream.sequence,
-    text: stream.text.slice(-32_000),
+    text: stream.version === 2 && ["withheld", "revising"].includes(String(stream.phase)) ? "" : stream.text.slice(-32_000),
     updatedAt: stream.updatedAt,
+    ...(stream.version === 2 ? { phase: stream.phase as "generating" | "verifying" | "revising" | "withheld", leaseAttempt: Number(stream.leaseAttempt) } : {}),
   };
 }
 
@@ -8330,6 +8615,7 @@ export async function getPublicConversationHistory(input: {
               excerpt: true,
               memoryUseItem: {
                 select: {
+                  sourceKind: true,
                   useRun: { select: { generationRunId: true } },
                 },
               },
@@ -8427,8 +8713,12 @@ export async function getPublicConversationHistory(input: {
             }
           : {}),
         ...(sourceDisclosure ? { sourceDisclosure } : {}),
+        sources: readPublicAnswerSources(message.content),
+        execution: message.redactedAt ? [] : readPublicExecution(message.content),
         citations: message.citations.map((citation) => ({
           title: citation.title,
+          kind: citation.memoryUseItem?.sourceKind === "PUBLIC_KNOWLEDGE" ? "knowledge" as const
+            : citation.memoryUseItem?.sourceKind ? "memory" as const : "authorized" as const,
           ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
         })),
         ...(displayRunId
@@ -9861,6 +10151,8 @@ export async function editConversationMessage(input: {
           representativeVersionId: run.representativeVersionId,
           status: GenerationRunStatus.QUEUED,
           idempotencyKey: `reply:${message.conversationId}:${message.id}:revision:${revision.version}`,
+          // A replacement is a new request; its worker pins the selected runtime.
+          contextSnapshot: {},
           ...(run.runtimePolicySnapshot !== null
             ? { runtimePolicySnapshot: run.runtimePolicySnapshot }
             : {}),
@@ -11665,6 +11957,7 @@ function buildRepresentativeSnapshot(representative: {
   displayName: string;
   roleSummary: string;
   tone: string;
+  agentBehavior?: Prisma.JsonValue;
   avatarUrl: string | null;
   publicMode: boolean;
   humanInLoop: boolean;
@@ -11820,7 +12113,9 @@ function buildRepresentativeSnapshot(representative: {
   const capabilityModes = resolveSnapshotCapabilityModes(
     representative.capabilityProfiles[0],
   );
+  const agentBehavior = readAgentBehavior(representative.agentBehavior);
   return {
+    ...(agentBehavior ? { agentBehavior } : {}),
     identity: {
       displayName: representative.displayName,
       roleSummary: representative.roleSummary,

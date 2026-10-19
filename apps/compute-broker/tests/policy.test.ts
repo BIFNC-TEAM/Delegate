@@ -36,49 +36,8 @@ vi.mock("@delegate/web-data", () => ({
 
 process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
 
-describe("deriveConversationComputeEntitlements", () => {
-  it("does not grant a paid plan without an active run authorization", async () => {
-    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
-    const result = deriveConversationComputeEntitlements(null);
-
-    expect(result.hasPaidEntitlement).toBe(false);
-    expect(result.activePlanTier).toBeUndefined();
-  });
-
-  it("keeps an active server-owned free run unpaid", async () => {
-    const { deriveConversationComputeEntitlements } =
-      await import("../src/entitlements");
-    const result = deriveConversationComputeEntitlements({
-      kind: "free",
-      audienceIdentityId: "audience-1",
-      generationRunId: "run-1",
-      representativeId: "rep-1",
-      productCode: null,
-      activePlanTier: undefined,
-      hasPaidEntitlement: false,
-    });
-
-    expect(result.hasPaidEntitlement).toBe(false);
-    expect(result.activePlanTier).toBeUndefined();
-  });
-
-  it("derives the policy tier only from a verified wallet authorization", async () => {
-    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
-    const result = deriveConversationComputeEntitlements({
-      kind: "wallet",
-      audienceIdentityId: "audience-1",
-      generationRunId: "run-1",
-      representativeId: "rep-1",
-      productCode: "agent-wallet:service-credit:v1",
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
-    });
-
-    expect(result.hasPaidEntitlement).toBe(true);
-    expect(result.activePlanTier).toBe("pass");
-  });
-
-  it("does not derive a run-scoped pass from an incomplete wallet snapshot", async () => {
+describe("run-scoped consumption authorization", () => {
+  it("rejects an incomplete quota reservation snapshot", async () => {
     const { readServerStoredServiceCreditReservation } =
       await import("../src/entitlements");
     expect(
@@ -131,59 +90,26 @@ describe("deriveConversationComputeEntitlements", () => {
     });
   });
 
-  it("lets a verified run authorization satisfy paid capability gates", async () => {
-    const [{ deriveConversationComputeEntitlements }, { evaluateCapabilityPolicyStack }] =
-      await Promise.all([
-        import("../src/entitlements"),
-        import("@delegate/capability-policy"),
-      ]);
-    const entitlements = deriveConversationComputeEntitlements({
-      kind: "wallet",
-      audienceIdentityId: "audience-1",
-      generationRunId: "run-1",
-      representativeId: "rep-1",
-      productCode: "agent-wallet:service-credit:v1",
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
-    });
-    const cases = [
-      { capability: "browser", resourceScope: "browser_lane" },
-      { capability: "process", resourceScope: "workspace" },
-      { capability: "mcp", resourceScope: "remote_mcp" },
-    ] as const;
-    const profile = {
-      isManaged: false,
-      isDefault: true,
-      enabled: true,
-      precedence: 0,
-      defaultDecision: "deny",
-      rules: cases.map(({ capability }, index) => ({
-        id: `paid-${capability}`,
-        capability,
-        decision: "ask",
-        requiredPlanTier: "pass",
-        requiresPaidPlan: true,
-        requiresHumanApproval: true,
-        priority: 100 - index,
-      })),
-    } as never;
 
-    for (const request of cases) {
-      const result = evaluateCapabilityPolicyStack([profile], {
-        ...request,
-        activePlanTier: entitlements.activePlanTier,
-        hasPaidEntitlement: entitlements.hasPaidEntitlement,
-      });
-      expect(result).toMatchObject({
-        decision: "ask",
-        reason: "human_approval_required",
-        matchedRuleId: `paid-${request.capability}`,
-      });
-    }
-  });
 });
 
 describe("resolveEffectiveDecision", () => {
+  it.each([false, true])("preserves binding approval=%s when a server verifies read-only behavior", async (approvalRequired) => {
+    const { normalizeExecutionInput, resolveEffectiveDecision } = await import("../src/executions");
+    const normalized = normalizeExecutionInput({
+      capability: "mcp", subagentId: "compute-agent", toolName: "read_record",
+      browserMode: "deterministic", maxSteps: 1, allowMutations: false,
+      hasPaidEntitlement: false, estimatedTokens: 0,
+    }, { id: "binding", slug: "fixture", serverUrl: "https://fixture.invalid/mcp", approvalRequired }, true);
+    expect(normalized.approvalRequired).toBe(approvalRequired);
+    const decision = resolveEffectiveDecision({
+      context: { profile: { networkMode: "full", networkAllowlist: [], filesystemMode: "workspace_only" }, runtimeAuthority: { compute: { autoApproveTokenLimit: 10_000 } } } as never,
+      input: normalized,
+      decision: { decision: "allow", reason: "published_policy_allow" },
+    });
+    expect(decision.decision).toBe(approvalRequired ? "ask" : "allow");
+  });
+
   it("turns an otherwise allowed published MCP binding into approval admission", async () => {
     const { resolveEffectiveDecision } = await import("../src/executions");
     const result = resolveEffectiveDecision({
@@ -312,7 +238,7 @@ describe("resolveEffectiveDecision", () => {
     });
   });
 
-  it("does not reclassify a server-verified compiled task as arbitrary complex shell", async () => {
+  it("does not admit integrity-verified code without a verified execution profile", async () => {
     const { resolveEffectiveDecision } = await import("../src/executions");
     const result = resolveEffectiveDecision({
       context: {
@@ -323,27 +249,28 @@ describe("resolveEffectiveDecision", () => {
         capability: "exec",
         subagentId: "compute-agent",
         command: "python -c \"exec(__import__('base64').b64decode('cHJpbnQoNTUp').decode('utf-8'))\"",
-        serverVerifiedCompiledTask: true,
+        inlineCodeIntegrityVerified: true,
       } as never,
       decision: { decision: "allow", reason: "published_policy_allow" },
     });
 
-    expect(result).toEqual({ decision: "allow", reason: "published_policy_allow" });
+    expect(result).toEqual({ decision: "deny", reason: "code_execution_profile_unverified" });
   });
 
-  it("treats a zero automatic-execution token limit as requiring approval for non-zero usage", async () => {
+  it("still requires approval at a zero token limit for otherwise available public browsing", async () => {
     const { resolveEffectiveDecision } = await import("../src/executions");
     const result = resolveEffectiveDecision({
       context: {
-        profile: { networkMode: "no_network", filesystemMode: "workspace_only" },
+        profile: { networkMode: "full", filesystemMode: "ephemeral_full" },
         runtimeAuthority: {
           compute: { autoApproveTokenLimit: 0 },
         },
       } as never,
       input: {
-        capability: "exec",
-        subagentId: "compute-agent",
-        command: "echo safe",
+        capability: "browser",
+        subagentId: "browser-agent",
+        browserMode: "deterministic",
+        allowMutations: false,
         estimatedTokens: 1,
       } as never,
       decision: { decision: "allow", reason: "current_profile_allow" },
@@ -355,7 +282,7 @@ describe("resolveEffectiveDecision", () => {
     });
   });
 
-  it("does not apply token approval to a server-verified read-only MCP call", async () => {
+  it("keeps the configured token approval limit independent of verified read-only behavior", async () => {
     const { resolveEffectiveDecision } = await import("../src/executions");
     const result = resolveEffectiveDecision({
       context: {
@@ -373,8 +300,8 @@ describe("resolveEffectiveDecision", () => {
     });
 
     expect(result).toEqual({
-      decision: "allow",
-      reason: "server_verified_read_only_mcp",
+      decision: "ask",
+      reason: "auto_approve_token_limit_exceeded",
     });
   });
 });
@@ -610,8 +537,8 @@ describe("published runtime authority ceiling", () => {
       decision: "ask",
       reason: "auto_approve_token_limit_exceeded",
     }, true)).toEqual({
-      decision: "allow",
-      reason: "server_verified_read_only_mcp",
+      decision: "ask",
+      reason: "auto_approve_token_limit_exceeded",
     });
     expect(applyServerVerifiedReadOnlyMcpDecision({
       decision: "ask",

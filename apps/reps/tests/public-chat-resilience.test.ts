@@ -108,7 +108,7 @@ describe("public chat reply resilience", () => {
 
   it.each([
     ["conversation", conversationEventsSource, "getPublicConversationHistory"],
-    ["run", runEventsSource, "getPublicGenerationRunSnapshot"],
+    ["run", runEventsSource, "readSnapshot"],
   ])(
     "revalidates the captured principal at most every two seconds in the %s stream",
     (_name, source, protectedRead) => {

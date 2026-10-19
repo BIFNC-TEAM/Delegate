@@ -8,7 +8,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   generationRun: { findFirst: vi.fn() },
   conversation: { findFirst: vi.fn() },
+  checkPreviewContext: vi.fn(),
 }));
+
+vi.mock("../src/agent-context-authorization", () => ({ assertAgentContextForExecution: mocks.checkPreviewContext }));
 
 vi.mock("../src/prisma", () => ({
   prisma: {
@@ -28,6 +31,50 @@ import {
 describe("public Web answer source disclosure", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.checkPreviewContext.mockResolvedValue(undefined);
+  });
+
+  it("projects only the current lease progress and removes it on completion", async () => {
+    const progress = { sequence: 3, stage: "browser", startedAt: "2026-10-14T08:00:00Z", updatedAt: "2026-10-14T08:00:02Z", leaseAttempt: 1, toolArguments: "PRIVATE" };
+    const fixture = generationRunFixture({ status: GenerationRunStatus.PROCESSING, outputMessage: null,
+      conversation: { outboxEvents: [{ status: "PROCESSING", processedAt: null, attemptCount: 1 }] },
+      contextSnapshot: { piProgress: progress } });
+    mocks.generationRun.findFirst.mockResolvedValue(fixture);
+    const result = await getPublicGenerationRunSnapshot(publicRunInput);
+    expect(result?.progress?.stage).toBe("browser");
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    mocks.generationRun.findFirst.mockResolvedValue({ ...fixture,
+      conversation: { outboxEvents: [{ status: "PROCESSING", processedAt: null, attemptCount: 2 }] },
+    });
+    expect(await getPublicGenerationRunSnapshot(publicRunInput)).not.toHaveProperty("progress");
+    mocks.generationRun.findFirst.mockResolvedValue({ ...fixture, status: GenerationRunStatus.COMPLETED });
+    expect(await getPublicGenerationRunSnapshot(publicRunInput)).not.toHaveProperty("progress");
+  });
+
+  it("returns a labeled active draft only after rechecking its context", async () => {
+    mocks.generationRun.findFirst.mockResolvedValue(generationRunFixture({
+      status: GenerationRunStatus.PROCESSING, outputMessage: null,
+      conversation: { outboxEvents: [{ status: "PROCESSING", processedAt: null, attemptCount: 1 }] },
+      contextSnapshot: { piExecutionProtocol: "goal_v2", agentContextAuthorization: {},
+        piStream: { version: 2, sequence: 2, text: "UNVERIFIED_DRAFT", phase: "verifying", leaseAttempt: 1, updatedAt: new Date().toISOString() } },
+    }));
+    expect(await getPublicGenerationRunSnapshot(publicRunInput)).not.toHaveProperty("stream");
+    const snapshot = await getPublicGenerationRunSnapshot({ ...publicRunInput, allowDraftPreview: true });
+    expect(snapshot?.stream).toMatchObject({ text: "UNVERIFIED_DRAFT", phase: "verifying" });
+    expect(snapshot).not.toHaveProperty("message"); expect(mocks.checkPreviewContext).toHaveBeenCalledWith("run-1");
+    mocks.checkPreviewContext.mockRejectedValueOnce(new Error("revoked"));
+    expect(await getPublicGenerationRunSnapshot({ ...publicRunInput, allowDraftPreview: true })).not.toHaveProperty("stream");
+  });
+
+  it.each(["completed", "failed", "canceled", "stale_lease", "untracked", "unlabeled"])("does not expose a %s draft", async mode => {
+    mocks.generationRun.findFirst.mockResolvedValue(generationRunFixture({
+      status: mode === "completed" ? GenerationRunStatus.COMPLETED : mode === "failed" ? GenerationRunStatus.FAILED : mode === "canceled" ? GenerationRunStatus.CANCELED : GenerationRunStatus.PROCESSING,
+      outputMessage: null,
+      conversation: { outboxEvents: [{ status: "PROCESSING", processedAt: null, attemptCount: mode === "stale_lease" ? 2 : 1 }] },
+      contextSnapshot: { piExecutionProtocol: "goal_v2", ...(mode !== "untracked" ? { agentContextAuthorization: {} } : {}),
+        piStream: { version: mode === "unlabeled" ? 1 : 2, sequence: 2, text: "MUST_NOT_LEAK", ...(mode !== "unlabeled" ? { phase: "verifying", leaseAttempt: 1 } : {}), updatedAt: new Date().toISOString() } },
+    }));
+    expect(await getPublicGenerationRunSnapshot({ ...publicRunInput, allowDraftPreview: true })).not.toHaveProperty("stream");
   });
 
   it("admits only server-marked source-independent recovery delivery for the same run", () => {
@@ -129,6 +176,20 @@ describe("public Web answer source disclosure", () => {
     },
   ])("classifies $name", ({ input, expected }) => {
     expect(resolvePublicWebAnswerSourceDisclosure(input)).toBe(expected);
+  });
+
+  it("returns the same selected sources in terminal SSE and restored old history", async () => {
+    const sources = [{ kind: "web", title: "example.com", domain: "example.com", url: "https://example.com/", access: "page" }, { kind: "mcp", title: "Open-Meteo" }];
+    const content = { intent: "pi_agent", publicSources: sources };
+    const citations = [{ title: "地理教材", excerpt: null, memoryUseItem: { id: "memory-use-item", sourceKind: "PUBLIC_KNOWLEDGE", useRun: { generationRunId: "run-1" } } }];
+    mocks.generationRun.findFirst.mockResolvedValue(generationRunFixture({ outputMessage: outputMessageFixture({ content, citations }) }));
+    const snapshot = await getPublicGenerationRunSnapshot(publicRunInput);
+    expect(snapshot?.message?.sources).toEqual(sources);
+    expect(snapshot?.message?.citations).toEqual([{ title: "地理教材", kind: "knowledge" }]);
+    mocks.conversation.findFirst.mockResolvedValue({ state: "WAITING_USER", freeRepliesUsed: 4, assignments: [], episodes: [], messages: [historyMessageFixture({ content, citations })] });
+    const history = await getPublicConversationHistory({ representativeSlug: "delegate", audienceIdentityId: "identity-1", audienceId: "audience-1" });
+    expect(history.messages[0]?.sources).toEqual(snapshot?.message?.sources);
+    expect(history.messages[0]?.citations).toEqual(snapshot?.message?.citations);
   });
 
   it("adds the marker to a source-free model run snapshot", async () => {

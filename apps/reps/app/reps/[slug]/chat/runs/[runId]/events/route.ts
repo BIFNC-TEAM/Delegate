@@ -1,8 +1,10 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { auditErrorCode } from "@delegate/runtime";
 
 import {
   getPublicGenerationRunSnapshot,
+  getPublicGenerationRunControlSnapshot,
   getPublicRepresentativeRuntime,
 } from "@delegate/web-data";
 
@@ -13,7 +15,7 @@ import {
 } from "../../../../public-principal";
 
 const encoder = new TextEncoder();
-const terminalStates = new Set(["waiting_approval", "completed", "failed", "canceled"]);
+const terminalStates = new Set(["waiting_approval", "waiting_human", "completed", "failed", "canceled"]);
 const RUN_STREAM_WINDOW_MS = 300_000;
 const PRINCIPAL_REVALIDATION_INTERVAL_MS = 2_000;
 const RUN_STREAM_POLL_INTERVAL_MS = 150;
@@ -23,13 +25,6 @@ export async function GET(
   { params }: { params: Promise<{ slug: string; runId: string }> },
 ) {
   const { slug, runId } = await params;
-  const runtime = await getPublicRepresentativeRuntime(slug);
-  if (runtime.status !== "available") {
-    return new Response(JSON.stringify({ error: "Representative is not publicly available." }), {
-      status: runtime.status === "paused" ? 423 : 404,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
   let audienceRequest: Awaited<
     ReturnType<typeof resolvePublicAudienceRequestPrincipal>
   >;
@@ -61,18 +56,22 @@ export async function GET(
       const startedAt = Date.now();
       let previous = "";
       let nextPrincipalRevalidationAt = 0;
+      let serviceAvailable = false;
       try {
         while (!request.signal.aborted && Date.now() - startedAt < RUN_STREAM_WINDOW_MS) {
           if (Date.now() >= nextPrincipalRevalidationAt) {
             await revalidate();
+            serviceAvailable = (await getPublicRepresentativeRuntime(slug)).status === "available";
             nextPrincipalRevalidationAt =
               Date.now() + PRINCIPAL_REVALIDATION_INTERVAL_MS;
           }
-          const snapshot = await getPublicGenerationRunSnapshot({
+          const readSnapshot = serviceAvailable ? getPublicGenerationRunSnapshot : getPublicGenerationRunControlSnapshot;
+          const snapshot = await readSnapshot({
             representativeSlug: slug,
             runId,
             audienceIdentityId: principal.audienceIdentityId,
             audienceId: principal.audienceId,
+            ...(new URL(request.url).searchParams.get("preview") === "1" ? { allowDraftPreview: true } : {}),
           });
           if (!snapshot) {
             controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "run_not_found" })}\n\n`));
@@ -96,7 +95,7 @@ export async function GET(
               `event: error\ndata: ${JSON.stringify({ error: "stream_failed" })}\n\n`,
             ),
           );
-          console.error("Public generation run event stream failed.", error);
+          console.error("Public generation run event stream failed.", auditErrorCode(error));
         }
       } finally {
         controller.close();

@@ -39,7 +39,8 @@ vi.mock("@delegate/model-runtime", () => ({
   generateRepresentativeReply: mocks.generateRepresentativeReply,
 }));
 
-vi.mock("@delegate/runtime", () => ({
+vi.mock("@delegate/runtime", async (original) => ({
+  ...(await original<typeof import("@delegate/runtime")>()),
   createConversationPlan: mocks.createConversationPlan,
   renderReplyPreview: mocks.renderReplyPreview,
   resolveConversationSubagent: mocks.resolveConversationSubagent,

@@ -110,7 +110,7 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
         });
       }),
     ).rejects.toThrow(
-      "BillingProduct id, representative, code, and creation time are immutable",
+      "BillingProduct id, representative, code, kind, and creation time are immutable",
     );
 
     await expect(
@@ -181,8 +181,41 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
           },
         });
       }),
-    ).rejects.toThrow("BillingPriceVersion_v1_unit");
+    ).rejects.toThrow("BillingPriceVersion_commerce_shape");
   }, 30_000);
+
+  it("preserves committed product identity and order value after rejected mutations", async () => {
+    const fixture = await prisma.$transaction((tx) =>
+      createBillingSnapshotFixture(tx, "persisted-immutability"),
+    );
+    const productBefore = await prisma.billingProduct.findUniqueOrThrow({
+      where: { id: fixture.productId },
+    });
+    const orderBefore = await prisma.rechargeOrder.findUniqueOrThrow({
+      where: { id: fixture.orderId },
+    });
+
+    await expect(prisma.billingProduct.update({
+      where: { id: fixture.productId },
+      data: { code: `repurposed-${crypto.randomUUID()}` },
+    })).rejects.toThrow(
+      "BillingProduct id, representative, code, kind, and creation time are immutable",
+    );
+    await expect(prisma.rechargeOrder.update({
+      where: { id: fixture.orderId },
+      data: { amountCents: orderBefore.amountCents + 100 },
+    })).rejects.toThrow("Product-bound RechargeOrder commercial fields are immutable");
+
+    await expect(prisma.billingProduct.findUniqueOrThrow({
+      where: { id: fixture.productId },
+    })).resolves.toEqual(productBefore);
+    await expect(prisma.rechargeOrder.findUniqueOrThrow({
+      where: { id: fixture.orderId },
+    })).resolves.toEqual(orderBefore);
+    await expect(prisma.rechargeOrder.count({
+      where: { representativeId: fixture.representativeId },
+    })).resolves.toBe(1);
+  });
 
   it("serializes price retirement against service-package order creation", async () => {
     const fixture = await prisma.$transaction((tx) =>
@@ -237,7 +270,7 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
       },
     });
     const orderExpectation = expect(orderAttempt).rejects.toThrow(
-      "RechargeOrder commercial snapshot does not match its active price version",
+      "RechargeOrder commercial snapshot does not match the active price version",
     );
     await new Promise((resolve) => setTimeout(resolve, 25));
     allowRetirementCommit();
@@ -247,6 +280,10 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
     await expect(
       prisma.rechargeOrder.count({ where: { idempotencyKey } }),
     ).resolves.toBe(0);
+    await expect(prisma.billingPriceVersion.findUniqueOrThrow({
+      where: { id: fixture.priceVersionId },
+      select: { status: true },
+    })).resolves.toEqual({ status: BillingPriceVersionStatus.RETIRED });
   }, 30_000);
 
   it("atomically preserves and query-first recovers a real CREATED WeChat order after an ambiguous create result", async () => {

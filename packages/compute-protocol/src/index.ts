@@ -1,4 +1,5 @@
 import { z } from "zod";
+export * from "./mcp-recovery";
 
 export const capabilityKindSchema = z.enum([
   "exec",
@@ -12,7 +13,6 @@ export const computeSubagentIdSchema = z.enum([
   "compute-agent",
   "browser-agent",
 ]);
-export const capabilityPlanTierSchema = z.enum(["pass", "deep_help"]);
 export const policyDecisionSchema = z.enum(["allow", "ask", "deny"]);
 export const managedPolicyScopeSchema = z.enum([
   "representative_default",
@@ -148,9 +148,7 @@ export const capabilityPolicyRuleSchema = z.object({
   domainPattern: z.string().optional(),
   resourceScopeCondition: policyResourceScopeSchema.optional(),
   channelCondition: policyChannelSchema.optional(),
-  requiredPlanTier: capabilityPlanTierSchema.optional(),
   maxEstimatedTokens: z.number().int().nonnegative().optional(),
-  requiresPaidPlan: z.boolean().default(false),
   requiresHumanApproval: z.boolean().default(false),
   priority: z.number().int(),
 });
@@ -187,7 +185,6 @@ export const ownerManagedOverlayConfigSchema = z.object({
   browserRequiresApproval: z.boolean().default(true),
   mcpDecision: policyDecisionSchema,
   mcpRequiresApproval: z.boolean().default(true),
-  requiredPlanTier: capabilityPlanTierSchema.default("pass"),
 });
 
 export const ownerManagedPolicyOverlaysSchema = z.object({
@@ -405,7 +402,7 @@ export const heartbeatComputeSessionResponseSchema = z.object({
   session: computeSessionSnapshotSchema,
 });
 
-export const compiledSandboxTaskMetadataSchema = z.object({
+const legacyCompiledSandboxTaskMetadataSchema = z.object({
   compilerVersion: z.literal("sandbox-task-compiler.v1"),
   instructionHash: z.string().regex(/^[a-f0-9]{64}$/u),
   codeHash: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -414,8 +411,60 @@ export const compiledSandboxTaskMetadataSchema = z.object({
   compilerModel: z.string().min(1).max(200).optional(),
 }).strict();
 
+export const compiledSandboxTaskMetadataSchema = z.union([
+  legacyCompiledSandboxTaskMetadataSchema,
+  z.object({
+    compilerVersion: z.literal("sandbox-task-compiler.v2"),
+    instructionHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    codeHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    sourceOrigin: z.literal("agent_submitted"),
+    compilerProvider: z.string().min(1).max(120).optional(),
+    compilerModel: z.string().min(1).max(200).optional(),
+  }).strict(),
+]);
+
+export const codeExecutionPreflightResponseSchema = z.object({
+  available: z.boolean(),
+  profileId: z.string().min(1).nullable(),
+  reason: z.enum(["code_execution_profile_unverified", "code_execution_profile_verified"]),
+  codeClassification: z.literal("untrusted_code"),
+  requestedNetworkMode: computeNetworkModeSchema,
+  requestedFilesystemMode: computeFilesystemModeSchema,
+  requiredControls: z.array(z.enum(["network", "filesystem", "credentials", "resources", "session_state"])),
+  maximumDurationMs: z.number().int().min(100).max(30000).optional(),
+}).strict().refine(value => value.available
+  ? Boolean(value.profileId) && value.reason === "code_execution_profile_verified"
+  : value.reason === "code_execution_profile_unverified", "Inconsistent code execution preflight");
+export type CodeExecutionPreflight = z.infer<typeof codeExecutionPreflightResponseSchema>;
+
+/** Deployment capability, not an owner-editable permission or an isolation attestation. */
+export const generalCodeExecutionAvailability = Object.freeze({
+  available: false as const,
+  profileId: null,
+  reason: "code_execution_profile_unverified" as const,
+});
+
+export const isolatedPythonRequestSchema = z.object({
+  profileId: z.literal("delegate.aio.single-python.v1"),
+  actionKey: z.string().min(1).max(200),
+  source: z.string().min(1).max(65536),
+  timeoutMs: z.number().int().min(100).max(30000),
+  inputs: z.array(z.object({
+    attachmentId: z.string().min(1).max(200),
+    fileName: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,179}$/u),
+    sizeBytes: z.number().int().nonnegative().max(20 * 1024 * 1024),
+    checksum: z.string().regex(/^[a-f0-9]{64}$/u),
+  }).strict()).max(32),
+  outputFileName: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,179}\.(?:txt|md|csv|json)$/u).optional(),
+}).strict();
+export type IsolatedPythonRequest = z.infer<typeof isolatedPythonRequestSchema>;
+
 export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.object({
   capability: capabilityKindSchema,
+  /** Supplied by the trusted Agent host, never exposed in model parameters. */
+  logicalAction: z.object({ version: z.literal(1), ordinal: z.number().int().min(1).max(256) }).strict().optional(),
+  /** Monotonic restriction: deny if current policy needs approval; never grants allow. */
+  rejectApprovalWait: z.boolean().optional(),
   subagentId: computeSubagentIdSchema,
   generationWorkLease: z.object({
     outboxId: z.string().min(1),
@@ -432,6 +481,8 @@ export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.obj
   toolArguments: z.record(z.string(), z.unknown()).optional(),
   workingDirectory: z.string().min(1).optional(),
   estimatedTokens: z.number().int().nonnegative().optional(),
+  // Legacy clients may still send this flag. It is never authorization:
+  // the broker verifies the server-owned generation quota reservation.
   hasPaidEntitlement: z.boolean().default(false),
   browserMode: browserExecutionModeSchema.default("deterministic"),
   task: z.string().min(1).optional(),
@@ -439,6 +490,7 @@ export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.obj
   maxSteps: z.number().int().positive().max(8).default(3),
   allowMutations: z.boolean().default(false),
   compiledTask: compiledSandboxTaskMetadataSchema.optional(),
+  isolatedPython: isolatedPythonRequestSchema.optional(),
 }), (value) => ({
   subagentId: value.subagentId,
   capabilities: [value.capability],
@@ -1349,7 +1401,6 @@ export const artifactDetailResponseSchema = z.object({
 
 export type CapabilityKind = z.infer<typeof capabilityKindSchema>;
 export type ComputeSubagentId = z.infer<typeof computeSubagentIdSchema>;
-export type CapabilityPlanTier = z.infer<typeof capabilityPlanTierSchema>;
 export type PolicyDecision = z.infer<typeof policyDecisionSchema>;
 export type ManagedPolicyScope = z.infer<typeof managedPolicyScopeSchema>;
 export type ContactComputeTrustTier = z.infer<typeof contactComputeTrustTierSchema>;

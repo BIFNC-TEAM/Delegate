@@ -47,7 +47,7 @@ Delegate 现在包含这些可运行的页面和服务：
 - **可选 Matrix Application Service** 位于 `apps/matrix-bridge`，负责认证 Matrix transaction、映射渠道事件和管理虚拟用户。原生 Matrix 是独立的可选渠道，不是 Telegram 的必需中转层。
 - **AMN wallet control plane** 覆盖不可变服务商品与价格、本地 mock、默认关闭的微信支付 API v3 Native 收款与恢复、服务权益、usage charging、Creator 暂定 20% 收益策略、退款/冲正、提现冻结、provider adapters，以及 owner/public wallet views。
 - **Compute broker** 位于 `apps/compute-broker`，在 approval 和 policy gate 后提供受治理的 `exec`、`read`、`write`、`process` 和 `browser` 请求。
-- **Agent Runtime V3** 横跨 `packages/runtime`、`packages/model-runtime`、conversation worker、Compute Broker 和 workflow runner：使用唯一的服务端验证 Goal/Action DAG、schema-pinned MCP 编译、原子执行准入、Verified Result 和证据绑定 Composer，并保留 V2 回滚兼容。
+- **嵌入式 Pi Agent** 负责当前会话，复用受治理的知识、工具、持久化与交付。另有独立、显式启用的 [Agent V2 开发线](./docs/agent-v2.md)，实现主模型自主决策与 RAG 默认优先；现有入口仍是默认版本。
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
 - **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、delegation tasks、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
 - **OpenViking 集成** 作为 PostgreSQL 权威数据之后的可重建投影，支持已发布公开知识与受治理记忆的同步和召回。
@@ -530,7 +530,8 @@ Delegate 使用 [DESIGN.md](./DESIGN.md) 中定义的 **Dispatch Editorial** 方
 ## 文档地图
 
 - [Architecture](./docs/architecture.md): product thesis、runtime loop、security boundary 和 OpenViking rules。
-- [Agent Runtime V3](./docs/agent-runtime-v3.md): PlannerProposal、TurnPlan、能力、审批、执行、证据、交付、计费、发布门槛和 pi 框架决策的权威规范。
+- [Agent V2](./docs/agent-v2.md)：独立入口、系统提示词、预算、启动和回退；[验收与对照记录](./docs/agent-v2-validation.md)。
+- [Agent Runtime V3](./docs/agent-runtime-v3.md)：Pi 迁移前的历史协议，不是当前新请求的运行规范。
 - [Conversation runtime flow](./docs/conversation-runtime-flow.md): 渠道中立的 V3 运行流程。
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): 更大的系统方向和 tradeoffs。
 - [Public audience identity](./docs/public-audience-identity.md): Web 匿名身份、Contact/Conversation、充值和 sandbox linkage。

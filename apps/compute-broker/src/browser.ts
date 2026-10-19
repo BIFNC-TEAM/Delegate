@@ -1,4 +1,5 @@
 import type { BrowserTransportKind } from "@delegate/compute-protocol";
+import { browserEvidenceExtractor } from "./browser-evidence";
 
 export type NativeBrowserAction =
   | {
@@ -54,6 +55,8 @@ export type PlaywrightBrowseArtifactPayload = {
   finalUrl: string;
   textSnippet: string;
   contentSnippet: string;
+  httpStatus?: number;
+  observedAt?: string;
   links: Array<{
     text: string;
     href: string;
@@ -69,12 +72,16 @@ export type PlaywrightBrowseArtifactPayload = {
 export function buildPlaywrightBrowseCommand(params: {
   url: string;
   playwrightVersion: string;
+  anonymous?: boolean;
 }): string {
   const script = buildBasePlaywrightScript({
     transportKind: "playwright",
     playwrightVersion: params.playwrightVersion,
+    anonymous: params.anonymous ?? false,
     scriptBody: [
-      `  await page.goto(${JSON.stringify(params.url)}, { waitUntil: 'domcontentloaded', timeout: 15000 });`,
+      `  const navigationResponse = await page.goto(${JSON.stringify(params.url)}, { waitUntil: 'domcontentloaded', timeout: 15000 });`,
+      "  globalThis.__delegateHttpStatus = navigationResponse?.status();",
+      "  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);",
       "  await page.waitForTimeout(750);",
     ],
   });
@@ -300,7 +307,7 @@ export function parsePlaywrightBrowseArtifactPayload(stdout: string): Playwright
         href: typeof value.href === "string" ? value.href : "",
       }))
       .filter((value) => value.href.length > 0)
-      .slice(0, 12);
+      .slice(0, 60);
 
     const executedActions = Array.isArray(parsed.executedActions)
       ? parsed.executedActions
@@ -318,6 +325,8 @@ export function parsePlaywrightBrowseArtifactPayload(stdout: string): Playwright
       finalUrl: parsed.finalUrl,
       textSnippet: parsed.textSnippet,
       contentSnippet: parsed.contentSnippet,
+      ...(typeof parsed.httpStatus === "number" ? { httpStatus: parsed.httpStatus } : {}),
+      ...(typeof parsed.observedAt === "string" ? { observedAt: parsed.observedAt } : {}),
       links,
       screenshotBase64: parsed.screenshotBase64,
       screenshotMimeType: parsed.screenshotMimeType,
@@ -330,12 +339,21 @@ export function parsePlaywrightBrowseArtifactPayload(stdout: string): Playwright
 
 function buildPlaywrightCommand(script: string, playwrightVersion: string) {
   return [
+    "set -e",
+    'if [ "${DELEGATE_BROWSER_RUNTIME:-}" = "tencent-all-in-one" ]; then',
+    '  export NODE_PATH="$(npm root -g)${NODE_PATH:+:$NODE_PATH}"',
+    '  export DELEGATE_CHROMIUM_EXECUTABLE="$(command -v chromium)"',
+    '  test -n "$DELEGATE_CHROMIUM_EXECUTABLE"',
+    "  node -e \"require('playwright')\"",
+    "else",
     "mkdir -p /tmp/pw-run",
     "mkdir -p /tmp/npm-cache",
     "cd /tmp/pw-run",
     "[ -f package.json ] || npm init -y >/dev/null 2>&1",
     `HOME=/tmp npm_config_cache=/tmp/npm-cache PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm install --silent --no-save playwright@${playwrightVersion} >/dev/null 2>&1`,
-    `HOME=/tmp PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node -e ${shellQuote(script)}`,
+    "export HOME=/tmp PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
+    "fi",
+    `node -e ${shellQuote(script)}`,
   ].join("\n");
 }
 
@@ -372,9 +390,9 @@ function buildOpenCodeBrowserHelperScript(params: {
     "}} else push('screenshot','inspect');",
     "const title=await page.title().catch(()=>'');",
     "const finalUrl=page.url();",
-    "const textSnippet=norm(await page.locator('body').innerText().catch(()=>'')).slice(0,2400);",
+    `const textSnippet=await page.evaluate(${JSON.stringify(browserEvidenceExtractor)});`,
     "const contentSnippet=(await page.content()).slice(0,12000);",
-    "const links=await page.locator('a[href]').evaluateAll(ns=>ns.slice(0,12).map(n=>({text:(n.textContent||'').trim().slice(0,120),href:n.href}))).catch(()=>[]);",
+    "const links=await page.locator('a[href]').evaluateAll(ns=>ns.slice(0,60).map(n=>({text:(n.textContent||'').trim().slice(0,120),href:n.href}))).catch(()=>[]);",
     "const raw=await page.screenshot({type:'jpeg',quality:65,fullPage:false,encoding:'base64'});",
     "const screenshotBase64=typeof raw==='string'?raw:raw.toString('base64');",
     "console.log(JSON.stringify({transportKind:'opencode_computer_use',profilePath,title,finalUrl,textSnippet,contentSnippet,links,screenshotBase64,screenshotMimeType:'image/jpeg',executedActions},null,2));",
@@ -387,31 +405,41 @@ function buildBasePlaywrightScript(params: {
   transportKind: BrowserTransportKind;
   playwrightVersion: string;
   scriptBody: string[];
+  anonymous?: boolean;
 }) {
   return [
-    "const normalize = (value) => value.replace(/\\s+/g, ' ').trim();",
+    // innerText carries paragraph boundaries and table-cell tabs. Flattening
+    // them loses the relationship between labels, values and nearby notices.
+    "const normalize = (value) => value.replace(/\\r\\n?/g, '\\n').replace(/[^\\S\\n\\t]+/g, ' ').replace(/ *\\n */g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();",
     "const { promises: fs } = require('node:fs');",
     "void (async () => {",
     "  const { chromium } = require('playwright');",
-    "  const sessionRoot = process.env.DELEGATE_SESSION_ROOT || '/delegate-session';",
-    "  const profilePath = `${sessionRoot}/browser-profile`;",
-    "  await fs.mkdir(profilePath, { recursive: true });",
-    "  const context = await chromium.launchPersistentContext(profilePath, {",
+    ...(params.anonymous ? [
+      "  const profilePath = '__delegate_anonymous_v1__';",
+      "  const browser = await chromium.launch({",
+    ] : [
+      "  const sessionRoot = process.env.DELEGATE_SESSION_ROOT || '/delegate-session';",
+      "  const profilePath = `${sessionRoot}/browser-profile`;",
+      "  await fs.mkdir(profilePath, { recursive: true });",
+      "  const context = await chromium.launchPersistentContext(profilePath, {",
+    ]),
+    "    ...(process.env.DELEGATE_CHROMIUM_EXECUTABLE ? { executablePath: process.env.DELEGATE_CHROMIUM_EXECUTABLE } : {}),",
     "    headless: true,",
-    "    viewport: { width: 1440, height: 960 },",
+    ...(!params.anonymous ? ["    viewport: { width: 1440, height: 960 },"] : []),
     "    args: ['--no-sandbox', '--disable-dev-shm-usage'],",
     "  });",
+    ...(params.anonymous ? ["  try {", "  const context = await browser.newContext({ viewport: { width: 1440, height: 960 }, serviceWorkers: 'block' });", "  try {"] : []),
     "  const page = context.pages()[0] || (await context.newPage());",
     ...params.scriptBody,
     "  const title = await page.title().catch(() => '');",
     "  const finalUrl = page.url();",
-    "  const textSnippet = normalize(await page.locator('body').innerText().catch(() => '')).slice(0, 2400);",
+    `  const textSnippet = normalize(await page.evaluate(${JSON.stringify(browserEvidenceExtractor)})).slice(0, 8000);`,
     "  const contentSnippet = (await page.content()).slice(0, 12000);",
-    "  const links = await page.locator('a[href]').evaluateAll((nodes) => nodes.slice(0, 12).map((node) => ({ text: (node.textContent || '').trim().slice(0, 120), href: node.href }))).catch(() => []);",
+    "  const links = await page.locator('a[href]').evaluateAll((nodes) => Array.from(new Map(nodes.filter(node => /^https?:/.test(node.href)).map(node => [node.href, { text: (node.textContent || '').trim().slice(0, 120), href: node.href.slice(0, 2000) }])).values()).slice(0, 60)).catch(() => []);",
     "  const screenshotRaw = await page.screenshot({ type: 'jpeg', quality: 65, fullPage: false, encoding: 'base64' });",
     "  const screenshotBase64 = typeof screenshotRaw === 'string' ? screenshotRaw : screenshotRaw.toString('base64');",
-    `  console.log(JSON.stringify({ transportKind: ${JSON.stringify(params.transportKind)}, profilePath, title, finalUrl, textSnippet, contentSnippet, links, screenshotBase64, screenshotMimeType: 'image/jpeg', executedActions: globalThis.__delegateExecutedActions || [] }, null, 2));`,
-    "  await context.close();",
+    `  console.log(JSON.stringify({ transportKind: ${JSON.stringify(params.transportKind)}, profilePath, title, finalUrl, textSnippet, contentSnippet, links, httpStatus: globalThis.__delegateHttpStatus, observedAt: new Date().toISOString(), screenshotBase64, screenshotMimeType: 'image/jpeg', executedActions: globalThis.__delegateExecutedActions || [] }, null, 2));`,
+    ...(params.anonymous ? ["  } finally { await context.close(); }", "  } finally { await browser.close(); }"] : ["  await context.close();"]),
     "})().catch((error) => {",
     "  console.error(error.stack || error.message || String(error));",
     "  process.exit(1);",

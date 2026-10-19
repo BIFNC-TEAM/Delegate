@@ -1,0 +1,106 @@
+{
+  "entry": "http://localhost:3002/reps/founder-representative-2?lang=zh",
+  "deploymentImage": "delegate-agent-v2:geo-3002-20261019",
+  "publishedVersionUnchanged": "cmuzi975r0003r2wpiwfjh9ku",
+  "configurationPreservation": {
+    "representative": true,
+    "version": true,
+    "knowledgePack": true,
+    "knowledgeBindings": true,
+    "knowledgeAssets": true,
+    "publishedResources": true,
+    "skills": true,
+    "mcpBindings": true,
+    "capabilityProfiles": true,
+    "capabilityRules": true,
+    "memoryPolicy": true
+  },
+  "knowledgeBindings": 7,
+  "publishedResources": 9,
+  "existingMcpBindings": 2,
+  "legacyModelPreserved": "qwen-plus",
+  "modelScope": "V2 allowlist: founder-representative-2 only",
+  "conditions": "Normal anonymous HTTP/SSE requests through the existing main database and published knowledge. No reseed, republish or database migration. Behavioral smoke checks, not an exhaustive semantic or performance evaluation.",
+  "rows": [
+    {
+      "question": "地图三要素是什么？请优先依据知识库并注明来源。",
+      "runId": "cmveyhwr5000rru0nzo8ugg6f",
+      "answer": "地图的三要素是：**比例尺、方向、图例**，阅读地图时需要综合利用这三项信息 〔地理_01_地球与地图〕。\n\n补充两点相关知识（同来源）：\n- **比例尺**可用数字式、线段式或文字式表示，含义是图上距离与实际距离的比，即 比例尺 = 图上距离 ÷ 实际距离 〔地理_01_地球与地图〕。\n- 表示相同图幅时，比例尺越大，表示范围越小、内容越详细；比例尺越小，表示范围越大、内容越简略 〔地理_01_地球与地图〕。\n\n来源：地理知识库《地理_01_地球与地图》（初中自然地理基础）。",
+      "model": "qwen3.8-27b",
+      "runtime": "delegate-agent-v2",
+      "agentVariant": "v2",
+      "agentStatus": "completed",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "tools": [
+        "retrieve_authorized_knowledge"
+      ],
+      "sourceCount": 1,
+      "durationMs": 3859,
+      "taskId": "cmveyhwr5000rru0nzo8ugg6f",
+      "taskUsage": {
+        "tokens": 12666,
+        "costUsd": 0,
+        "activeMs": 3588.313792999999,
+        "attempts": 3,
+        "toolCalls": 1,
+        "modelTurns": 2,
+        "inputTokens": 12281,
+        "outputTokens": 385
+      }
+    },
+    {
+      "question": "今天气温多少？",
+      "runId": "cmveyhzqm001iru0nld6hpx54",
+      "answer": "请问您想查询哪个城市或地区的气温？",
+      "model": "qwen3.8-27b",
+      "runtime": "delegate-agent-v2",
+      "agentVariant": "v2",
+      "agentStatus": "waiting_user",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "tools": [],
+      "sourceCount": 0,
+      "durationMs": 1797,
+      "taskId": "cmveyhzqm001iru0nld6hpx54",
+      "taskUsage": {
+        "tokens": 5897,
+        "costUsd": 0,
+        "activeMs": 1099.001916999998,
+        "attempts": 1,
+        "toolCalls": 0,
+        "modelTurns": 1,
+        "inputTokens": 5720,
+        "outputTokens": 177
+      }
+    },
+    {
+      "question": "上海",
+      "runId": "cmveyi1670023ru0nx8sw8g9c",
+      "answer": "上海今天（10月19日）气温情况：\n\n- **当前气温**：25.4°C（体感约 28.7°C），阴天，湿度 73%，风速 4.7 km/h\n- **今日气温范围**：最低 20.9°C ～ 最高 25.6°C\n- **降水**：预计有少量毛毛雨（约 1 mm）\n\n数据来源：Open-Meteo 实时天气 〔open-meteo/openmeteo_get_forecast〕，位置定位自上海地理编码 〔open-meteo/openmeteo_search_locations〕。\n\n出门建议带把伞，早晚偏凉，可加件薄外套。",
+      "model": "qwen3.8-27b",
+      "runtime": "delegate-agent-v2",
+      "agentVariant": "v2",
+      "agentStatus": "completed",
+      "modelCalls": 3,
+      "toolCalls": 2,
+      "tools": [
+        "mcp_openmeteo_search_locations_cfd71817d3",
+        "mcp_openmeteo_get_forecast_6f3d8046ac"
+      ],
+      "sourceCount": 2,
+      "durationMs": 12744,
+      "taskId": "cmveyhzqm001iru0nld6hpx54",
+      "taskUsage": {
+        "tokens": 28858,
+        "costUsd": 0,
+        "activeMs": 12929.869131,
+        "attempts": 6,
+        "toolCalls": 2,
+        "modelTurns": 4,
+        "inputTokens": 27989,
+        "outputTokens": 869
+      }
+    }
+  ]
+}

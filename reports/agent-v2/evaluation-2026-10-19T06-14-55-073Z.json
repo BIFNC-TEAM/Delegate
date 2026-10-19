@@ -1,0 +1,253 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "temperature": 0,
+  "promptSha256": "a1495a51684cfba1114065a0e143e420a87cafac0b300faab57bf637d4348d3e",
+  "repeats": 3,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true,
+        "citationIntegrity": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请提供您所在的城市或地区，以便查询当地今日天气。",
+      "sources": [],
+      "durationMs": 2196.613958,
+      "firstTextMs": 2173.024125,
+      "firstFinalOutputMs": 2173.024125,
+      "modelCalls": 1,
+      "runtimeModelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1843,
+      "outputTokens": 55,
+      "totalTokens": 1898,
+      "cacheReadTokens": 0,
+      "error": null
+    },
+    {
+      "id": "internal-miss",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true,
+        "citationIntegrity": true
+      },
+      "fixtureChecksPass": true,
+      "text": "知识库中未找到星河科技2026年10月奖金金额的授权记录。该信息属于敏感薪酬数据，需经HR系统或财务系统授权访问，当前工具链中无获准接口可查询实时奖金发放明细。无法提供有出处的内部事实。",
+      "sources": [],
+      "durationMs": 4964.378708,
+      "firstTextMs": 4962.8436249999995,
+      "firstFinalOutputMs": 4962.8436249999995,
+      "modelCalls": 2,
+      "runtimeModelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "retrieve_authorized_knowledge"
+      ],
+      "ragCalls": 1,
+      "ragDurationMs": 8.135666000000128,
+      "inputTokens": 3810,
+      "outputTokens": 130,
+      "totalTokens": 3940,
+      "cacheReadTokens": 960,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 1,
+      "variant": "v2",
+      "status": "completed",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": false,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": false,
+        "computation": true,
+        "internalMiss": true,
+        "citationIntegrity": true
+      },
+      "fixtureChecksPass": false,
+      "text": "根据模拟场景的实时天气数据，今天（2026年10月19日）上海的天气为：**20°C，多云**。观测时间为 2026-10-19T09:00:00+08:00 [S:5b8a65135de8e6d1b3e60d45]。",
+      "sources": [
+        {
+          "id": "5b8a65135de8e6d1b3e60d45",
+          "title": "合成天气测试数据",
+          "channel": "web",
+          "observedAt": "2026-10-19T09:00:00+08:00",
+          "url": "https://example.com/fixture-weather"
+        }
+      ],
+      "durationMs": 5351.986708,
+      "firstTextMs": 5349.891791,
+      "firstFinalOutputMs": 5349.891791,
+      "modelCalls": 2,
+      "runtimeModelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "search_current_web"
+      ],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 3921,
+      "outputTokens": 163,
+      "totalTokens": 4084,
+      "cacheReadTokens": 2688,
+      "error": null
+    },
+    {
+      "id": "internal-miss",
+      "repeat": 1,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true,
+        "citationIntegrity": true
+      },
+      "fixtureChecksPass": true,
+      "text": "知识库未命中“星河科技 2026年10月 奖金发放标准与金额”相关内容。该信息属于敏感薪酬数据，未在授权知识库中公开存储或已超出当前访问权限范围。\n\n根据规则：内部事实没有查到，不能用互联网或常识补造；可查另一个获授权内部系统，或明确说明未找到。\n\n当前可用工具中，无其他获准访问薪酬系统的接口（如HRIS查询）；`search_current_web` 仅限公开/实时观测类信息（如天气），不适用于内部奖金数据；`mcp_multiply` 和 `request_clarification` 均不适用。\n\n因此，无法提供有出处的内部事实。\n\n未在授权知识库中检索到星河科技2026年10月奖金金额的内部记录。该信息可能受权限限制、尚未发布，或未纳入当前可访问知识源。如需进一步协助，请确认是否可提供额外授权凭证或指定其他获准数据源。",
+      "sources": [],
+      "durationMs": 8557.86675,
+      "firstTextMs": 8556.632500000002,
+      "firstFinalOutputMs": 8556.632500000002,
+      "modelCalls": 2,
+      "runtimeModelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "retrieve_authorized_knowledge"
+      ],
+      "ragCalls": 1,
+      "ragDurationMs": 3.9736249999987194,
+      "inputTokens": 3829,
+      "outputTokens": 305,
+      "totalTokens": 4134,
+      "cacheReadTokens": 960,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 2,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true,
+        "citationIntegrity": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请提供您所在的城市或具体位置，以便查询当地天气。",
+      "sources": [],
+      "durationMs": 1451.5445,
+      "firstTextMs": 1450.4654579999988,
+      "firstFinalOutputMs": 1450.4654579999988,
+      "modelCalls": 1,
+      "runtimeModelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1843,
+      "outputTokens": 18,
+      "totalTokens": 1861,
+      "cacheReadTokens": 0,
+      "error": null
+    },
+    {
+      "id": "internal-miss",
+      "repeat": 2,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true,
+        "citationIntegrity": true
+      },
+      "fixtureChecksPass": true,
+      "text": "知识库未找到关于“星河科技2026年10月员工绩效奖金计算规则与发放标准”的记录。该信息属于敏感薪酬数据，通常不公开存储于通用知识库，可能需通过HR系统或当月财务审批流程获取。\n\n当前可用工具中：\n- `search_current_web` 仅支持场景内公开/实时观测（如天气），不适用于内部薪酬数据；\n- `mcp_multiply_6ce63d7dbf` 是纯计算工具，不提供事实；\n- 无获准的HR系统查询接口或财务数据库访问能力。\n\n因此，在现有授权能力范围内，**无法获取并验证星河科技本月（2026年10月）奖金金额的内部事实**。\n\n未找到星河科技2026年10月奖金金额的授权内部出处。知识库检索无结果，且无其他获准渠道可验证该敏感薪酬数据。",
+      "sources": [],
+      "durationMs": 8433.119625,
+      "firstTextMs": 8432.448292000001,
+      "firstFinalOutputMs": 8432.448292000001,
+      "modelCalls": 2,
+      "runtimeModelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "retrieve_authorized_knowledge"
+      ],
+      "ragCalls": 1,
+      "ragDurationMs": 1.803250000000844,
+      "inputTokens": 3828,
+      "outputTokens": 285,
+      "totalTokens": 4113,
+      "cacheReadTokens": 960,
+      "error": null
+    },
+    {
+      "id": "clarification-resume",
+      "variant": "v2",
+      "status": "completed",
+      "text": "上海今日天气：20°C，多云。观测时间为 2026-10-19T09:00:00+08:00 [S:5b8a65135de8e6d1b3e60d45]。",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "taskUsage": {
+        "modelTurns": 3,
+        "toolCalls": 1,
+        "attempts": 4,
+        "tokens": 5841,
+        "inputTokens": 5718,
+        "outputTokens": 123,
+        "costUsd": 0,
+        "activeMs": 5408.341165999998
+      },
+      "sources": [
+        {
+          "id": "5b8a65135de8e6d1b3e60d45",
+          "title": "合成天气测试数据",
+          "channel": "web",
+          "observedAt": "2026-10-19T09:00:00+08:00",
+          "url": "https://example.com/fixture-weather"
+        }
+      ],
+      "fixtureChecksPass": true
+    }
+  ]
+}

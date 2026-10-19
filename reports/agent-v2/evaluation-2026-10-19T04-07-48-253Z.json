@@ -1,0 +1,42 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "temperature": 0,
+  "promptSha256": "a1495a51684cfba1114065a0e143e420a87cafac0b300faab57bf637d4348d3e",
+  "repeats": 1,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "internal-miss",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "知识库中未检索到星河科技2026年10月奖金金额或相关计算规则的授权记录。该信息属于敏感薪酬数据，需经HR系统实时授权接口或当月财务发放清单确认；当前可用工具中无获准访问HRIS或薪资系统的途径。无法提供有出处的内部事实。",
+      "sources": [],
+      "durationMs": 5218.783042,
+      "firstTextMs": 5208.264792,
+      "firstFinalOutputMs": 5208.264792,
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "retrieve_authorized_knowledge"
+      ],
+      "ragCalls": 1,
+      "ragDurationMs": 7.511375000000044,
+      "inputTokens": 3818,
+      "outputTokens": 148,
+      "error": null
+    }
+  ]
+}

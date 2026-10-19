@@ -6,6 +6,9 @@
   },
   "packageManager": "pnpm@10.23.0",
   "scripts": {
+    "agent:v2": "node --env-file-if-exists=.env --import tsx packages/model-runtime/src/v2/cli.ts",
+    "test:agent:v2": "vitest run packages/model-runtime/tests/v2-runtime.test.ts packages/model-runtime/tests/v2-evaluation.test.ts packages/model-runtime/tests/v2-provider.test.ts apps/conversation-worker/tests/processor-v2.test.ts packages/web-data/tests/agent-v2-session.test.ts packages/web-data/tests/agent-v2-broker-contract.test.ts packages/web-data/tests/conversation-generation-recent-turns.test.ts",
+    "eval:agent:v2": "node --env-file-if-exists=.env --import tsx packages/model-runtime/src/v2/evaluate.ts",
     "build": "turbo run build",
     "verify": "pnpm db:generate && pnpm db:validate && pnpm typecheck:seed && pnpm typecheck && pnpm test && pnpm test:wechat-callback-proxy && pnpm test:wechat-public-key-probe-cli",
     "typecheck:seed": "tsc --noEmit -p prisma/tsconfig.json",

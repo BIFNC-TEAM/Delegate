@@ -5,6 +5,7 @@ import { ensureComputeSessionLease } from "./leases";
 import { loadSessionPolicyContext } from "./policy";
 import { writeSandboxLeaseInput } from "./sandbox-leases";
 import { SessionError } from "./session-error";
+import { evaluateCodeExecutionPreflight } from "./code-preflight";
 
 const inputFileSchema = z.object({
   fileName: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,179}$/u),
@@ -28,6 +29,12 @@ export async function uploadComputeSessionInput(sessionId: string, rawInput: unk
     throw new SessionError(409, "sandbox_input_checksum_mismatch");
   }
   const context = await loadSessionPolicyContext(sessionId);
+  // Code attachments must not be sent to a provider before its execution
+  // boundary is admitted. Browser requests keep their separate contract.
+  if (context.session.runtimeClass !== "BROWSER") {
+    const preflight = evaluateCodeExecutionPreflight(context.profile);
+    if (!preflight.available) throw new SessionError(409, preflight.reason);
+  }
   const leased = await ensureComputeSessionLease({
     session: context.session,
     networkMode: context.profile.networkMode,

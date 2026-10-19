@@ -3,6 +3,8 @@ import type {
   ComputeNetworkMode,
   ComputeRunnerType,
 } from "@delegate/compute-protocol";
+import type { IsolatedPythonRequest } from "@delegate/compute-protocol";
+import type { IsolatedPythonReceipt } from "./isolated-python/transport";
 import type {
   CreateSandboxFromImageParams,
   Daytona as DaytonaSdkType,
@@ -96,6 +98,13 @@ export type SandboxProvider = {
   readonly kind: SandboxProviderKind;
   start(input: SandboxProviderStartInput): Promise<SandboxProviderLease>;
   execute(input: SandboxProviderExecutionInput): Promise<DockerExecutionResult>;
+  executeIsolatedPython?(input: {
+    lease: SandboxProviderLease;
+    request: IsolatedPythonRequest;
+    inputs: Array<{ fileName: string; content: Buffer }>;
+    signal: AbortSignal;
+    beforeDispatch: (controlDirectory: string) => Promise<void>;
+  }): Promise<IsolatedPythonReceipt>;
   writeInput?(input: SandboxProviderInputWriteInput): Promise<{ bytes: number; durationMs: number }>;
   stop(input: SandboxProviderStopInput): Promise<void>;
   delete(input: SandboxProviderDeleteInput): Promise<void>;

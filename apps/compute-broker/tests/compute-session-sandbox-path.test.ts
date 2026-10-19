@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   mockPrisma,
@@ -52,6 +52,7 @@ vi.mock("../src/sandbox-leases", () => ({
 }));
 
 describe("compute session sandbox path", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
@@ -82,6 +83,36 @@ describe("compute session sandbox path", () => {
     }));
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
     mockStopSandboxLease.mockResolvedValue({ status: "stopped", leaseId: "sandbox-lease-1" });
+  });
+
+  it.each([
+    { baseImage: "debian:bookworm-slim", networkMode: "FULL", allowed: false },
+    { baseImage: "tencent://ap-guangzhou.tencentags.com/old-aio?image=debian%3Abookworm-slim", networkMode: "FULL", allowed: false },
+    { baseImage: "tencent://ap-guangzhou.tencentags.com/delegate-aio-pi-v1?image=debian%3Abookworm-slim", networkMode: "NO_NETWORK", allowed: false },
+    { baseImage: "tencent://ap-guangzhou.tencentags.com/delegate-aio-pi-v1?image=debian%3Abookworm-slim", networkMode: "FULL", allowed: true },
+  ])("checks the template and network before reusing a READY Tencent session: $allowed/$networkMode/$baseImage", async (lease) => {
+    vi.stubEnv("TENCENT_AGS_ALL_IN_ONE_TOOL", "delegate-aio-pi-v1");
+    vi.stubEnv("TENCENT_AGS_REGION", "ap-guangzhou");
+    vi.stubEnv("TENCENT_AGS_DOMAIN", "");
+    mockPrisma.sandboxLease.findUnique.mockResolvedValue({ provider: "TENCENT", ...lease });
+    const { ensureComputeSessionLease } = await import("../src/leases");
+    const session = {
+      ...buildSession({ contactId: "contact-1" }), leaseStatus: "READY" as const,
+      sandboxLeaseId: "lease", runnerLeaseId: "sandbox", containerId: "sandbox",
+    };
+    const result = ensureComputeSessionLease({ session, networkMode: "full", filesystemMode: "ephemeral_full" });
+    if (lease.allowed) await expect(result).resolves.toBe(session);
+    else await expect(result).rejects.toMatchObject({ statusCode: 409, message: "sandbox_template_changed_new_session_required" });
+    expect(mockEnsureUserSandboxLease).not.toHaveBeenCalled();
+  });
+
+  it("keeps local Docker compatibility independent of Tencent All-in-One settings", async () => {
+    vi.stubEnv("TENCENT_AGS_ALL_IN_ONE_TOOL", "delegate-aio-pi-v1");
+    const { ensureComputeSessionLease } = await import("../src/leases");
+    const session = { ...buildSession({ contactId: null }), leaseStatus: "READY" as const,
+      runnerLeaseId: "local-docker", containerId: "local-docker" };
+    await expect(ensureComputeSessionLease({ session, networkMode: "no_network", filesystemMode: "ephemeral_full" }))
+      .resolves.toBe(session);
   });
 
   it("uses a per-user sandbox lease when the compute session has a contact", async () => {

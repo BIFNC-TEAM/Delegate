@@ -39,7 +39,7 @@ describe("getNativeComputerProviderReadiness", () => {
     ]);
   });
 
-  it("requires Daytona before reporting OpenCode as ready", async () => {
+  it("requires both Daytona and a verified code profile before reporting OpenCode as ready", async () => {
     process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
     const { getNativeComputerProviderReadiness } = await import("../src/native-browser");
 
@@ -69,10 +69,10 @@ describe("getNativeComputerProviderReadiness", () => {
     expect(daytonaReadiness).toEqual({
       provider: "opencode",
       enabled: true,
-      status: "ready",
+      status: "disabled",
       model: "qwen/opencode",
       transportKind: "opencode_computer_use",
-      reason: null,
+      reason: "code_execution_profile_unverified",
     });
   });
 });

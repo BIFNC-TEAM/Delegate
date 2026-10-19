@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { auditErrorCode, auditReference, minimizeAuditMetadata } from "@delegate/runtime";
 
 import type {
   PiModule,
@@ -107,7 +108,7 @@ export class PiTelemetry {
     if (!active) return null;
     this.open.delete(spanId);
     const { startAbsoluteMs, ...base } = active;
-    const span: PiSpan = {
+    const span: PiSpan = sanitizePiSpan({
       ...base,
       durationMs: Math.max(0, this.clock.now() - startAbsoluteMs),
       status: input.status,
@@ -117,7 +118,7 @@ export class PiTelemetry {
       ...(input.cacheHit !== undefined ? { cacheHit: input.cacheHit } : {}),
       ...(input.resultRef ? { resultRef: input.resultRef } : {}),
       ...(input.error ? { error: input.error } : {}),
-    };
+    });
     this.spans.push(span);
     return span;
   }
@@ -133,8 +134,13 @@ export class PiTelemetry {
       runId: this.runId,
       atOffsetMs: this.offset(),
     };
-    this.events.push(event);
-    await this.onEvent?.(event);
+    const safe = sanitizePiRuntimeEvent(event);
+    this.events.push(safe);
+    // Response text is a transient delivery payload, not telemetry. The worker
+    // still decides whether the current protocol may publish that draft.
+    await this.onEvent?.(event.type === "response.delta" && event.delta !== undefined
+      ? { ...safe, delta: event.delta }
+      : safe);
   }
 
   closeOpen(status: PiSpanStatus, error?: string) {
@@ -142,6 +148,30 @@ export class PiTelemetry {
       this.end(spanId, { status, ...(error ? { error } : {}) });
     }
   }
+}
+
+export function sanitizePiRuntimeEvent(event: PiRuntimeEvent): PiRuntimeEvent {
+  return {
+    type: event.type, traceId: event.traceId, runId: event.runId, atOffsetMs: event.atOffsetMs,
+    ...(event.spanId ? { spanId: event.spanId } : {}),
+    ...(event.parentSpanId ? { parentSpanId: event.parentSpanId } : {}),
+    ...(event.module ? { module: event.module } : {}),
+    ...(event.toolName ? { toolName: event.toolName } : {}),
+    ...(event.status ? { status: String(minimizeAuditMetadata({ status: event.status }).status ?? "unknown") } : {}),
+    data: {
+      ...minimizeAuditMetadata(event.data),
+      ...(event.delta !== undefined ? { deltaCharacters: event.delta.length } : {}),
+    },
+  };
+}
+
+export function sanitizePiSpan(span: PiSpan): PiSpan {
+  const { error, resultRef, ...safe } = span;
+  return {
+    ...safe,
+    ...(error ? { error: auditErrorCode(error) } : {}),
+    ...(resultRef ? { resultRef: auditReference(resultRef) } : {}),
+  };
 }
 
 export function calculateSelfDurations(spans: readonly PiSpan[]): PiSpan[] {

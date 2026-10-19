@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentBehaviorSchema } from "./agent-behavior";
 
 export const channelSchema = z.enum([
   "private_chat",
@@ -112,6 +113,7 @@ export const representativeSchema = z.object({
   avatarUrl: z.string().url().optional(),
   tagline: z.string(),
   tone: z.string(),
+  agentBehavior: agentBehaviorSchema.optional(),
   languages: z.array(z.string()),
   groupActivation: groupActivationSchema,
   skills: z.array(representativeSkillSchema),

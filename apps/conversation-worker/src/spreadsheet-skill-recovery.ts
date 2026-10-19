@@ -176,7 +176,7 @@ export function compileBuiltinSpreadsheetRecovery(input: {
 }
 
 export function resolveRequestedOutputFileName(value: string, inputFileNames: string[] = []) {
-  const matches = value.match(/[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(?:csv|json|txt|md)\b/giu) ?? [];
+  const matches = value.match(/[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(?:csv|json|txt|md|xlsx?|pdf|png|jpe?g|docx?|pptx?|zip|parquet)\b/giu) ?? [];
   const inputs = new Set(inputFileNames.map((name) => name.toLocaleLowerCase()));
   const unique = [...new Set(matches.map((match) => match.split(/[\\/]/u).pop()!).filter((name) =>
     Boolean(name) && !inputs.has(name.toLocaleLowerCase())))];

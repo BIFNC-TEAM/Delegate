@@ -1,0 +1,12 @@
+{
+  "runId": "cmvf01jf8021cru0n5pxoc4op",
+  "executionId": "pa_be6e7b844a6bc3dc185713248788c4ce117f660b381fd697",
+  "status": "FAILED",
+  "transport": "response_received",
+  "semantic": "failed",
+  "failureReason": "output_csv_invalid",
+  "artifactKinds": [
+    "STDOUT"
+  ],
+  "cause": "stdout begins with one-column average: 23.0 followed by two-column CSV; entire stdout is the file payload."
+}

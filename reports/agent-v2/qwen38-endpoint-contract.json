@@ -1,0 +1,86 @@
+{
+  "observedAt": "2026-10-19T07:14:04.475Z",
+  "model": "qwen3.8-27b",
+  "schemaPath": "/openapi.json",
+  "httpStatus": 200,
+  "fields": {
+    "reasoning_effort": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reasoning Effort",
+      "description": "Constrains effort on reasoning for reasoning models. Currently supported values are none, minimal, low, medium, high, xhigh, and max. Reducing reasoning effort can result in faster responses and fewer tokens used on reasoning in a response. Note that 'max' is specific to the DeepSeek V4 series and is not part of the standard OpenAI API specification."
+    },
+    "thinking_token_budget": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Thinking Token Budget"
+    },
+    "chat_template_kwargs": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Chat Template Kwargs",
+      "description": "Additional keyword args to pass to the template renderer. Will be accessible by the chat template."
+    },
+    "include_reasoning": {
+      "type": "boolean",
+      "title": "Include Reasoning",
+      "default": true
+    }
+  },
+  "connectionProbe": {
+    "modelsHttpStatus": 200,
+    "requestedModelListed": true,
+    "advertisedMaxModelLength": 262144
+  },
+  "liveToggleProbe": {
+    "note": "Observations recorded during this turn; reasoning text was neither printed nor saved.",
+    "prompt": "9.11和9.9哪个大？仅给结论。",
+    "maxTokens": 2048,
+    "requestedThinkingTokens": 512,
+    "enabled": {
+      "httpStatus": 200,
+      "finishReason": "stop",
+      "answer": "9.9大",
+      "reasoningCharacters": 300,
+      "inputTokens": 67,
+      "outputTokens": 124
+    },
+    "disabled": {
+      "httpStatus": 200,
+      "finishReason": "stop",
+      "answer": "9.11",
+      "reasoningCharacters": 0,
+      "inputTokens": 27,
+      "outputTokens": 5
+    }
+  },
+  "limits": "Advertised model ID/capacity, not independent proof of checkpoint identity. Reasoning budget is sent to the endpoint; only total usage and output cap are measurable here."
+}

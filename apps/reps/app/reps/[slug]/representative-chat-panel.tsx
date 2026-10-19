@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import type { PublicWebAnswerSourceDisclosure } from "@delegate/web-data";
+import { PublicAnswerSources, PublicRunProgress, PublicExecution, type PublicSourceCitation } from "./public-agent-feedback";
+import type { PublicAgentProgress, PublicAnswerSource, PublicWebAnswerSourceDisclosure } from "@delegate/web-data";
 
 import {
   removeRejectedPublicChatOptimisticMessage,
@@ -34,7 +35,7 @@ import {
   type PublicMemoryDisplayAck,
 } from "./memory-display-client";
 
-type Citation = { title: string; excerpt?: string; uri?: string };
+type Citation = PublicSourceCitation & { uri?: string };
 type ChatAttachment = { id: string; fileName: string; mimeType?: string; sizeBytes?: number; url?: string };
 type ChatMessage = {
   id: string;
@@ -43,6 +44,8 @@ type ChatMessage = {
   createdAt?: string;
   status?: string;
   citations?: Citation[];
+  sources?: PublicAnswerSource[];
+  execution?: import("@delegate/web-data").PublicExecutionCall[];
   attachments?: ChatAttachment[];
   senderType?: string;
   senderDisplayName?: string;
@@ -69,8 +72,8 @@ type PublicChatAccepted = {
   runId?: string;
   heldForOperator?: boolean;
   reply?: PublicChatResponse["reply"];
-  tier: PublicChatResponse["tier"];
-  usage: PublicChatUsage;
+  tier?: PublicChatResponse["tier"];
+  usage?: PublicChatUsage;
   error?: string;
   code?: string;
   governedMemoryDisclosure?: GovernedMemoryDisclosure;
@@ -128,6 +131,7 @@ export function RepresentativeChatPanel(props: {
   const chatLogRef = useRef<HTMLDivElement>(null);
   const keepChatPinnedRef = useRef(true);
   const activeRunSourceRef = useRef<EventSource | null>(null);
+  const activeTaskRef = useRef<string | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
   const activeClientMessageIdRef = useRef<string | null>(null);
   const acknowledgedDisplayKeysRef = useRef(new Set<string>());
@@ -145,7 +149,10 @@ export function RepresentativeChatPanel(props: {
   const [input, setInput] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [progress, setProgress] = useState<PublicAgentProgress | undefined>();
+  const [progressNow, setProgressNow] = useState(Date.now());
   const [streamingReply, setStreamingReply] = useState("");
+  const [streamingPhase, setStreamingPhase] = useState<"generating" | "verifying" | "revising" | "withheld" | null>(null);
   const [usage, setUsage] = useState<PublicChatUsage>({
     freeRepliesUsed: 0,
     freeRepliesRemaining: props.freeReplyLimit,
@@ -160,6 +167,14 @@ export function RepresentativeChatPanel(props: {
   const [humanActive, setHumanActive] = useState(false);
   const [conversationState, setConversationState] = useState("new");
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!busy) { setProgress(undefined); return; }
+    setProgressNow(Date.now());
+    const timer = window.setInterval(() => setProgressNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [taskControlBusy, setTaskControlBusy] = useState(false);
   const [hydrating, setHydrating] = useState(true);
   const [handoffControlBusy, setHandoffControlBusy] = useState(false);
   const [handoffConfirmation, setHandoffConfirmation] = useState<
@@ -319,6 +334,8 @@ export function RepresentativeChatPanel(props: {
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
+            ...(message.sources?.length ? { sources: message.sources } : {}),
+            ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
@@ -373,6 +390,8 @@ export function RepresentativeChatPanel(props: {
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
+            ...(message.sources?.length ? { sources: message.sources } : {}),
+            ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
@@ -509,7 +528,7 @@ export function RepresentativeChatPanel(props: {
       if (chatLog) chatLog.scrollTop = chatLog.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [messages]);
+  }, [messages, streamingReply, streamingPhase]);
 
   useEffect(() => {
     const pending = collectPendingMemoryDisplayAcks(
@@ -730,7 +749,7 @@ export function RepresentativeChatPanel(props: {
       }
       setPendingAttachments([]);
       if (attachmentInputRef.current) attachmentInputRef.current.value = "";
-      setUsage(payload.usage);
+      if (payload.usage) setUsage(payload.usage);
       if (payload.reply) {
         appendAssistant({
           id: `assistant-${Date.now()}`,
@@ -858,18 +877,41 @@ export function RepresentativeChatPanel(props: {
     }
   }
 
+  async function stopActiveTask() {
+    const runId = activeTaskRef.current;
+    if (!runId || taskControlBusy) return;
+    setTaskControlBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/reps/${props.representativeSlug}/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: `/cancel ${runId}` }),
+      });
+      const result = await response.json() as { error?: string; reply?: { text: string }; taskControl?: { outcome: string } };
+      if (!response.ok) throw new Error(result.error || t.taskControlFailed);
+      if (result.reply) appendAssistant({ id: `control-${Date.now()}`, role: "assistant", senderType: "system", text: result.reply.text, createdAt: new Date().toISOString(), status: "completed" });
+      if (activeTaskRef.current === runId && ["cancel_requested", "unchanged"].includes(result.taskControl?.outcome ?? "")) settleActiveRun();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t.taskControlFailed);
+    } finally { setTaskControlBusy(false); }
+  }
+
   function subscribeToRun(runId: string) {
+    setProgress(undefined);
+    activeTaskRef.current = runId;
+    setActiveTaskId(runId);
     activeRunSourceRef.current?.close();
     if (activeRunTimeoutRef.current !== null) {
       window.clearTimeout(activeRunTimeoutRef.current);
     }
 
-    const source = new EventSource(`/reps/${props.representativeSlug}/chat/runs/${encodeURIComponent(runId)}/events`);
+    const source = new EventSource(`/reps/${props.representativeSlug}/chat/runs/${encodeURIComponent(runId)}/events?preview=1`);
     activeRunSourceRef.current = source;
     let settled = false;
     const finish = () => {
       settled = true;
       setStreamingReply("");
+      setStreamingPhase(null);
       source.close();
       if (activeRunTimeoutRef.current !== null) {
         window.clearTimeout(activeRunTimeoutRef.current);
@@ -887,25 +929,42 @@ export function RepresentativeChatPanel(props: {
     }, RUN_SUBSCRIPTION_DEADLINE_MS);
 
     source.addEventListener("run", (event) => {
+      if (settled || activeRunSourceRef.current !== source) return;
       try {
         const snapshot = JSON.parse((event as MessageEvent<string>).data) as {
           status: string;
+          statusOnly?: boolean;
           errorMessage?: string;
-          stream?: { sequence: number; text: string; updatedAt: string };
+          progress?: PublicAgentProgress;
+          stream?: { sequence: number; text: string; updatedAt: string; phase?: "generating" | "verifying" | "revising" | "withheld" };
           message?: {
             id: string;
             text: string;
             status: string;
             createdAt?: string;
             citations: Citation[];
+            sources?: PublicAnswerSource[];
+            execution?: import("@delegate/web-data").PublicExecutionCall[];
             attachments?: ChatAttachment[];
             displayAck?: PublicMemoryDisplayAck;
             sourceDisclosure?: PublicWebAnswerSourceDisclosure;
           };
         };
+        setProgress(snapshot.statusOnly ? undefined : snapshot.progress);
+        if (snapshot.statusOnly) {
+          setStreamingReply("");
+          setStreamingPhase(null);
+          if (["completed", "waiting_approval", "waiting_human", "failed", "canceled"].includes(snapshot.status)) {
+            appendAssistant({ id: `status-${runId}-${snapshot.status}`, role: "assistant", senderType: "system", text: t.taskStatusOnly(snapshot.status), createdAt: new Date().toISOString(), status: "completed" });
+            if (snapshot.status !== "waiting_approval") { activeTaskRef.current = null; setActiveTaskId(null); }
+            finish();
+          }
+          return;
+        }
         if (typeof snapshot.stream?.text === "string") {
           setStreamingReply(snapshot.stream.text);
-        }
+          setStreamingPhase(snapshot.stream.phase ?? null);
+        } else { setStreamingReply(""); setStreamingPhase(null); }
         if (["completed", "waiting_approval"].includes(snapshot.status) && snapshot.message) {
           appendAssistant({
             id: snapshot.message.id,
@@ -915,6 +974,8 @@ export function RepresentativeChatPanel(props: {
             createdAt: snapshot.message.createdAt || new Date().toISOString(),
             status: snapshot.message.status,
             citations: snapshot.message.citations,
+            ...(snapshot.message.sources ? { sources: snapshot.message.sources } : {}),
+            ...(snapshot.message.execution ? { execution: snapshot.message.execution } : {}),
             ...(snapshot.message.attachments?.length ? { attachments: snapshot.message.attachments } : {}),
             ...(snapshot.message.displayAck ? { displayAck: snapshot.message.displayAck } : {}),
             ...(snapshot.message.sourceDisclosure
@@ -922,8 +983,11 @@ export function RepresentativeChatPanel(props: {
               : {}),
           });
           setConversationState("active");
+          if (snapshot.status === "completed") { activeTaskRef.current = null; setActiveTaskId(null); }
           finish();
         } else if (["failed", "canceled"].includes(snapshot.status)) {
+          activeTaskRef.current = null;
+          setActiveTaskId(null);
           setError(snapshot.errorMessage || t.errorGeneric);
           finish();
         }
@@ -940,6 +1004,8 @@ export function RepresentativeChatPanel(props: {
   }
 
   function settleActiveRun() {
+    activeTaskRef.current = null;
+    setActiveTaskId(null);
     activeRunSourceRef.current?.close();
     activeRunSourceRef.current = null;
     if (activeRunTimeoutRef.current !== null) {
@@ -1143,8 +1209,11 @@ export function RepresentativeChatPanel(props: {
                   <div className="representative-message-content">
                     <div className="representative-message-bubble">
                       <PublicChatText text={message.text} />
+                  {message.role === "assistant" && !isOperator ? <><PublicAnswerSources sources={message.sources} citations={message.citations} locale={props.locale} /><PublicExecution calls={message.execution} locale={props.locale} /></> : null}
                   {message.role === "assistant"
+                    && !message.sources?.length && !message.citations?.length
                     && message.sourceDisclosure
+                    && message.sourceDisclosure !== "general_model"
                     && !hasInlineAnswerSourceDisclosure(message.text)
                     && !isOperator ? (
                     <small className="representative-answer-source-disclosure">
@@ -1210,8 +1279,12 @@ export function RepresentativeChatPanel(props: {
                 <div className="representative-message-content">
                   <div className="representative-message-bubble" aria-live="polite">
                     <PublicChatText
-                      text={streamingReply || t.thinking(governedContextEnabled)}
+                      text={streamingReply || ""}
                     />
+                    <PublicRunProgress progress={progress} now={progressNow} locale={props.locale} />
+                    {streamingPhase && streamingPhase !== "withheld" ? (
+                      <p className="field-hint" role="status">{streamingPhase === "verifying" ? t.verifyingPreview : streamingPhase === "revising" ? t.revisingPreview : t.generatingPreview}</p>
+                    ) : null}
                   </div>
                 </div>
               </article>
@@ -1425,6 +1498,11 @@ export function RepresentativeChatPanel(props: {
                   <span>{hydrating ? t.loadingHistory : busy ? t.sending : t.send}</span>
                   <span aria-hidden="true">&#8593;</span>
                 </button>
+                {activeTaskId ? (
+                  <button className="button-secondary" disabled={taskControlBusy || hydrating} onClick={() => void stopActiveTask()} type="button">
+                    {taskControlBusy ? t.stoppingTask : t.stopTask}
+                  </button>
+                ) : null}
               </div>
             </footer>
           </form>
@@ -1798,6 +1876,8 @@ function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) 
 }
 
 const zhCopy = {
+  stopTask: "停止任务", stoppingTask: "正在请求停止…", taskControlFailed: "暂时无法确认停止请求，请查看任务状态后重试。",
+  taskStatusOnly: (status: string) => `任务状态：${({ completed: "处理已结束", waiting_approval: "等待审批", waiting_human: "等待人工", failed: "未完成", canceled: "已记录停止请求" } as Record<string, string>)[status] ?? "暂未确认"}。当前仅提供任务状态，不展示旧答复正文。`,
   digitalRepresentativeLabel: "对外代理",
   aiStatus: "AI 正在接待", humanStatus: "真人正在接待",
   youLabel: "你", systemLabel: "系统", taskUpdateLabel: "任务进展",
@@ -1843,6 +1923,9 @@ const zhCopy = {
   servicePendingDetail: "无需重复购买。额度确认后即可继续发送，输入内容会一直保留。",
   lastFreeReplyDetail: "还剩 1 次免费回复。你可以继续提问，也可以提前了解后续服务方案。",
   previewServices: "查看服务方案",
+  generatingPreview: "草稿预览 · 尚未核验",
+  verifyingPreview: "正在核验结果中 · 以下内容尚未确认为正式答案",
+  revisingPreview: "上一版草稿未通过核验，正在修订…",
   sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", serviceCreditPending: "服务额度正在处理中，请稍后重试；你的问题已保留在输入框中。", serviceCreditRequired: "免费回复已用完。请购买当前对外代理的服务额度后再发送；你的问题已保留在输入框中。", serviceCreditUnavailableWithHandoff: "免费回复已用完，当前对外代理暂无可购买的服务方案；可申请真人协助。你的问题已保留在输入框中。", serviceCreditUnavailable: "免费回复已用完，当前对外代理暂无可购买的服务方案。你的问题已保留在输入框中。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "服务和订单",
@@ -1878,6 +1961,8 @@ const zhCopy = {
 };
 
 const enCopy = {
+  stopTask: "Stop task", stoppingTask: "Requesting stop…", taskControlFailed: "The stop request could not be confirmed. Check the task status before retrying.",
+  taskStatusOnly: (status: string) => `Task status: ${status}. Only task state is available; previous answer content is withheld.`,
   digitalRepresentativeLabel: "Digital representative",
   aiStatus: "AI is responding", humanStatus: "Human is responding",
   youLabel: "You", systemLabel: "System", taskUpdateLabel: "Task update",
@@ -1923,6 +2008,9 @@ const enCopy = {
   servicePendingDetail: "Do not buy again. You can send as soon as the credits arrive, and your draft will stay here.",
   lastFreeReplyDetail: "You have 1 free reply left. Keep asking, or review the service options available afterward.",
   previewServices: "View service options",
+  generatingPreview: "Draft preview · Not yet verified",
+  verifyingPreview: "Verifying the result · This is not the final answer yet",
+  revisingPreview: "The previous draft needs revision. Updating…",
   sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", memoryPolicyChanged: "The memory policy just changed. Review the updated memory notice and send again; your previous message was not submitted.", serviceCreditPending: "Service credits are still being processed. Try again shortly; your message remains in the composer.", serviceCreditRequired: "Your free replies are used up. Buy service credits for this representative, then send again. Your message remains in the composer.", serviceCreditUnavailableWithHandoff: "Your free replies are used up, and this representative has no purchasable service plan right now. Request human help instead. Your message remains in the composer.", serviceCreditUnavailable: "Your free replies are used up, and this representative has no purchasable service plan right now. Your message remains in the composer.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "Services and orders",

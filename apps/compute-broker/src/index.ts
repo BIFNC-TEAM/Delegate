@@ -8,6 +8,7 @@ import {
   nativeComputerUsePreflightResponseSchema,
   resolveApprovalRequestSchema,
   terminateComputeSessionRequestSchema,
+  mcpOutcomeQuerySchema,
 } from "@delegate/compute-protocol";
 import { computeBrokerConfig } from "./config";
 import { startApprovedExecutionLoop } from "./approved-execution-loop";
@@ -32,6 +33,8 @@ import { getSandboxMetricSnapshot } from "./sandbox-metrics";
 import { startSandboxProviderOperationQuarantineLoop } from "./sandbox-provider-operations";
 import { getSandboxReadinessSnapshot } from "./sandbox-readiness";
 import { uploadComputeSessionInput } from "./session-inputs";
+import { getCodeExecutionPreflight } from "./policy";
+import { queryStoredMcpOutcome } from "./mcp-provider-operation";
 
 const server = createServer(async (request, response) => {
   try {
@@ -64,6 +67,10 @@ const server = createServer(async (request, response) => {
       });
     }
 
+    if (method === "GET" && url.pathname === "/internal/compute/features") {
+      return sendJson(response, 200, { rejectApprovalWait: 1 });
+    }
+
     if (
       method === "GET" &&
       url.pathname === "/internal/compute/sandbox/metrics"
@@ -78,6 +85,16 @@ const server = createServer(async (request, response) => {
     }
 
     const segments = url.pathname.split("/").filter(Boolean);
+    if (method === "POST" && segments.length === 7 && segments[0] === "internal" && segments[1] === "compute" && segments[2] === "sessions"
+      && segments[3] && segments[4] === "executions" && segments[5] && segments[6] === "provider-outcome") {
+      const input = mcpOutcomeQuerySchema.parse(await readJson(request));
+      return sendJson(response, 200, await queryStoredMcpOutcome({ sessionId: segments[3], executionId: segments[5], ...input }));
+    }
+
+    if (method === "GET" && segments.length === 5 && segments[0] === "internal" && segments[1] === "compute"
+      && segments[2] === "sessions" && segments[3] && segments[4] === "code-preflight") {
+      return sendJson(response, 200, await getCodeExecutionPreflight(segments[3]));
+    }
 
     if (
       method === "GET" &&
@@ -93,6 +110,7 @@ const server = createServer(async (request, response) => {
 
     if (
       method === "POST" &&
+      segments.length === 5 &&
       segments[0] === "internal" &&
       segments[1] === "compute" &&
       segments[2] === "sessions" &&
@@ -219,6 +237,15 @@ const stopSandboxProviderOperationQuarantineLoop = startSandboxProviderOperation
   intervalMs: computeBrokerConfig.sandboxLifecycle.cleanupIntervalMs,
 });
 
+const pythonRecovery = await import("./isolated-python/broker-execution");
+let pythonRecoveryRunning = false;
+const pythonRecoveryTimer = setInterval(() => {
+  if (pythonRecoveryRunning) return;
+  pythonRecoveryRunning = true;
+  void pythonRecovery.reconcilePythonExecutions().catch(() => console.error("isolated_python_recovery_failed"))
+    .finally(() => { pythonRecoveryRunning = false; });
+}, 30000);
+pythonRecoveryTimer.unref();
 const stopApprovedExecutionLoop = startApprovedExecutionLoop();
 const stopMcpCatalogRefreshLoop = startMcpCatalogRefreshLoop({
   intervalMs: computeBrokerConfig.mcpCatalogRefreshIntervalMs,
@@ -229,6 +256,7 @@ export function stopComputeBrokerBackgroundLoops() {
   if (backgroundLoopsStopped) return;
   backgroundLoopsStopped = true;
   clearInterval(sandboxCleanupTimer);
+  clearInterval(pythonRecoveryTimer);
   stopSandboxProviderOperationQuarantineLoop();
   stopApprovedExecutionLoop();
   stopMcpCatalogRefreshLoop();

@@ -1,0 +1,110 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "temperature": 0,
+  "promptSha256": "bd997a2100d3bc0607f2a04e41dfb30d5d4a47d2122e0e5ef32b3bb81e14dfa2",
+  "repeats": 1,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "internal",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "completed",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "星河科技正式员工每年享有 **12 天年假**。\n\n适用条件：  \n- 仅适用于**正式员工**；  \n- **试用期员工不适用**该年假政策；  \n- 本规定自 **2026年1月1日起生效**，依据制度版本 2026.1 [S:5d9a577f70d091643969b257]。",
+      "sources": [
+        {
+          "id": "5d9a577f70d091643969b257",
+          "title": "合成测试：星河科技员工制度",
+          "channel": "knowledge",
+          "version": "2026.1",
+          "dataTime": "2026-01-01"
+        }
+      ],
+      "durationMs": 5961.8009999999995,
+      "firstTextMs": 5951.5025829999995,
+      "firstFinalOutputMs": 5951.5025829999995,
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "retrieve_authorized_knowledge"
+      ],
+      "ragCalls": 1,
+      "ragDurationMs": 6.285333999999693,
+      "inputTokens": 3780,
+      "outputTokens": 165,
+      "error": null
+    },
+    {
+      "id": "realtime",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": false,
+        "sourcePresent": false,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": false,
+      "text": "当前工具返回的是合成测试数据，非真实实时天气信息。根据系统约束，无法访问真实气象API或权威实时天气服务。如需真实天气，请通过官方气象平台（如中国气象局官网、墨迹天气App等）查询。",
+      "sources": [],
+      "durationMs": 5114.362333000001,
+      "firstTextMs": 5113.121917,
+      "firstFinalOutputMs": 5113.121917,
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "search_current_web"
+      ],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 3781,
+      "outputTokens": 123,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": false,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": false,
+      "text": "天气查询需要明确地理位置，当前未提供城市或坐标。请告知您所在的城市或地区，我将为您查询实时天气信息。",
+      "sources": [],
+      "durationMs": 1517.7415,
+      "firstTextMs": 1516.122874999999,
+      "firstFinalOutputMs": 1516.122874999999,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1766,
+      "outputTokens": 32,
+      "error": null
+    }
+  ]
+}

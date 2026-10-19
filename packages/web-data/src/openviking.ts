@@ -66,6 +66,14 @@ const OPENVIKING_SYNC_JOB_INITIAL_BACKOFF_MS = 5_000;
 const OPENVIKING_SYNC_JOB_MAX_BACKOFF_MS = 5 * 60 * 1_000;
 const OPENVIKING_SYNC_JOB_MAX_ATTEMPTS = 8;
 
+/** Configuration availability only; per-request authorization and live health are still checked during recall. */
+export function isKnowledgeRetrievalServiceConfigured(environment: NodeJS.ProcessEnv = process.env): boolean {
+  try {
+    const config = resolveOpenVikingEnv(environment);
+    return config.enabled && config.hasModelCredentials;
+  } catch { return false; }
+}
+
 export type RepresentativeOpenVikingSyncTrigger =
   | "manual"
   | "create"
@@ -1141,10 +1149,21 @@ const MAX_PUBLIC_KNOWLEDGE_TOPIC_TERMS = 16;
  * admitted later only when they also occur in an authorized published corpus;
  * visitor-only text stays inside the conversation privacy boundary.
  */
-function classifyRecallQuery(rawQueryText: string): RecallQueryClassification {
+function classifyRecallQuery(rawQueryText: string, modelSelected = false): RecallQueryClassification {
   const queryText = rawQueryText.trim();
   if (!queryText) return { kind: "empty" };
   if (recallQueryContainsRestrictedData(queryText)) return { kind: "blocked" };
+
+  if (modelSelected) {
+    // Keep privacy minimization, but do not route a V2 query through legacy
+    // business keywords or merge adjacent Chinese words into semantic gates.
+    const terms = normalizePublicKnowledgeTopicTerms(
+      [...new Intl.Segmenter("zh-CN", { granularity: "word" }).segment(queryText.normalize("NFKC"))]
+        .filter(part => part.isWordLike).map(part => part.segment.toLocaleLowerCase("en-US")),
+    ).slice(0, MAX_PUBLIC_KNOWLEDGE_TOPIC_TERMS);
+    return safeRecallQuery(SAFE_RECALL_QUERIES.general, SAFE_RECALL_QUERIES.general,
+      terms.length ? `${PUBLIC_KNOWLEDGE_TOPIC_PREFIX}${terms.join(" ")}` : SAFE_RECALL_QUERIES.general);
+  }
 
   const normalized = queryText.toLocaleLowerCase("en-US");
   const topicQuery = buildSanitizedPublicKnowledgeQuery(queryText);
@@ -1318,6 +1337,7 @@ function authorizePublicKnowledgeQueryAgainstPublishedCorpus(params: {
   baseQuery: string;
   topicQuery?: string;
   grants: ReadonlyMap<string, PublicKnowledgeRecallGrant>;
+  modelSelected?: boolean;
 }): {
   query: string | null;
   authorizedTopicTerms: string[];
@@ -1343,6 +1363,13 @@ function authorizePublicKnowledgeQueryAgainstPublishedCorpus(params: {
   const authorizedTerms = queryTerms.filter((term) =>
     authorizedResources.some((resource) => resource.includes(term))
   );
+  if (params.modelSelected) {
+    // Only corpus-authorized terms leave the privacy boundary. Relevance and
+    // sufficiency remain model decisions; source scope/hash/revocation checks
+    // below remain mandatory for every result.
+    return { query: authorizedTerms.length ? `${PUBLIC_KNOWLEDGE_TOPIC_PREFIX}${authorizedTerms.join(" ")}` : null,
+      authorizedTopicTerms: authorizedTerms, topicMatchTerms: [] };
+  }
   const corpusMatchesTopic = publicKnowledgeSourceMatchesAuthorizedTopic(
     authorizedResources.join("\n"),
     queryTerms,
@@ -1564,8 +1591,9 @@ export async function recallRepresentativeContext(params: {
   generationRunId: string;
   queryText: string;
   allowedSourceKinds?: readonly RepresentativeRecallSourceKind[];
+  queryMode?: "model_selected";
 }): Promise<RepresentativeRecallContext> {
-  const recallQuery = classifyRecallQuery(params.queryText);
+  const recallQuery = classifyRecallQuery(params.queryText, params.queryMode === "model_selected");
   if (recallQuery.kind === "empty" || !isRecallSourceChannel(params.sourceChannel)) {
     return { items: [], citations: [] };
   }
@@ -1728,6 +1756,7 @@ export async function recallRepresentativeContext(params: {
           ? { topicQuery: recallQuery.publicKnowledgeTopicQuery }
           : {}),
         grants: publicAuthorization.publicKnowledgeGrantsByUri,
+        modelSelected: params.queryMode === "model_selected",
       })
     : {
         query: SAFE_RECALL_QUERIES.general,
@@ -2151,11 +2180,23 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
     const pinByAssetId = new Map(
       params.snapshot.knowledgeAssets.map((pin) => [pin.assetId, pin]),
     );
+    // Determine current visibility from metadata BEFORE selecting stored text.
+    // A published pin preserves bytes, not permission after archive/unbinding.
+    const liveBindings = pinByAssetId.size ? await prisma.knowledgeAssetRepresentative.findMany({
+      where: { representativeId: params.representative.id, assetId: { in: [...pinByAssetId.keys()] }, enabled: true, reviewStatus: "APPROVED",
+        asset: { ownerId: params.representative.ownerId, archivedAt: null, status: { not: "ARCHIVED" } } },
+      select: { assetId: true },
+    }) : [];
+    const liveAssetIds = liveBindings.map(binding => binding.assetId);
     const [manifestItems, ledgerItems] = await Promise.all([
       prisma.representativeVersionResource.findMany({
         where: {
           representativeId: params.representative.id,
           publishedVersionId: params.publishedVersionId,
+          OR: [
+            { sourceKind: "REPRESENTATIVE_VERSION_RESOURCE" },
+            { sourceKind: "KNOWLEDGE_ASSET", knowledgeAssetId: { in: liveAssetIds } },
+          ],
         },
         select: {
           publishedVersionId: true,
@@ -2227,6 +2268,7 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
         if (
           !assetId
           || !pin
+          || !liveAssetIds.includes(assetId)
           || manifest.resourceKey !== `knowledge/${assetId}.md`
           || manifest.contentHash !== pin.checksum
         ) {

@@ -1,0 +1,86 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "repeats": 2,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请问您想查询哪个城市或地区的天气？",
+      "sources": [],
+      "durationMs": 1390.626209,
+      "firstTextMs": 1380.73725,
+      "firstFinalOutputMs": 1380.73725,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1671,
+      "outputTokens": 14,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 1,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请问您想查询哪个城市或地区的天气？",
+      "sources": [],
+      "durationMs": 1527.3045000000002,
+      "firstTextMs": 1526.781375,
+      "firstFinalOutputMs": 1526.781375,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1671,
+      "outputTokens": 14,
+      "error": null
+    },
+    {
+      "id": "clarification-resume",
+      "variant": "v2",
+      "status": "completed",
+      "text": "上海今日（2026年10月19日）天气为多云，气温约20°C。数据来源于合成测试预报，仅供参考。",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "taskUsage": {
+        "modelTurns": 3,
+        "toolCalls": 1,
+        "attempts": 4,
+        "tokens": 5289,
+        "inputTokens": 5202,
+        "outputTokens": 87,
+        "costUsd": 0,
+        "activeMs": 5410.943499999999
+      },
+      "fixtureChecksPass": true
+    }
+  ]
+}

@@ -45,7 +45,8 @@ export function createPiModelBindingFromEnv(
   ].filter((provider, index, values): provider is ModelProvider =>
     Boolean(provider) && values.indexOf(provider) === index);
   for (const provider of order) {
-    const binding = createProviderBinding(provider, env, piMaxOutputTokens, piModelMaxRetries);
+    const binding = createProviderBinding(provider, env, piMaxOutputTokens, piModelMaxRetries,
+      positiveInteger(processEnv.DELEGATE_PI_CONTEXT_WINDOW_TOKENS, Math.max(env.maxInputTokens + piMaxOutputTokens, 16_384)));
     if (binding) return { ok: true, binding };
   }
   return {
@@ -60,6 +61,7 @@ function createProviderBinding(
   env: ModelRuntimeEnv,
   piMaxOutputTokens: number,
   piModelMaxRetries: number,
+  contextWindow: number,
 ): PiModelBinding | null {
   const config = env[provider];
   if (!config.apiKey) return null;
@@ -84,7 +86,9 @@ function createProviderBinding(
       cacheRead: 0,
       cacheWrite: 0,
     },
-    contextWindow: Math.max(env.maxInputTokens + piMaxOutputTokens, 16_384),
+    // Provider capacity is distinct from the application's retrieval/input budget.
+    // Pi reserves output space against this value before issuing each request.
+    contextWindow,
     maxTokens: piMaxOutputTokens,
     ...(api === "openai-completions"
       ? {
@@ -120,12 +124,13 @@ function createProviderBinding(
         ? openaiResponses
         : openaiCompletions,
   }));
-  const createStreamFn = (observer?: (event: PiModelAttemptEvent) => void) =>
+  const createStreamFn = (observer?: (event: PiModelAttemptEvent) => void, beforeRequest?: () => Promise<void>) =>
     ((selectedModel, context, options) => {
       const logicalCallId = randomUUID();
       const observedFetch = createObservedProviderFetch({
         fetch: options?.fetch ?? globalThis.fetch,
         observer,
+        beforeRequest,
         logicalCallId,
         maximumRetries: piModelMaxRetries,
         maximumRetryDelayMs: 2_000,
@@ -134,7 +139,7 @@ function createProviderBinding(
         ...options,
         fetch: observedFetch,
         timeoutMs: env.timeoutMs,
-        maxTokens: piMaxOutputTokens,
+        maxTokens: Math.min(options?.maxTokens ?? piMaxOutputTokens, piMaxOutputTokens),
         maxRetries: piModelMaxRetries,
         maxRetryDelayMs: 2_000,
       });
@@ -142,7 +147,7 @@ function createProviderBinding(
   return {
     model,
     streamFn: createStreamFn(),
-    createObservedStreamFn: (observer) => createStreamFn(observer),
+    createObservedStreamFn: (observer, beforeRequest) => createStreamFn(observer, beforeRequest),
     provider,
     modelId: config.model,
   };
@@ -151,6 +156,7 @@ function createProviderBinding(
 export function createObservedProviderFetch(input: {
   fetch: typeof fetch;
   observer?: ((event: PiModelAttemptEvent) => void) | undefined;
+  beforeRequest?: (() => Promise<void>) | undefined;
   logicalCallId?: string | undefined;
   maximumRetries: number;
   maximumRetryDelayMs: number;
@@ -158,6 +164,8 @@ export function createObservedProviderFetch(input: {
   const logicalCallId = input.logicalCallId ?? randomUUID();
   let attempt = 0;
   return async (request, init) => {
+    // Runs for every provider HTTP attempt, including SDK-managed retries.
+    await input.beforeRequest?.();
     attempt += 1;
     const currentAttempt = attempt;
     input.observer?.({ type: "start", logicalCallId, attempt: currentAttempt });

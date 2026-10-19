@@ -3,6 +3,13 @@ import { describe, expect, it } from "vitest";
 import { SandboxProviderRegistry } from "../src/sandbox-provider-registry";
 
 describe("sandbox provider registry", () => {
+  it("constructs an All-in-One provider without legacy Code configuration", async () => {
+    const registry = buildRegistry({ tencent: {
+      apiKey: "key", domain: "ap-guangzhou.tencentags.com", allInOneTool: "delegate-aio-pi-v1",
+    } });
+    expect(registry.configured("tencent")).toBe(true);
+    await expect(registry.create("tencent")).resolves.toMatchObject({ kind: "tencent" });
+  });
   it("falls back only between configured cloud providers", () => {
     expect(() => buildRegistry({ legacyProvider: "daytona" }).resolveLegacyProvider())
       .toThrow("config_invalid");

@@ -88,6 +88,16 @@ describe("public chat rate limits", () => {
     expect(mocks.queryRaw).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps task control rate limits separate from new-service daily admission", async () => {
+    await enforcePublicChatPrincipalAdmission({ representativeId: "rep-1", audienceIdentityId: "audience-1", operation: "task_control", now });
+    expect(mocks.queryRaw).toHaveBeenCalledTimes(1);
+    const controlKey = (mocks.queryRaw.mock.calls[0]![0] as { values: unknown[] }).values[0];
+    mocks.queryRaw.mockClear();
+    await enforcePublicChatPrincipalAdmission({ representativeId: "rep-1", audienceIdentityId: "audience-1", now });
+    expect(mocks.queryRaw).toHaveBeenCalledTimes(2);
+    expect((mocks.queryRaw.mock.calls[0]![0] as { values: unknown[] }).values[0]).not.toEqual(controlKey);
+  });
+
   it("fails closed in production when no signing secret is configured", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("PUBLIC_CHAT_RATE_LIMIT_SECRET", "");

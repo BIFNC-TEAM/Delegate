@@ -7,7 +7,7 @@ import type { PiArtifact, PiCapabilityResult, PiSource } from "../pi/types";
 import { PI_THINKING_ANSWER_RESERVE_TOKENS, v2BudgetSchema } from "./config";
 import { bounded, byteLength, fingerprint, safeError, Semaphore, truncateUtf8 } from "./guards";
 import { V2_SYSTEM_PROMPT } from "./prompt";
-import { emptyV2Usage, V2Error, type V2RunInput, type V2RunResult, type V2Session, type V2Tool, type V2TraceCall } from "./types";
+import { emptyV2Usage, V2Error, V2RecoverableToolError, type V2RunInput, type V2RunResult, type V2Session, type V2Tool, type V2TraceCall } from "./types";
 
 export class DelegateAgentV2 {
   private readonly active = new Map<string, AbortController>();
@@ -119,7 +119,10 @@ export class DelegateAgentV2 {
               if (record) { record.sourceIds = normalized.sources.map(s => auditReference(s.id)); record.outputBytes = byteLength(normalized); }
               return { content: [{ type: "text" as const, text: JSON.stringify(normalized) }], details: { sourceCount: normalized.sources.length } };
             } catch (error) {
-              if (tool.effect === "write") stopped = "unknown_effect";
+              if (tool.effect === "write") {
+                if (error instanceof V2RecoverableToolError) writes.delete(key);
+                else stopped = "unknown_effect";
+              }
               if (tool.effect !== "read" || !(error instanceof V2Error) || error.code !== "transient" || attempt >= budget.readRetries) throw error;
               // Retry only a host-classified transient failure. All attempts share the deadline/budget.
             }
@@ -133,6 +136,16 @@ export class DelegateAgentV2 {
           const previous = repeated.get(key);
           const output = `error:${code}`;
           repeated.set(key, { output, count: previous?.output === output ? previous.count + 1 : 1 });
+        }
+        if (error instanceof V2RecoverableToolError && !signal.aborted) {
+          const feedback = JSON.stringify({ status: "failed", error: code, reason: error.reason,
+            executionState: error.disposition, correctionAllowed: true,
+            message: truncateUtf8(error.feedback, Math.max(0, budget.toolOutputBytes - 256)) });
+          const record = callRecords.get(callId)?.trace;
+          if (record) { record.error = error.reason; record.outputBytes = byteLength(feedback); }
+          // PI turns thrown errors into real error tool results for the next
+          // normal model step. No automatic write retry or verifier is added.
+          throw new Error(feedback);
         }
         throw new V2Error(code);
       }),
@@ -248,7 +261,7 @@ export class DelegateAgentV2 {
             record.trace.durationMs = telemetry.offset() - record.start;
             record.trace.attempts = attempts.get(event.toolCallId) ?? 0;
             record.trace.status = event.isError ? code === "timeout" ? "timeout" : code === "cancelled" ? "cancelled" : record.trace.attempts ? "error" : "blocked" : "ok";
-            if (event.isError) record.trace.error = code ?? "invalid_arguments_or_tool";
+            if (event.isError) record.trace.error ??= code ?? "invalid_arguments_or_tool";
             telemetry.end(record.span, { status: event.isError ? "error" : "ok" });
             await telemetry.event({ type: event.isError ? "tool.failed" : "tool.completed", toolName: record.trace.toolName, spanId: record.span, status: event.isError ? "failed" : "completed", data: { toolCallId: event.toolCallId, sourceCount: record.trace.sourceIds.length } });
           }

@@ -1278,6 +1278,7 @@ export function buildPiAdapters(input: {
     if (effectiveRequest.language !== "python") return {
       status: "unavailable", text: "当前代码沙盒仅支持受限 Python；JavaScript、Shell 和长期进程暂不可用。",
       details: { reason: "isolated_python_language_required", deterministicFailure: true }, artifacts: [],
+      recovery: { kind: "not_dispatched", reason: "isolated_python_language_required" },
     };
     input.onCompute(false);
     const declaredRead = validateDeclaredAttachmentRead({
@@ -1295,6 +1296,7 @@ export function buildPiAdapters(input: {
       return {
         status: "failed",
         text: "沙盒请求没有声明并读取本轮附件的可信路径，未执行，也没有生成结果文件。",
+        recovery: { kind: "not_dispatched", reason: declaredRead.reason },
         details: {
           reason: declaredRead.reason,
           deterministicFailure: true,
@@ -1328,11 +1330,11 @@ export function buildPiAdapters(input: {
       : inferredOutput ? [inferredOutput] : [];
     const outputRequest = validateAgentTextOutputRequest(expectedOutputs);
     if (!outputRequest.ok) {
-      return { status: "failed", text: agentTextFileOutputNotice.zh, details: { reason: outputRequest.reason, deterministicFailure: true }, artifacts: [] };
+      return { status: "failed", text: agentTextFileOutputNotice.zh, details: { reason: outputRequest.reason, deterministicFailure: true }, recovery: { kind: "not_dispatched", reason: outputRequest.reason }, artifacts: [] };
     }
     const outputFile = outputRequest.file;
     if (outputFile && !input.item.audienceIdentityId) {
-      return { status: "failed", text: "当前会话缺少可验证的文件接收者身份，未执行文件生成。", details: { reason: "output_audience_identity_required" }, artifacts: [] };
+      return { status: "failed", text: "当前会话缺少可验证的文件接收者身份，未执行文件生成。", details: { reason: "output_audience_identity_required" }, recovery: { kind: "not_dispatched", reason: "output_audience_identity_required" }, artifacts: [] };
     }
     const session = await createAudienceComputeSession({
       representativeId: input.setup.id,
@@ -1366,6 +1368,7 @@ export function buildPiAdapters(input: {
       return {
         status: "unavailable", text: "暂时无法完成代码执行预检。本次未提交脚本，也未向沙盒发送附件或生成文件。",
         details: { reason: "code_execution_preflight_unavailable", deterministicFailure: true },
+        recovery: { kind: "not_dispatched", reason: "code_execution_preflight_unavailable" },
         observation: { state: "unavailable" as const, reason: "code_execution_preflight_unavailable" }, artifacts: [],
       };
     }
@@ -1375,6 +1378,7 @@ export function buildPiAdapters(input: {
         status: "unavailable",
         text: "当前会话没有可用的受限 Python 运行配置。本次未执行脚本，也未向沙盒发送附件或生成文件。",
         details: { reason: codePreflight.reason, codeClassification: codePreflight.codeClassification, profileId: codePreflight.profileId, deterministicFailure: true },
+        recovery: { kind: "not_dispatched", reason: "code_execution_profile_unavailable" },
         observation: { state: "unavailable" as const, reason: codePreflight.reason },
         artifacts: [],
       };
@@ -1389,6 +1393,7 @@ export function buildPiAdapters(input: {
       return {
         status: "failed",
         text: "沙盒未找到工具请求中声明的会话附件，未执行分析。",
+        recovery: { kind: "not_dispatched", reason: "declared_attachments_unavailable" },
         details: { requestedAttachmentIds: effectiveRequest.attachmentIds },
         artifacts: [],
       };
@@ -1425,13 +1430,15 @@ export function buildPiAdapters(input: {
     if (execution.outcome !== "completed") {
       if (execution.approvalRequest) input.onPendingApproval(execution.approvalRequest.id);
       const unknown = execution.execution?.transportOutcome === "outcome_unknown";
+      const outputRejection = execution.session?.failureReason;
       if (outputFile && execution.outcome === "failed"
         && execution.execution?.transportOutcome === "response_received"
-        && execution.session?.failureReason === "output_not_supported_text") {
+        && ["output_not_supported_text", "output_csv_invalid", "output_json_invalid", "output_file_too_large"].includes(outputRejection ?? "")) {
         return {
           status: "failed",
-          text: "标准输出为空或不是支持的文本，未生成可下载文件。请用 print 或 sys.stdout.write 输出最终文件内容；expectedOutputs 只声明文件名，服务端会保存标准输出。仅在沙盒中写入文件不会完成交付。",
-          details: { reason: "output_not_supported_text", transportOutcome: "response_received" },
+          text: `隔离脚本已结束，但标准输出未通过文件校验（${outputRejection}），未生成可下载文件。expectedOutputs 只声明文件名，服务端将完整 stdout 保存为文件。请修正程序，让 stdout 只包含最终文件内容；调试说明写到 stderr。CSV 必须有表头且每行列数一致，不能混入平均值说明、Markdown 围栏或其他日志；JSON 必须是完整有效 JSON；输出不能超过 ${agentTextFileOutput.maximumBytes} 字节。仅在沙盒内写文件不等于交付。`,
+          details: { reason: outputRejection, transportOutcome: "response_received" },
+          recovery: { kind: "isolated_output_rejected", reason: outputRejection! },
           artifacts: [],
         };
       }
@@ -1760,6 +1767,7 @@ export function buildPiAdapters(input: {
         } }
       : {}),
     ...(input.setup.compute.enabled ? { sandbox: {
+      executionDescription: `Only Python is available after host preflight. ${agentTextFileOutputNotice.en} expectedOutputs declares the delivered filename; the host saves COMPLETE stdout as that file. Output only the final file bytes to stdout; send logs/explanations to stderr. CSV must have a non-empty unique header and equal column counts on every row. Use csv.writer(sys.stdout) directly or sys.stdout.write(csv_text); do not add blank rows, a separate average/log line, or Markdown fences. Writing a file inside the sandbox alone does not deliver it; return its exact contents on stdout.`,
       execute: executeSandbox,
       ...(["allow", "ask"].includes(input.authority?.compute?.capabilityModes?.browser ?? "deny") ? { browse: browseSandbox } : {}),
     } } : {}),

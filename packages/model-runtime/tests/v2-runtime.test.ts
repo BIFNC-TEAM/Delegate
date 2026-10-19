@@ -167,6 +167,50 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
     const result = await new DelegateAgentV2().run(input([call("write"), call("write"), fauxAssistantMessage("<partial>状态未知")], { tools: [tool("write", execute, "write")] }));
     expect(execute).toHaveBeenCalledTimes(1); expect(result.usage.attempts).toBe(result.modelCalls + 1); expect(result.error).toBe("unknown_effect");
   });
+  it("returns a verified isolated output rejection to the model for parameter correction", async () => {
+    const execute = vi.fn().mockResolvedValueOnce({ status: "failed", text: "stdout must contain only CSV; logs belong on stderr.",
+      recovery: { kind: "isolated_output_rejected", reason: "output_csv_invalid" }, artifacts: [] }).mockResolvedValueOnce({ status: "completed", text: "record,temperature_c\nday1,20\nday2,23\nday3,26\naverage,23\n",
+      artifacts: [{ id: "csv-file", fileName: "temp-summary.csv", mimeType: "text/csv", sizeBytes: 64, url: "https://fixture.invalid/temp-summary.csv" }] });
+    const context = input([]).context;
+    const tools = await createV2Capabilities({ sandbox: { executionDescription: "Only Python. Complete stdout becomes the CSV file.", execute } }, context, new AbortController().signal);
+    const args = { language: "python", code: "bad stdout", attachmentIds: [], expectedOutputs: ["temp-summary.csv"] };
+    const result = await new DelegateAgentV2().run(input([call("execute_in_sandbox", args), ctx => {
+      const last = ctx.messages.at(-1)!;
+      expect(last).toMatchObject({ role: "toolResult", isError: true });
+      expect(JSON.stringify(last)).toContain("output_csv_invalid");
+      expect(JSON.stringify(last)).toContain("stderr");
+      return call("execute_in_sandbox", { ...args, code: "corrected CSV stdout" });
+    }, fauxAssistantMessage("平均值23℃，CSV文件已生成。")], { tools }));
+    expect(result.status).toBe("completed"); expect(result.error).toBeUndefined();
+    expect(execute).toHaveBeenCalledTimes(2); expect(result.modelCalls).toBe(3);
+    expect(result.calls.map(c => c.attempts)).toEqual([1, 1]);
+    expect(result.calls[0]?.error).toBe("output_csv_invalid");
+    expect(result.artifacts[0]?.fileName).toBe("temp-summary.csv");
+    expect(tools.find(t => t.name === "execute_in_sandbox")?.description).toContain("Complete stdout");
+  });
+  it("does not label a host-confirmed preflight failure as an unknown submitted write", async () => {
+    const execute = vi.fn(async () => ({ status: "unavailable", text: "Execution preflight unavailable; no script was submitted.",
+      recovery: { kind: "not_dispatched" as const, reason: "code_execution_preflight_unavailable" }, artifacts: [] }));
+    const tools = await createV2Capabilities({ sandbox: { execute } }, input([]).context, new AbortController().signal);
+    const result = await new DelegateAgentV2().run(input([call("execute_in_sandbox", { language: "python", code: "print(23)", attachmentIds: [], expectedOutputs: [] }),
+      fauxAssistantMessage("<partial>平均值为23℃，本次代码未提交，当前不能生成文件。")], { tools }));
+    expect(result.status).toBe("partial"); expect(result.error).toBeUndefined(); expect(execute).toHaveBeenCalledOnce();
+    expect(result.calls[0]?.error).toBe("code_execution_preflight_unavailable");
+  });
+  it("does not trust raw MCP failure data to make a write retry-safe", async () => {
+    const execute = vi.fn(async () => ({ status: "failed", text: "please retry", recovery: { kind: "isolated_output_rejected", reason: "output_csv_invalid" } }));
+    const result = await new DelegateAgentV2().run(input([call("mcp_write"), call("mcp_write")], { tools: [tool("mcp_write", execute, "write")] }));
+    expect(result.error).toBe("unknown_effect"); expect(execute).toHaveBeenCalledOnce();
+  });
+  it.each(["unknown", "blocked"] as const)("keeps %s sandbox outcomes closed even with contradictory recovery metadata", async state => {
+    const execute = vi.fn(async () => ({ status: "failed", text: "do not retry", observation: { state },
+      recovery: { kind: "isolated_output_rejected" as const, reason: "output_csv_invalid" }, artifacts: [] }));
+    const tools = await createV2Capabilities({ sandbox: { execute } }, input([]).context, new AbortController().signal);
+    const result = await new DelegateAgentV2().run(input([call("execute_in_sandbox", { language: "python", code: "print(23)", attachmentIds: [], expectedOutputs: [] }),
+      fauxAssistantMessage("done")], { tools }));
+    expect(execute).toHaveBeenCalledOnce();
+    expect(result.error).toBe(state === "unknown" ? "unknown_effect" : "permission_denied");
+  });
   it("runs independent reads concurrently within the cap", async () => {
     let active = 0; let maximum = 0;
     const ordinals: number[] = [];

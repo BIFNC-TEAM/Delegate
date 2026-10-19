@@ -288,6 +288,8 @@ export type PiSkillAdapter = {
 };
 
 export type PiSandboxAdapter = {
+  /** Trusted host description of the actual execution/output contract. */
+  executionDescription?: string;
   /** Uses the broker's managed browser, including its runtime launch settings. */
   browse?(input: {
     url: string;
@@ -303,7 +305,12 @@ export type PiSandboxAdapter = {
     context: PiToolContext;
     signal: AbortSignal;
     onProgress?: (message: string) => void;
-  }): Promise<PiCapabilityResult>;
+  }): Promise<PiCapabilityResult & {
+    /** Host-verified only: never infer from stdout or accept from remote MCP data.
+     * output_rejected requires a terminal receipt from the isolated no-egress
+     * Python profile, with no deliverable file published. */
+    recovery?: { kind: "not_dispatched" | "isolated_output_rejected"; reason: string };
+  }>;
 };
 
 export type PiArtifactAdapter = {

@@ -1,0 +1,87 @@
+{
+  "model": "qwen3.8-27b",
+  "normalRequests": 2,
+  "directedRecoveryRequests": 1,
+  "conditions": "Real normal public HTTP/SSE flow, live isolated Python and downloaded artifacts. The recovery scenario explicitly requested a first malformed stdout attempt to test the error mechanism; it is not evidence of an autonomous initial tool sequence. Original failure remains unchanged. No infrastructure write retries.",
+  "rows": [
+    {
+      "scenario": "normal_generation",
+      "runId": "cmvf13yxr02qwru0nz2klz02v",
+      "question": "根据三天气温20℃、23℃、26℃计算平均值，生成可下载的 temp-summary.csv，包含三条原始记录和平均值。",
+      "answer": "已完成计算并生成文件。\n\n**计算结果**\n- 三天气温：20℃、23℃、26℃\n- 平均值：(20 + 23 + 26) ÷ 3 = **23.0℃**\n\n**文件内容（temp-summary.csv）**\n\n| day | temperature_c |\n|---|---|\n| day1 | 20 |\n| day2 | 23 |\n| day3 | 26 |\n| average | 23.0 |\n\n文件已生成，可下载：[temp-summary.csv](/reps/founder-representative-2/chat/artifacts/artifact_b43d4aa29865ac59/download)（60 字节，UTF-8 CSV）。",
+      "model": "qwen3.8-27b",
+      "runtime": "delegate-agent-v2",
+      "status": "completed",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "calls": [
+        {
+          "toolName": "execute_in_sandbox",
+          "status": "ok",
+          "attempts": 1,
+          "durationMs": 3277.250752
+        }
+      ],
+      "downloadStatus": 200,
+      "mimeType": "text/csv; charset=utf-8",
+      "bytes": 60,
+      "sha256": "1b0478a110f6a4b614ad0808c7e34d2513d6cef7fce546662d7c436bfa8030a2",
+      "csv": "day,temperature_c\r\nday1,20\r\nday2,23\r\nday3,26\r\naverage,23.0\r\n"
+    },
+    {
+      "scenario": "normal_generation",
+      "runId": "cmvf13yyg02rcru0naw3g4m08",
+      "question": "根据三天气温20℃、23℃、26℃计算平均值，生成可下载的 temp-summary.csv，包含三条原始记录和平均值。",
+      "answer": "已完成计算并生成文件：\n\n- **平均值**：(20 + 23 + 26) ÷ 3 = **23.0℃**\n- **文件**：temp-summary.csv（60 字节，UTF-8），包含三条原始记录和平均值行：\n\n```\nday,temperature_c\nday1,20\nday2,23\nday3,26\naverage,23.0\n```\n\n文件已生成，可直接下载。如需按日期命名（如 10-17、10-18、10-19）或增加其他统计项（最高/最低温），告诉我即可。",
+      "model": "qwen3.8-27b",
+      "runtime": "delegate-agent-v2",
+      "status": "completed",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "calls": [
+        {
+          "toolName": "execute_in_sandbox",
+          "status": "ok",
+          "attempts": 1,
+          "durationMs": 1880.809542000003
+        }
+      ],
+      "downloadStatus": 200,
+      "mimeType": "text/csv; charset=utf-8",
+      "bytes": 60,
+      "sha256": "1b0478a110f6a4b614ad0808c7e34d2513d6cef7fce546662d7c436bfa8030a2",
+      "csv": "day,temperature_c\r\nday1,20\r\nday2,23\r\nday3,26\r\naverage,23.0\r\n"
+    },
+    {
+      "scenario": "directed_real_format_failure_then_correction",
+      "runId": "cmvf15k0002tgru0nndncrl0q",
+      "question": "这是一次CSV错误恢复验收。请先实际执行一次下面的Python脚本，保留第一行说明，并将stdout作为temp-summary.csv提交给文件校验器，以观察真实校验结果。若工具确认格式失败，再修正脚本，只输出最终CSV，并交付可下载的temp-summary.csv。不要跳过首次验证，不要伪造任何执行结果。脚本：\nimport csv, sys\nvalues = [20, 23, 26]\nprint(\"average:\", sum(values)/len(values))\nwriter = csv.writer(sys.stdout)\nwriter.writerow([\"day\", \"temperature_c\"])\nfor i, value in enumerate(values, 1):\n    writer.writerow([f\"day{i}\", value])\nwriter.writerow([\"average\", sum(values)/len(values)])",
+      "answer": "CSV 错误恢复验收完成，两次执行均为真实结果：\n\n**第一次（原脚本，保留首行说明）**\n- 实际执行成功，但 stdout 混入 `average: 23.0` 说明行\n- 文件校验器返回 `output_csv_invalid`：表头只有 1 列，数据行有 2 列，列数不一致\n- 未生成可下载文件，符合预期\n\n**第二次（修正后，stdout 只含最终 CSV）**\n- 校验通过，文件已生成并可下载：`temp-summary.csv`（60 字节，text/csv）\n- 内容：\n\n```csv\nday,temperature_c\nday1,20\nday2,23\nday3,26\naverage,23.0\n```\n\n下载链接：/reps/founder-representative-2/chat/artifacts/artifact_30df06b03dd23cb3/download\n\n结论：校验器能正确拦截混入日志行的 CSV 输出；修正方式是将调试/说明信息写到 stderr，stdout 只保留最终文件内容。",
+      "model": "qwen3.8-27b",
+      "runtime": "delegate-agent-v2",
+      "status": "completed",
+      "modelCalls": 3,
+      "toolCalls": 2,
+      "calls": [
+        {
+          "toolName": "execute_in_sandbox",
+          "status": "error",
+          "attempts": 1,
+          "error": "output_csv_invalid",
+          "durationMs": 2749.122585000005
+        },
+        {
+          "toolName": "execute_in_sandbox",
+          "status": "ok",
+          "attempts": 1,
+          "durationMs": 1848.757918000003
+        }
+      ],
+      "downloadStatus": 200,
+      "mimeType": "text/csv; charset=utf-8",
+      "bytes": 60,
+      "sha256": "1b0478a110f6a4b614ad0808c7e34d2513d6cef7fce546662d7c436bfa8030a2",
+      "csv": "day,temperature_c\r\nday1,20\r\nday2,23\r\nday3,26\r\naverage,23.0\r\n"
+    }
+  ]
+}

@@ -55,3 +55,10 @@ export type V2RunResult = {
 export class V2Error extends Error {
   constructor(readonly code: "permission_denied" | "unavailable" | "invalid_result" | "empty_result" | "transient" | "timeout" | "cancelled" | "budget_exhausted" | "no_progress" | "unknown_effect" | "context_limit" | "session_scope_mismatch") { super(code); }
 }
+
+/** A trusted host has established that parameter correction is safe. */
+export class V2RecoverableToolError extends V2Error {
+  constructor(readonly disposition: "not_dispatched" | "isolated_output_rejected", readonly reason: string, readonly feedback: string) {
+    super(disposition === "not_dispatched" ? "unavailable" : "invalid_result");
+  }
+}

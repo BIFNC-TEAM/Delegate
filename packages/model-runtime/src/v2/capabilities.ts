@@ -1,6 +1,6 @@
 import { Type, type TSchema } from "@earendil-works/pi-ai";
 import type { PiCapabilityAdapters, PiToolContext } from "../pi/types";
-import { V2Error, type V2Tool } from "./types";
+import { V2Error, V2RecoverableToolError, type V2Tool } from "./types";
 import { fingerprint } from "./guards";
 
 /** Transport adapters only. Does not import the old tool builder or decision policy. */
@@ -55,11 +55,18 @@ export async function createV2Capabilities(adapters: PiCapabilityAdapters, conte
     },
   });
   if (adapters.sandbox) tools.push({ name: "execute_in_sandbox", label: "隔离计算", category: "sandbox", effect: "write",
-    description: "Run code in the governed isolated sandbox on authorized attachment IDs. Host language, network, file and approval policies apply. Creates isolated files; must run sequentially and is never automatically retried. Return contains real stdout and artifact handles when successful. Declare every required attachment and desired output file. No host-machine access.",
+    description: "Run code in the governed isolated sandbox on authorized attachment IDs. Host language, network, file and approval policies apply. Creates isolated files; must run sequentially and is never automatically retried. Return contains real stdout and artifact handles when successful. Declare every required attachment and desired output file. No host-machine access."
+      + (adapters.sandbox.executionDescription ? `\nHost contract: ${adapters.sandbox.executionDescription}` : ""),
     parameters: Type.Object({ language: Type.Union([Type.Literal("python"), Type.Literal("javascript"), Type.Literal("shell")]), code: Type.String({ minLength: 1, maxLength: 24000 }), attachmentIds: Type.Array(Type.String(), { maxItems: 20 }), expectedOutputs: Type.Array(Type.String(), { maxItems: 10 }), timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 25000 })) }),
     execute: async (_id, args, signal, context) => {
       if (args.attachmentIds.some((id: string) => !context.attachments.some(a => a.id === id))) throw new V2Error("permission_denied");
       const result = await adapters.sandbox!.execute({ ...args, timeoutMs: args.timeoutMs ?? 20000, context, signal });
+      if (["failed", "unavailable"].includes(result.status ?? "") && !["unknown", "blocked"].includes(result.observation?.state ?? "")
+        && !result.artifacts?.length && result.recovery
+        && ["not_dispatched", "isolated_output_rejected"].includes(result.recovery.kind)
+        && /^[a-z][a-z0-9_]{0,79}$/.test(result.recovery.reason)) {
+        throw new V2RecoverableToolError(result.recovery.kind, result.recovery.reason, result.text);
+      }
       // The existing host adapter keeps verified stdout separate from its status
       // sentence. Preserve it as evidence data, never as a mandatory final answer.
       return { ...result, text: [result.text, result.authoritativeSummary].filter(Boolean).join("\n\n") };

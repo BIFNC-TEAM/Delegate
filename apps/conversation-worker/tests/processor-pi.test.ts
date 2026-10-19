@@ -453,13 +453,19 @@ describe("production Pi conversation processor", () => {
     expect(mocks.executeTool).toHaveBeenCalledOnce(); expect(mocks.publicArtifactDownload).not.toHaveBeenCalled();
   });
 
-  it("explains the stdout file contract after a confirmed invalid-text output without claiming delivery", async () => {
+  it.each(["output_not_supported_text", "output_csv_invalid", "output_json_invalid", "output_file_too_large"])("explains confirmed output rejection %s without claiming delivery", async reason => {
     const execute = await sandboxFixture("synthetic");
-    mocks.executeTool.mockResolvedValueOnce({ outcome: "failed", session: { failureReason: "output_not_supported_text" }, execution: { id: "no-stdout", transportOutcome: "response_received" }, artifacts: [] });
+    mocks.executeTool.mockResolvedValueOnce({ outcome: "failed", session: { failureReason: reason }, execution: { id: "no-stdout", transportOutcome: "response_received" }, artifacts: [] });
     const result = await execute(["result.txt"]);
-    expect(result).toMatchObject({ status: "failed", details: { reason: "output_not_supported_text" }, artifacts: [] });
+    expect(result).toMatchObject({ status: "failed", details: { reason }, recovery: { kind: "isolated_output_rejected", reason }, artifacts: [] });
     expect(result.text).toContain("标准输出"); expect(result.text).toContain("expectedOutputs");
     expect(mocks.executeTool).toHaveBeenCalledOnce(); expect(mocks.publicArtifactDownload).not.toHaveBeenCalled();
+  });
+  it("does not permit correction when an output error label lacks a terminal receipt", async () => {
+    const execute = await sandboxFixture("synthetic");
+    mocks.executeTool.mockResolvedValueOnce({ outcome: "failed", session: { failureReason: "output_csv_invalid" }, execution: { id: "unknown", transportOutcome: "outcome_unknown" }, artifacts: [] });
+    const result = await execute(["result.csv"]);
+    expect(result.observation?.state).toBe("unknown"); expect(result).not.toHaveProperty("recovery");
   });
 
   it("does not pass arbitrary broker failure details to the model", async () => {

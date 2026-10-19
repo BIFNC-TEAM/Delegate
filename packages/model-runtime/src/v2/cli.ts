@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createPiModelBindingFromEnv } from "../pi/provider";
+import { createV2ModelBindingFromEnv } from "./provider";
 import { createV2Capabilities } from "./capabilities";
 import { resolveV2Budget } from "./config";
 import { delegateAgentV2 } from "./runtime";
@@ -15,7 +15,7 @@ const fixtures = args.includes("--fixture-tools");
 const userText = args.filter(s => s !== "--fixture-tools" && s !== "--").join(" ");
 if (!userText) throw new Error('Usage: pnpm agent:v2 [--fixture-tools] [--session .local/v2.json] "question"');
 const budget = resolveV2Budget();
-const binding = createPiModelBindingFromEnv({ ...process.env, DELEGATE_PI_MODEL_MAX_RETRIES: "0", DELEGATE_PI_MAX_OUTPUT_TOKENS: String(budget.outputTokens) });
+const binding = createV2ModelBindingFromEnv();
 if (!binding.ok) throw new Error(binding.reason);
 let session: V2Session | undefined;
 if (sessionPath) {

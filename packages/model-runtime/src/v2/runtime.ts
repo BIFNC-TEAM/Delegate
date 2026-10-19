@@ -4,7 +4,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { auditReference, summarizeAuditArguments } from "@delegate/runtime";
 import { PiTelemetry } from "../pi/telemetry";
 import type { PiArtifact, PiCapabilityResult, PiSource } from "../pi/types";
-import { v2BudgetSchema } from "./config";
+import { PI_THINKING_ANSWER_RESERVE_TOKENS, v2BudgetSchema } from "./config";
 import { bounded, byteLength, fingerprint, safeError, Semaphore, truncateUtf8 } from "./guards";
 import { V2_SYSTEM_PROMPT } from "./prompt";
 import { emptyV2Usage, V2Error, type V2RunInput, type V2RunResult, type V2Session, type V2Tool, type V2TraceCall } from "./types";
@@ -69,6 +69,9 @@ export class DelegateAgentV2 {
       toolCalls: budget.toolCalls - totals().toolCalls, attempts: budget.attempts - totals().attempts,
       tokens: budget.totalTokens - totals().tokens, finalAnswerOnly: finalMode });
     const hostPrompt = () => `${V2_SYSTEM_PROMPT}\n\nTrusted host context:\n${JSON.stringify({ currentTime: now, timezone: input.timezone,
+      timezonePurpose: "date_interpretation_only_not_user_location",
+      authorizedUserLocation: input.authorizedUserLocation ?? null,
+      completedToolResultsThisRequest: calls.filter(call => call.attempts > 0).map(call => ({ tool: call.toolName, status: call.status, sourceCount: call.sourceIds.length })),
       attachments: input.context.attachments, remainingBudget: budgetSummary() })}\n${input.instructions ?? ""}`;
     const authorize = async (boundary: Parameters<V2RunInput["authorize"]>[0], tool?: V2Tool, args?: unknown) => {
       try { await bounded(() => input.authorize(boundary, tool, args), signal); }
@@ -135,7 +138,7 @@ export class DelegateAgentV2 {
     });
     const control: V2Tool = {
       name: "request_clarification", label: "补充信息", category: "control", effect: "read",
-      description: "Pause to ask essential missing questions together. No external side effects. Returns waiting_user; the user's next message resumes this task with its cumulative budget. Call alone; do not combine with business execution.",
+      description: "Pause only for essential missing parameters that an existing authorized capability can actually use. Do not request personal identifiers or credentials for unavailable systems or merely because document retrieval missed; explain that evidence/capability limit with <partial> instead. Ask necessary questions together. No external side effects. Returns waiting_user; the user's next message resumes this task with its cumulative budget. Call alone; do not combine with business execution.",
       parameters: Type.Object({ question: Type.String({ minLength: 1, maxLength: 2000 }) }),
       execute: async (_id, args) => { clarification = args.question; return { text: "waiting_user", status: "waiting_user" }; },
     };
@@ -176,7 +179,9 @@ export class DelegateAgentV2 {
       await telemetry.event({ type: "request.accepted", module: "request" });
       const baseStream = input.model.streamFn;
       agent = new Agent({
-        initialState: { systemPrompt: hostPrompt(), model: input.model.model, tools: selectedTools(), messages: history, thinkingLevel: "off" },
+        initialState: { systemPrompt: hostPrompt(), model: input.model.model, tools: selectedTools(), messages: history,
+          thinkingLevel: input.model.model.reasoning && budget.thinkingTokens > 0 ? "low" : "off" },
+        thinkingBudgets: { low: budget.thinkingTokens },
         sessionId: fingerprint([input.scope, input.sessionId]), toolExecution: "parallel",
         prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: selectedTools(), systemPrompt: hostPrompt() } }),
         streamFn: async (model, context, options) => {
@@ -201,7 +206,10 @@ export class DelegateAgentV2 {
             usage.attempts++;
             modelSpan = telemetry.start({ module: "model", operation: "generate", provider: input.model.provider, model: input.model.modelId });
             await telemetry.event({ type: "model.started", module: "model", spanId: modelSpan });
-            return await baseStream(model, projected, { ...options, signal, maxTokens, maxRetries: 0, temperature: budget.temperature });
+            const { reasoning, ...streamOptions } = options ?? {};
+            const canThink = !finalMode && maxTokens > PI_THINKING_ANSWER_RESERVE_TOKENS;
+            return await baseStream(model, projected, { ...streamOptions,
+              ...(canThink && reasoning ? { reasoning } : {}), signal, maxTokens, maxRetries: 0, temperature: budget.temperature });
           } catch (error) { stopped = safeError(error); throw error; }
         },
         beforeToolCall: async ({ toolCall, args, assistantMessage }) => {

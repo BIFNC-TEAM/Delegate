@@ -1,6 +1,6 @@
 # Agent V2 独立开发线
 
-日期：2026-10-19。状态：可独立运行的实验版本，生产默认仍为原 Pi runtime。真实模型质量评估与未通过项目见 [验收记录](agent-v2-validation.md)。不把机制测试通过等同于模型能自主正确处理所有请求。
+日期：2026-10-19。状态：可独立运行的实验版本，生产默认仍为原 Pi runtime。历史失败、后续修复和仍未验收的边界见 [验收记录](agent-v2-validation.md)。不把机制测试通过等同于模型能自主正确处理所有请求。
 
 分支：`codex/agent-architecture`；基线：`0387c5f`。隔离 worktree：`/Users/neo/.codex/worktrees/agent-v2/Delegate`。原目录未跟踪的 reports/docs 保留，未带入本次开发线。
 
@@ -132,10 +132,15 @@ Web 显示现有进度阶段、最终来源和可展开的调用状态/耗时。
 | `READ_RETRIES` | 1 | 仅 host 明确分类为 transient 的只读错误 |
 | `DIRECT_TOOLS` | 16 | 小目录直接暴露；大目录 discover_tools 分页加载 |
 | `TEMPERATURE` | 0 | 初始低随机性配置，不保证模型策略正确 |
+| `THINKING_TOKENS` | 1024 | 已验证 Qwen Plus 的原生思考上限，包含在输出额度内；0 关闭，最后收尾或输出不足时关闭 |
 | `COST_USD` | 未设置 | 可选费用准入；必须有可信的模型输入/输出单价，否则拒绝 |
 | `TIMEZONE` | Asia/Shanghai | worker/CLI 的可信时区；不能从访客文本授予身份或位置 |
 
 token usage 使用 provider 的实际值；没有 usage 时以保守估值扣减预算。费用基于配置单价，`costAvailable=false` 时 0 不是“免费”，也不是实际账单。模型客户端超时仍受既有 `DELEGATE_MODEL_TIMEOUT_MS` 约束；模型容量使用既有 `DELEGATE_PI_CONTEXT_WINDOW_TOKENS` 配置，应依据真实 provider 容量设置。外部自定义 adapter 不得隐藏重试；必须把可重试错误抛成 `V2Error("transient")`，由 V2 统一计数。
+
+V2 对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus` 组合使用 PI 原生 Qwen thinking profile；这是模型能力适配，不依赖用户问题或业务关键词。思考发生在正常主模型请求内，不引入核验链，正文不会写入追踪或澄清状态。其他模型保留原绑定，旧 Pi 入口不变。具体质量、耗时取舍和复测见[澄清修复验收](agent-v2-clarification-fix.md)。
+
+SDK 的 `authorizedUserLocation` 只能由可信主机提供已获授权的位置，缺省为 `null`；worker 不从时区、IP 或检索结果推断位置。模型同时收到本次真实工具结果摘要（不含原始参数），避免把工具描述或计划当成已经执行。
 
 ## 来源、状态与数据保存
 
@@ -147,7 +152,7 @@ worker 将最小 `v2Task` 存入原有 `GenerationRun.contextSnapshot.agentTrace
 
 ## 已知限制与切换前条件
 
-1. 真模型评估存在策略不稳定和不完整执行样本；查看验收记录，不能以 mocked tests 宣称自主行为全部通过。
+1. 初轮两项行为失败已完成[定向修复与多轮真实复测](agent-v2-clarification-fix.md)；历史失败保留。有限样本不代表开放任务均可靠，也不能以 mocked tests 证明自主行为。
 2. 新的审批等待/恢复尚未实现 V2 checkpoint 协议。试运行明确阻止需要新审批、未知行为和不满足 allow 模式的沙盒/浏览器操作；不会自动回退旧流程或静默创建审批。一般写入的持久幂等仍由 Compute Broker 执行。
 3. 保留明确的专项语义审核边界：上述受限代表配置暂不能进入 V2。并未用一个全局审核模型代替它。
 4. 主机目前没有单独配置 `web` Search adapter，实际生产能力依赖发布的具体 MCP 搜索工具或允许的沙盒浏览器。独立库的 Search adapter 接口已实现，演示使用合成工具。

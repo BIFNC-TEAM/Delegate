@@ -41,6 +41,26 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
     const result = await new DelegateAgentV2().run(input([fauxAssistantMessage("Hello")], { userText: "翻译：你好", tools: [tool("retrieve_authorized_knowledge", rag)] }));
     expect(result.modelCalls).toBe(1); expect(result.toolCalls).toBe(0); expect(result.sources).toEqual([]);
   });
+  it.each([undefined, "上海"])("keeps authorized location separate from the clock timezone (%s)", async location => {
+    const authorize = vi.fn(async () => undefined);
+    const result = await new DelegateAgentV2().run(input([context => {
+      const host = JSON.parse(context.systemPrompt!.split("Trusted host context:\n")[1]!.split("\n")[0]!);
+      expect(authorize).toHaveBeenCalledWith("model", undefined, undefined);
+      expect(host.timezone).toBe("Asia/Shanghai");
+      expect(host.authorizedUserLocation).toBe(location ?? null);
+      expect(host.completedToolResultsThisRequest).toEqual([]);
+      return fauxAssistantMessage("done");
+    }], { authorize, ...(location ? { authorizedUserLocation: location } : {}) }));
+    expect(result.modelCalls).toBe(1);
+  });
+  it("gives the model actual execution facts without replaying raw arguments", async () => {
+    await new DelegateAgentV2().run(input([call("lookup", { query: "sensitive-query" }), context => {
+      const host = JSON.parse(context.systemPrompt!.split("Trusted host context:\n")[1]!.split("\n")[0]!);
+      expect(host.completedToolResultsThisRequest).toEqual([{ tool: "lookup", status: "ok", sourceCount: 0 }]);
+      expect(JSON.stringify(host)).not.toContain("sensitive-query");
+      return fauxAssistantMessage("done");
+    }], { tools: [tool()] }));
+  });
   it("saves a clarification, resumes with new active time and cumulative limits", async () => {
     const saved = vi.fn(async () => undefined);
     const first = await new DelegateAgentV2().run(input([call("request_clarification", { question: "请提供城市。" })], { userText: "今天天气如何", saveSession: saved }));
@@ -66,6 +86,42 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
     expect(result.status).toBe("waiting_user"); expect(result.modelCalls).toBe(1); expect(result.toolCalls).toBe(0);
     expect(result.session?.messages.at(-1)?.role).toBe("assistant");
     expect(result.text).toBe("请提供地点。");
+  });
+  it("never releases or persists native thinking content, including when clarifying", async () => {
+    const request = input([fauxAssistantMessage([
+      { type: "thinking", thinking: "PRIVATE_THINKING_FIXTURE" },
+      { type: "text", text: "<waiting_user>请提供地点。" },
+    ])]);
+    request.model.model = { ...request.model.model, reasoning: true };
+    const result = await new DelegateAgentV2().run(request);
+    expect(result.status).toBe("waiting_user"); expect(result.modelCalls).toBe(1);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_THINKING_FIXTURE");
+  });
+  it("honors a zero thinking budget even for a supported model", async () => {
+    const request = input([fauxAssistantMessage("done")], { budget: { thinkingTokens: 0 } });
+    request.model.model = { ...request.model.model, reasoning: true };
+    const base = request.model.streamFn;
+    request.model.streamFn = (model, context, options) => {
+      expect(options?.reasoning).toBeUndefined();
+      return base(model, context, options);
+    };
+    expect((await new DelegateAgentV2().run(request)).modelCalls).toBe(1);
+  });
+  it("reserves the final budget for the answer rather than native thinking", async () => {
+    const request = input([call("lookup"), fauxAssistantMessage("<partial>已有部分结果")], { tools: [tool()], budget: { modelTurns: 2 } });
+    request.model.model = { ...request.model.model, reasoning: true };
+    const base = request.model.streamFn;
+    const reasoning: Array<string | undefined> = [];
+    request.model.streamFn = (model, context, options) => { reasoning.push(options?.reasoning); return base(model, context, options); };
+    const result = await new DelegateAgentV2().run(request);
+    expect(reasoning).toEqual(["low", undefined]); expect(result.status).toBe("partial");
+  });
+  it("disables native thinking when the response ceiling cannot hold its answer reserve", async () => {
+    const request = input([fauxAssistantMessage("done")], { budget: { outputTokens: 512, finalReserveTokens: 128 } });
+    request.model.model = { ...request.model.model, reasoning: true };
+    const base = request.model.streamFn;
+    request.model.streamFn = (model, context, options) => { expect(options?.reasoning).toBeUndefined(); return base(model, context, options); };
+    expect((await new DelegateAgentV2().run(request)).status).toBe("completed");
   });
   it("accepts an explicit status on its own line and never persists an invalid-source clarification", async () => {
     const result = await new DelegateAgentV2().run(input([fauxAssistantMessage("已有分析\n<waiting_user>请提供必要参数。") ]));

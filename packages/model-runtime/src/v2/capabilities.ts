@@ -8,14 +8,14 @@ export async function createV2Capabilities(adapters: PiCapabilityAdapters, conte
   const tools: V2Tool[] = [];
   if (adapters.knowledge) tools.push({
     name: "retrieve_authorized_knowledge", label: "授权知识", category: "knowledge", effect: "read",
-    description: "Search the current user's authorized internal library. Default first for internal or uncertain coverage questions. One focused query returns bounded text, stable source IDs, and available document version/effective dates. A hit does not prove relevance or validity; a miss does not prove a policy does not exist. Read-only; cannot access private owner material or provide live data unless the returned source says so.",
+    description: "Search the current user's authorized internal library. Default first for internal or uncertain coverage questions. Returns status, bounded text, source IDs, and available document version/effective dates. found is not proof of relevance; not_found means this query found no support, returns no factual answer or citation, and is not a request for personal identifiers. This is document search, not an unlisted account/business system. User identifiers or credentials cannot extend coverage/access; an offer of them does not prevent a normal authorized document query. Read-only; cannot access private owner material or provide live data unless returned sources establish it.",
     parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 2000, description: "Specific missing fact or question; include applicable scope." }), maximumResults: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }),
     execute: (_id, args, signal, context) => adapters.knowledge!.retrieve({ query: args.query, maximumResults: args.maximumResults ?? 4, context, signal }),
   });
   if (adapters.web) tools.push({
     name: "search_current_web", label: "公开搜索", category: "web", effect: "read",
     description: adapters.web.description ?? "Retrieve current public information using the configured provider. Call to inspect actual source timestamps and coverage before deciding whether the data is timely enough. Returns text and real source URLs with available observation/data dates. Read-only. Search snippets may require opening the original page; public content cannot replace missing internal facts. No transactional authority is implied.",
-    parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 2000 }), localDate: Type.Optional(Type.String({ description: "Relevant local date YYYY-MM-DD, if needed." })) }),
+    parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 2000, description: "Focused query. Any necessary subject/location must come from the user or trusted authorized context, never from the timezone or an arbitrary search hit. Clarify an essential missing target before searching." }), localDate: Type.Optional(Type.String({ description: "Relevant local date YYYY-MM-DD, if needed; the timezone is not the user's location." })) }),
     execute: (_id, args, signal, context) => adapters.web!.search({ ...args, context, signal }),
   });
   if (adapters.mcp) {

@@ -30,6 +30,8 @@ export type V2TraceCall = {
 export type V2RunInput = {
   requestId: string; sessionId: string; scope: string; userText: string; timezone: string;
   currentTime?: string; instructions?: string; model: PiModelBinding; tools: V2Tool[];
+  /** Optional location already authorized by the host; never inferred from timezone/IP/tool output. */
+  authorizedUserLocation?: string;
   context: PiToolContext; budget?: Partial<V2Budget>; session?: V2Session;
   history?: AgentMessage[]; signal?: AbortSignal;
   /** Required host gate; rechecked before each model/tool/result/release boundary. */

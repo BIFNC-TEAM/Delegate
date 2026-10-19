@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+// PI 0.85.1 api/simple-options reserves this much answer space when fitting
+// native thinking inside max_tokens. Below it, disable thinking rather than
+// sending enable_thinking without a positive bounded thinking_budget.
+export const PI_THINKING_ANSWER_RESERVE_TOKENS = 1024;
+
 // Initial guardrails, not measured optima. All limits are per task except activeMs.
 export const v2BudgetSchema = z.object({
   activeMs: z.number().int().min(20).max(600_000).default(120_000),
@@ -18,6 +23,7 @@ export const v2BudgetSchema = z.object({
   directTools: z.number().int().min(1).max(64).default(16),
   costUsd: z.number().positive().optional(),
   temperature: z.number().min(0).max(1).default(0),
+  thinkingTokens: z.number().int().min(0).max(8192).default(1024),
 }).strict().refine(c => c.finalReserveMs < c.activeMs && c.finalReserveTokens <= c.outputTokens,
   "Final reserves must fit the active deadline and output limit.");
 export type V2Budget = z.infer<typeof v2BudgetSchema>;
@@ -27,7 +33,7 @@ export function resolveV2Budget(env: NodeJS.ProcessEnv = process.env): V2Budget 
     modelTurns: "MODEL_TURNS", toolCalls: "TOOL_CALLS", attempts: "ATTEMPTS", concurrency: "CONCURRENCY",
     toolOutputBytes: "TOOL_OUTPUT_BYTES", contextBytes: "CONTEXT_BYTES", totalTokens: "TOTAL_TOKENS",
     outputTokens: "OUTPUT_TOKENS", finalReserveTokens: "FINAL_RESERVE_TOKENS", readRetries: "READ_RETRIES",
-    directTools: "DIRECT_TOOLS", costUsd: "COST_USD", temperature: "TEMPERATURE" };
+    directTools: "DIRECT_TOOLS", costUsd: "COST_USD", temperature: "TEMPERATURE", thinkingTokens: "THINKING_TOKENS" };
   return v2BudgetSchema.parse(Object.fromEntries(Object.entries(names).flatMap(([key, suffix]) => {
     const value = env[`DELEGATE_V2_${suffix}`];
     return value === undefined ? [] : [[key, Number(value)]];

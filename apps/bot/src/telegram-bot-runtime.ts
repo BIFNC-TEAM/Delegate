@@ -1,47 +1,25 @@
 import "dotenv/config";
 
 import { demoRepresentative } from "@delegate/domain";
-import { generateRepresentativeReply } from "@delegate/model-runtime";
-import { Channel } from "@prisma/client";
 import {
-  advanceStructuredCollector,
-  beginStructuredCollector,
-  createConversationPlan,
-  formatComputeUsageExamples,
-  formatStructuredCollectorPrompt,
-  formatStructuredCollectorSummary,
-  renderReplyPreview,
-  parseComputeRequest,
-  resolveCollectorSubagent,
-  resolveComputeSubagent,
-  resolveConversationSubagent,
-  resolveTelegramGroupHandling,
-  shouldStartStructuredCollector,
-  type ConversationPlan,
-  type StructuredCollectorState,
+  resolveTelegramGroupHandling
 } from "@delegate/runtime";
 import {
+  ChannelUnavailableError,
   acceptInboundConversationMessage,
   assertConversationChannelDeliveryAvailable,
-  ChannelUnavailableError,
-  contactMemorySharingConsentContractVersion,
   consumeIdentityBindingChallenge,
-  createAudienceComputeSession,
+  contactMemorySharingConsentContractVersion,
   createContactMemorySharingChallenge,
   editConversationMessage,
-  executeAudienceTool,
   grantContactMemorySharingConsent,
   privateChannelIdentityProviders,
   readContactMemorySharingChallengeToken,
-  revokeContactMemorySharingConsent,
+  revokeContactMemorySharingConsent
 } from "@delegate/web-data";
+import { Channel } from "@prisma/client";
 import { Bot, InlineKeyboard } from "grammy";
 
-import { botLifecycleHooks } from "./lifecycle-hooks";
-import {
-  resolveTelegramConversationPlatformMode,
-  shouldFailClosedAfterConversationPlatformWrite,
-} from "./conversation-platform-mode";
 import {
   buildRepresentativeWebRechargeUrl,
   buildTelegramBotCommands,
@@ -49,34 +27,38 @@ import {
   resolveTelegramInlineKeyboardUrl,
 } from "./commerce-ux";
 import {
-  buildHandoffPreparation,
-  clearStructuredCollectorState,
+  resolveTelegramConversationPlatformMode,
+  shouldFailClosedAfterConversationPlatformWrite,
+} from "./conversation-platform-mode";
+import { prisma } from "./prisma";
+import { getRepresentativeRuntimeConfig } from "./representative-config";
+import {
   findTelegramInboundMessageEditTarget,
   getActiveRepresentativeSlugForChat,
   getConversationContext,
   getDefaultRepresentativeSlugForTelegramBot,
-  getRecentConversationTurns,
-  maybeCreateHandoffRequest,
   persistAndProcessTelegramSuccessfulPayment,
-  recordModelUsage,
-  recordComputeInboundTurn,
-  recordComputeReply,
-  recordInboundTurn,
-  recordOutboundReply,
-  setActiveComputeSession,
-  setActiveRepresentativeForChat,
-  setStructuredCollectorState,
-  submitStructuredCollector,
-  synchronizeTelegramBotChannelBindings,
   retryPendingTelegramSuccessfulPayments,
-  updateStructuredCollectorState,
-  validatePendingInvoice,
+  setActiveRepresentativeForChat,
+  synchronizeTelegramBotChannelBindings,
+  validatePendingInvoice
 } from "./runtime-store";
-import { prisma } from "./prisma";
-import { getRepresentativeRuntimeConfig } from "./representative-config";
 import {
-  recallOpenVikingContext,
-} from "./openviking-runtime";
+  ensureTelegramMemoryDisclosure,
+  resolveTelegramProviderOccurredAt,
+  telegramContactMemoryDeleteText,
+} from "./telegram-memory";
+import {
+  TelegramMessageEditLeaseLostError,
+  TelegramMessageEditNotDurableError,
+  TelegramMessageEditRetryableError,
+  TelegramMessageEditTerminalError,
+  lockTelegramMessageEditLease,
+  persistAndProcessTelegramMessageEdit,
+  retryPendingTelegramMessageEdits,
+  type TelegramMessageEditEvent,
+  type TelegramMessageEditLease,
+} from "./telegram-message-edit-inbox";
 import {
   buildTelegramUpdateMetadata,
   handleTelegramMiddlewareError,
@@ -91,22 +73,6 @@ import {
   runWithTelegramRuntimeContext,
   type TelegramRuntimeContext,
 } from "./telegram-runtime-context";
-import {
-  ensureTelegramMemoryDisclosure,
-  resolveTelegramProviderOccurredAt,
-  telegramContactMemoryDeleteText,
-} from "./telegram-memory";
-import {
-  lockTelegramMessageEditLease,
-  persistAndProcessTelegramMessageEdit,
-  retryPendingTelegramMessageEdits,
-  TelegramMessageEditLeaseLostError,
-  TelegramMessageEditNotDurableError,
-  TelegramMessageEditRetryableError,
-  TelegramMessageEditTerminalError,
-  type TelegramMessageEditEvent,
-  type TelegramMessageEditLease,
-} from "./telegram-message-edit-inbox";
 
 export type TelegramBotRuntimeConfig = {
   internalConnectionId: string;
@@ -687,24 +653,7 @@ bot.command("compute", async (ctx) => {
     return;
   }
 
-  const parsed = parseComputeRequest(rawText);
-  if (!parsed) {
-    await ctx.reply(
-      [
-        "用法示例：",
-        formatComputeUsageExamples(),
-      ].join("\n"),
-    );
-    return;
-  }
 
-  const representativeSlug = await resolveRepresentativeSlugForChat(ctx.chat.type, ctx.chat.id);
-  await handleComputeRequest({
-    ctx,
-    representativeSlug,
-    parsed,
-    rawText,
-  });
 });
 
 bot.callbackQuery("plans:show", async (ctx) => {
@@ -858,10 +807,7 @@ bot.on("message:text", async (ctx) => {
 
   const text = stripBotMention(rawText, me.username);
   const channel = mapMessageToChannel(ctx.chat.type, isReplyToBot);
-  const runtimeChannel =
-    isPrivate ? "private_chat" : isReplyToBot ? "group_reply" : "group_mention";
   const normalizedText = text.length > 0 ? text : rawText;
-  const inlineComputeRequest = isPrivate ? parseComputeRequest(normalizedText) : null;
 
   let conversationContext:
     | Awaited<ReturnType<typeof getConversationContext>>
@@ -895,7 +841,7 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
-  if (conversationPlatformMode === "worker" && !isPrivate) {
+  if (!isPrivate) {
     await ctx.reply("当前统一会话版本仅支持 Telegram 私聊，请在私聊中继续。");
     return;
   }
@@ -921,7 +867,7 @@ bot.on("message:text", async (ctx) => {
   if (
     isPrivate
     && conversationContext
-    && (conversationPlatformMode === "worker" || conversationPlatformMode === "shadow")
+    && conversationPlatformMode === "worker"
   ) {
     try {
       const inboundInput = {
@@ -957,365 +903,10 @@ bot.on("message:text", async (ctx) => {
         );
         return;
       }
-      console.warn("Telegram conversation shadow-write failed:", error);
     }
   }
 
-  const plan = createConversationPlan({
-    text: normalizedText,
-    channel: runtimeChannel,
-    representative,
-    usage:
-      conversationContext?.usage ?? {
-        freeRepliesUsed: 0,
-        passUnlocked: false,
-        deepHelpUnlocked: false,
-      },
-  });
-  const planSubagent = resolveConversationSubagent(plan);
 
-  if (conversationContext?.collectorState) {
-    const collectorPlan = buildCollectorConversationPlan(conversationContext.collectorState);
-    const collectorSubagent = resolveCollectorSubagent(conversationContext.collectorState);
-
-    await recordInboundTurn({
-      context: conversationContext,
-      plan: collectorPlan,
-      text: normalizedText,
-      subagentId: collectorSubagent.id,
-    });
-
-    if (isCollectorCancelMessage(normalizedText)) {
-      await clearStructuredCollectorState(conversationContext);
-
-      const replyText = [
-        representative.name,
-        representative.tagline,
-        "已停止当前结构化采集。你可以重新描述需求，我会判断是继续 FAQ、重新开始报价采集，还是转人工。",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-
-      await ctx.reply(replyText);
-      await recordOutboundReply({
-        context: conversationContext,
-        plan: collectorPlan,
-        messageText: replyText,
-        subagentId: collectorSubagent.id,
-      });
-      return;
-    }
-
-    const advanced = advanceStructuredCollector(
-      conversationContext.collectorState,
-      normalizedText,
-    );
-
-    if (!advanced.state) {
-      await clearStructuredCollectorState(conversationContext);
-      await ctx.reply("当前 intake 状态不可恢复，我已经先结束这轮采集。请重新描述你的需求。");
-      return;
-    }
-
-    if (!advanced.completed) {
-      await updateStructuredCollectorState({
-        context: conversationContext,
-        collectorState: advanced.state,
-      });
-
-      const replyText = [
-        representative.name,
-        representative.tagline,
-        formatStructuredCollectorPrompt(advanced.state),
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-
-      await ctx.reply(
-        replyText,
-        buildPlanReplyOptions(collectorPlan, representative.slug),
-      );
-      await recordOutboundReply({
-        context: conversationContext,
-        plan: collectorPlan,
-        messageText: replyText,
-        subagentId: collectorSubagent.id,
-      });
-      return;
-    }
-
-    const submitted = await submitStructuredCollector({
-      context: conversationContext,
-      collectorState: advanced.state,
-    });
-
-    const completionNote = "需求描述已经整理完成。";
-    const requestStatusNote = submitted.serviceRequestId
-      ? `已创建服务请求：${submitted.serviceRequestId}`
-      : "结构化摘要已保存；本次未重复创建服务请求。";
-    const replyText = [
-      representative.name,
-      representative.tagline,
-      completionNote,
-      formatStructuredCollectorSummary(advanced.state),
-      requestStatusNote,
-      "联系人、预算、时间等补充信息由真人接手后继续询问。",
-      submitted.recommendedOwnerAction,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-
-    await ctx.reply(
-      replyText,
-      buildPlanReplyOptions(collectorPlan, representative.slug),
-    );
-    await recordOutboundReply({
-      context: conversationContext,
-      plan: collectorPlan,
-      messageText: replyText,
-      subagentId: collectorSubagent.id,
-    });
-    return;
-  }
-
-  if (inlineComputeRequest && conversationContext) {
-    await handleComputeRequest({
-      ctx,
-      representativeSlug,
-      parsed: inlineComputeRequest,
-      rawText: normalizedText,
-      representative,
-      conversationContext,
-    });
-    return;
-  }
-
-  const recalled = conversationContext
-    ? await recallOpenVikingContext({
-        context: conversationContext,
-        queryText: normalizedText,
-      })
-    : [];
-
-  if (conversationContext) {
-    await recordInboundTurn({
-      context: conversationContext,
-      plan,
-      text: normalizedText,
-      subagentId: planSubagent.id,
-    });
-  }
-
-  if (conversationContext && shouldStartStructuredCollector(plan)) {
-    const collector = beginStructuredCollector({
-      plan,
-      channel: runtimeChannel,
-    });
-
-    await setStructuredCollectorState({
-      context: conversationContext,
-      collectorState: collector,
-    });
-
-    const replyText = [
-      representative.name,
-      representative.tagline,
-      formatStructuredCollectorPrompt(collector),
-      "如果你想中途结束，直接发送 取消 即可。",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-
-    const replyMarkup = buildPlanKeyboardForConversation(
-      plan,
-      representative.slug,
-    );
-    await ctx.reply(replyText, replyMarkup ? { reply_markup: replyMarkup } : {});
-
-    await recordOutboundReply({
-      context: conversationContext,
-      plan,
-      messageText: replyText,
-      subagentId: planSubagent.id,
-    });
-    return;
-  }
-
-  const handoff = conversationContext
-    ? await (async () => {
-        const prepared =
-          plan.disposition === "handoff"
-            ? buildHandoffPreparation({
-                plan,
-                text: normalizedText,
-              })
-            : null;
-
-        if (prepared) {
-          await botLifecycleHooks.emit({
-            kind: "handoff_prepared",
-            scope: {
-              representativeId: conversationContext.representativeId,
-              representativeSlug: conversationContext.representativeSlug,
-              contactId: conversationContext.contactId,
-              conversationId: conversationContext.conversationId,
-            },
-            subagentId: planSubagent.id,
-            intent: plan.intent,
-            disposition: plan.disposition,
-            priority: prepared.priority,
-            summary: prepared.summary,
-            ownerAction: prepared.ownerAction,
-          });
-        }
-
-        return maybeCreateHandoffRequest({
-          context: conversationContext,
-          plan,
-          text: normalizedText,
-          ...(prepared ? { prepared } : {}),
-        });
-      })()
-    : null;
-
-  const fallbackReplyText = [
-    renderReplyPreview(representative, plan),
-    handoff ? `已创建 owner inbox 收件项：${handoff.id}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-  let replyText = fallbackReplyText;
-  if (plan.disposition === "answer") {
-    const recentTurns = conversationContext
-      ? await getRecentConversationTurns({
-          conversationId: conversationContext.conversationId,
-          limit: 6,
-        })
-      : [];
-    const generated = await generateRepresentativeReply({
-      representative,
-      plan,
-      subagent: planSubagent,
-      userText: normalizedText,
-      recalled,
-      recentTurns,
-      collectorState: conversationContext?.collectorState ?? null,
-    });
-
-    if (conversationContext && generated.contextTrace) {
-      await botLifecycleHooks.emit({
-        kind: "model_context_assembled",
-        scope: {
-          representativeId: conversationContext.representativeId,
-          representativeSlug: conversationContext.representativeSlug,
-          contactId: conversationContext.contactId,
-          conversationId: conversationContext.conversationId,
-        },
-        subagentId: planSubagent.id,
-        provider: generated.provider ?? "openai",
-        model: generated.model ?? "gpt-5-mini",
-        estimatedInputTokens: generated.contextTrace.estimatedInputTokens,
-        segments: generated.contextTrace.segments,
-        selectedKnowledgeTitles: generated.contextTrace.selectedKnowledgeTitles,
-        selectedMemoryUseItemIds:
-          generated.contextTrace.selectedMemoryUseItemIds,
-      });
-    }
-
-    if (generated.ok) {
-      replyText = [generated.replyText, handoff ? `已创建 owner inbox 收件项：${handoff.id}` : null]
-        .filter(Boolean)
-        .join("\n\n");
-
-      if (conversationContext && generated.usage) {
-        await recordModelUsage({
-          context: conversationContext,
-          provider: generated.provider,
-          model: generated.model,
-          ...(typeof generated.usage.inputTokens === "number"
-            ? { inputTokens: generated.usage.inputTokens }
-            : {}),
-          ...(typeof generated.usage.outputTokens === "number"
-            ? { outputTokens: generated.usage.outputTokens }
-            : {}),
-          ...(typeof generated.usage.totalTokens === "number"
-            ? { totalTokens: generated.usage.totalTokens }
-            : {}),
-          ...(generated.usage.responseId ? { responseId: generated.usage.responseId } : {}),
-          ...(typeof generated.usage.costCents === "number"
-            ? { costCents: generated.usage.costCents }
-            : {}),
-          ...(typeof generated.usage.estimatedCostUsd === "number"
-            ? { estimatedCostUsd: generated.usage.estimatedCostUsd }
-            : {}),
-        });
-      }
-
-      if (conversationContext) {
-        await botLifecycleHooks.emit({
-          kind: "model_reply_completed",
-          scope: {
-            representativeId: conversationContext.representativeId,
-            representativeSlug: conversationContext.representativeSlug,
-            contactId: conversationContext.contactId,
-            conversationId: conversationContext.conversationId,
-          },
-          subagentId: planSubagent.id,
-          provider: generated.provider,
-          model: generated.model,
-          success: true,
-          ...(generated.usage?.responseId ? { responseId: generated.usage.responseId } : {}),
-          ...(typeof generated.usage?.inputTokens === "number"
-            ? { inputTokens: generated.usage.inputTokens }
-            : {}),
-          ...(typeof generated.usage?.outputTokens === "number"
-            ? { outputTokens: generated.usage.outputTokens }
-            : {}),
-          ...(typeof generated.usage?.totalTokens === "number"
-            ? { totalTokens: generated.usage.totalTokens }
-            : {}),
-          estimatedInputTokens: generated.contextTrace.estimatedInputTokens,
-        });
-      }
-
-    } else {
-      console.warn("Model runtime fallback:", generated.reason);
-      if (conversationContext) {
-        await botLifecycleHooks.emit({
-          kind: "model_reply_completed",
-          scope: {
-            representativeId: conversationContext.representativeId,
-            representativeSlug: conversationContext.representativeSlug,
-            contactId: conversationContext.contactId,
-            conversationId: conversationContext.conversationId,
-          },
-          subagentId: planSubagent.id,
-          provider: generated.provider ?? "openai",
-          model: generated.model ?? "gpt-5-mini",
-          success: false,
-          reason: generated.reason,
-          ...(typeof generated.contextTrace?.estimatedInputTokens === "number"
-            ? { estimatedInputTokens: generated.contextTrace.estimatedInputTokens }
-            : {}),
-        });
-      }
-    }
-  }
-
-  const replyMarkup = buildPlanKeyboardForConversation(
-    plan,
-    representative.slug,
-  );
-  await ctx.reply(replyText, replyMarkup ? { reply_markup: replyMarkup } : {});
-
-  if (conversationContext) {
-    await recordOutboundReply({
-      context: conversationContext,
-      plan,
-      messageText: replyText,
-      subagentId: planSubagent.id,
-    });
-  }
 });
 
 bot.catch((error) => {
@@ -1574,31 +1165,6 @@ function buildPlansKeyboard(
   return buildWebRechargeKeyboard("打开 Web 充值", rechargeUrl);
 }
 
-function buildPlanKeyboardForConversation(
-  plan: ConversationPlan,
-  representativeSlug: string,
-): InlineKeyboard | undefined {
-  if (plan.suggestedPlan) {
-    const rechargeUrl = buildRepresentativeWebRechargeUrl(
-      representativeSlug,
-    );
-    return buildWebRechargeKeyboard("在 Web 继续服务", rechargeUrl);
-  }
-
-  return undefined;
-}
-
-function buildPlanReplyOptions(
-  plan: ConversationPlan,
-  representativeSlug: string,
-) {
-  const replyMarkup = buildPlanKeyboardForConversation(
-    plan,
-    representativeSlug,
-  );
-  return replyMarkup ? { reply_markup: replyMarkup } : {};
-}
-
 function parseStartPayload(
   payload: string | undefined,
   defaultRepresentativeSlug: string,
@@ -1682,39 +1248,6 @@ function buildDisplayName(
   return value ? { displayName: value } : {};
 }
 
-function buildCollectorConversationPlan(
-  collectorState: StructuredCollectorState,
-): ConversationPlan {
-  return {
-    goal: "create_request",
-    intent: collectorState.intent,
-    audienceRole: "lead",
-    disposition: "collect",
-    actions: [
-      {
-        id: `collect_request_description:${collectorState.intent}`,
-        kind: "collect_request_description",
-        status: "planned",
-        sideEffect: "internal_record",
-      },
-      {
-        id: `create_service_request:${collectorState.intent}`,
-        kind: "create_service_request",
-        status: "planned",
-        sideEffect: "internal_record",
-      },
-    ],
-    ...(collectorState.suggestedPlan ? { suggestedPlan: collectorState.suggestedPlan } : {}),
-    reasons: ["Active structured collector in progress."],
-    responseOutline: [formatStructuredCollectorPrompt(collectorState)],
-  };
-}
-
-function isCollectorCancelMessage(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return normalized === "取消" || normalized === "cancel" || normalized === "stop";
-}
-
 async function resolveRepresentativeSlugForChat(
   chatType: string,
   chatId: number | string,
@@ -1730,143 +1263,6 @@ async function resolveRepresentativeSlugForChat(
   });
 }
 
-async function handleComputeRequest(params: {
-  ctx: any;
-  representativeSlug: string;
-  parsed: ReturnType<typeof parseComputeRequest>;
-  rawText: string;
-  representative?: Awaited<ReturnType<typeof getRepresentativeRuntimeConfig>>;
-  conversationContext?: Awaited<ReturnType<typeof getConversationContext>>;
-}) {
-  const parsed = params.parsed;
-  if (!parsed || !params.ctx.from || params.ctx.chat.type !== "private") {
-    return;
-  }
-
-  const representative =
-    params.representative ?? (await getRepresentativeRuntimeConfig(params.representativeSlug));
-  const conversationContext =
-    params.conversationContext ??
-    (await getConversationContext(params.representativeSlug, {
-      telegramUserId: params.ctx.from.id,
-      ...(params.ctx.from.username ? { username: params.ctx.from.username } : {}),
-      ...buildDisplayName(params.ctx.from.first_name, params.ctx.from.last_name),
-      chatId: params.ctx.chat.id,
-      channel: Channel.PRIVATE_CHAT,
-    }));
-  await assertConversationChannelDeliveryAvailable({
-    conversationId: conversationContext.conversationId,
-    channel: "telegram",
-  });
-  const computeSubagent = resolveComputeSubagent(parsed.capability);
-
-  if (!conversationContext.compute.enabled) {
-    const replyText = [
-      representative.name,
-      representative.tagline,
-      "这个代表的隔离 compute lane 目前还没有打开。你可以先继续问 FAQ、收资料，或者让 owner 在 dashboard 里启用 compute。",
-    ].join("\n\n");
-    await params.ctx.reply(replyText);
-    await recordComputeReply({
-      context: conversationContext,
-      messageText: replyText,
-      capability: parsed.capability,
-      outcome: "compute_disabled",
-      subagentId: computeSubagent.id,
-    });
-    return;
-  }
-
-  await recordComputeInboundTurn({
-    context: conversationContext,
-    text: params.rawText,
-    capability: parsed.capability,
-    subagentId: computeSubagent.id,
-  });
-
-  try {
-    const session = await createAudienceComputeSession({
-      representativeId: conversationContext.representativeId,
-      contactId: conversationContext.contactId,
-      conversationId: conversationContext.conversationId,
-      subagentId: computeSubagent.id,
-      requestedCapabilities: [parsed.capability],
-      reason: `telegram:${parsed.capability}`,
-      requestedBaseImage: conversationContext.compute.baseImage,
-    });
-
-    await setActiveComputeSession({
-      conversationId: conversationContext.conversationId,
-      sessionId: session.session.id,
-    });
-
-    const execution = await executeAudienceTool(
-      session.session.id,
-      {
-        ...parsed,
-        subagentId: computeSubagent.id,
-        hasPaidEntitlement:
-          parsed.hasPaidEntitlement ||
-          conversationContext.usage.passUnlocked ||
-          conversationContext.usage.deepHelpUnlocked,
-      },
-    );
-
-    const replyText = formatComputeReply({
-      representativeName: representative.name,
-      representativeTagline: representative.tagline,
-      parsed,
-      result: execution,
-    });
-
-    await params.ctx.reply(replyText, buildComputeReplyOptions(execution, representative));
-    await recordComputeReply({
-      context: conversationContext,
-      messageText: replyText,
-      capability: parsed.capability,
-      outcome: execution.outcome,
-      subagentId: computeSubagent.id,
-    });
-  } catch (error) {
-    const replyText =
-      error instanceof Error
-        ? `Compute 请求暂时没跑起来：${error.message}`
-        : "Compute 请求暂时没跑起来，请稍后重试。";
-    await params.ctx.reply(replyText);
-    await recordComputeReply({
-      context: conversationContext,
-      messageText: replyText,
-      capability: parsed.capability,
-      outcome: "compute_error",
-      subagentId: computeSubagent.id,
-    });
-  }
-}
-
-function buildComputeReplyOptions(
-  result: Awaited<ReturnType<typeof executeAudienceTool>>,
-  representative: Awaited<ReturnType<typeof getRepresentativeRuntimeConfig>>,
-) {
-  if (
-    result.outcome === "blocked"
-    || result.outcome === "pending_approval"
-    || result.outcome === "failed"
-  ) {
-    const rechargeUrl = buildRepresentativeWebRechargeUrl(
-      representative.slug,
-    );
-    const rechargeKeyboard = buildWebRechargeKeyboard(
-      "在 Web 继续服务",
-      rechargeUrl,
-    );
-    return rechargeKeyboard
-      ? { reply_markup: rechargeKeyboard }
-      : {};
-  }
-
-  return {};
-}
-
 function buildWebRechargeKeyboard(
   label: string,
   rechargeUrl: string | null,
@@ -1875,61 +1271,6 @@ function buildWebRechargeKeyboard(
   return buttonUrl
     ? new InlineKeyboard().url(label, buttonUrl)
     : undefined;
-}
-
-function formatComputeReply(params: {
-  representativeName: string;
-  representativeTagline: string;
-  parsed: NonNullable<ReturnType<typeof parseComputeRequest>>;
-  result: Awaited<ReturnType<typeof executeAudienceTool>>;
-}) {
-  const header = [params.representativeName, params.representativeTagline].join("\n\n");
-  if (params.result.outcome === "pending_approval") {
-    return [
-      header,
-      `这次 ${params.parsed.capability} 请求已经进入 owner 审批队列。`,
-      params.result.approvalRequest
-        ? `审批项：${params.result.approvalRequest.requestedActionSummary}\n风险：${params.result.approvalRequest.riskSummary}`
-        : "命令已被策略挡住，等待人工确认后才会继续执行。",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
-  if (params.result.outcome === "blocked") {
-    return [
-      header,
-      "这次 compute 请求被当前策略直接挡住了，没有进入执行。",
-      "如需继续，请调整能力策略或请求 owner 协助。",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
-  const artifactSummary =
-    params.result.artifacts.length > 0
-      ? params.result.artifacts
-          .map((artifact) => `${artifact.kind}: ${artifact.summary ?? artifact.objectKey}`)
-          .join("\n")
-      : "这次没有生成可展示的 artifact。";
-
-  if (params.result.outcome === "failed") {
-    return [
-      header,
-      `这次 ${params.parsed.capability} 已经执行，但返回了失败状态。`,
-      artifactSummary,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
-  return [
-    header,
-    `这次 ${params.parsed.capability} 已经在隔离 compute plane 里跑完。`,
-    artifactSummary,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
 }
 
 }

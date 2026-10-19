@@ -1,5 +1,7 @@
 # V2 本地部署记录
 
+> 本文保留该阶段的实际验收记录。当前新请求统一走 V2；旧白名单和回退旧循环的说明仅适用于当时版本，最新入口及部署边界见[清理与切换](agent-v2-cleanup.md)。
+
 2026-10-19，分支 `codex/agent-architecture`，worktree `/Users/neo/.codex/worktrees/agent-v2/Delegate`。
 
 ## 验收入口

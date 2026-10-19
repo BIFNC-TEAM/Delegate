@@ -12,7 +12,8 @@ import { buildWebConversationThreadId } from "../src/web-audience";
 import { recordMemoryUseSearchHits, startOrReuseMemoryUseRun } from "../src/memory-use-execution";
 import { prisma } from "../src/prisma";
 import { getPublicConversationArtifactDownload } from "../src/public-compute-artifacts";
-import { DelegatePiAgentRuntime, executionScopeHash } from "../../model-runtime/src/pi";
+import { DelegateAgentV2 } from "../../model-runtime/src/v2";
+import { Type } from "../../model-runtime/tests/faux-source-fixture";
 import { prisma as brokerDb } from "../../../apps/compute-broker/src/prisma";
 import { createComputeSession } from "../../../apps/compute-broker/src/sessions";
 import { executeTool, resolveApproval, processNextApprovedExecution } from "../../../apps/compute-broker/src/executions";
@@ -114,17 +115,12 @@ suite("Agent source authorization on real isolated PostgreSQL", () => {
     await expect(prisma.representativeVersionResource.deleteMany({ where: { publishedVersionId: f.versionId } })).rejects.toThrow();
     await expect(guard.check("resume", guard.snapshot())).resolves.toBeUndefined();
   });
-  it("feeds no old checkpoint text, arguments, summaries or artifact names to the real Pi boundary after revocation", async () => {
+  it("blocks the V2 model boundary after knowledge revocation", async () => {
     const f = await fixture(); const guard = await createAgentContextAuthorization(f.input); const knowledge = await addKnowledge(f, true); await guard.registerKnowledge(knowledge.runId, [knowledge.itemId]);
-    const stream = vi.fn(); const input = { runId: f.runId, sessionId: f.conversationId, conversationId: f.conversationId, userId: f.audienceId, userText: f.input.userText,
-      representative: { id: f.repId, versionId: f.versionId, name: "Synthetic", role: "Assistant" }, contextAuthorization: guard,
-      model: { provider: "synthetic", modelId: "synthetic", model: {} as never, streamFn: stream } };
-    const checkpoint = { version: 2 as const, replaySourcesTracked: true, runId: f.runId, sessionId: f.conversationId, scopeHash: executionScopeHash(input), goal: input.userText, contextAuthorization: guard.snapshot(),
-      turnsUsed: 0, activeMs: 0, pending: { approvalId: "synthetic", callId: "pending", toolName: "execute_in_sandbox" }, messages: [],
-      observations: [{ callId: "pending", toolName: "execute_in_sandbox", status: "pending_approval", text: canary, sources: [], artifacts: [] }] };
+    const stream = vi.fn();
     await prisma.knowledgeAsset.update({ where: { id: f.assetId }, data: { status: "ARCHIVED", archivedAt: new Date() } });
-    const result = await new DelegatePiAgentRuntime().run({ ...input, checkpoint, approvedToolResult: { approvalId: "synthetic", toolName: "execute_in_sandbox", status: "completed", text: canary } });
-    expect(result.contextAuthorizationBlocked).toBe(true); expect(stream).not.toHaveBeenCalled(); expect(result.messages).toEqual([]); expect(result.text).not.toContain(canary);
+    const result = await runV2WithGuard(f, guard, stream);
+    expect(result.error).toBe("permission_denied"); expect(stream).not.toHaveBeenCalled(); expect(result.sources).toEqual([]); expect(result.text).not.toContain(canary);
   });
   it("does not run an approved derived script after its source is withdrawn; approval fact is retained", async () => {
     Object.assign(computeBrokerConfig.tencent, { apiKey: "synthetic", domain: "synthetic.invalid", allInOneTool: "synthetic" });
@@ -260,10 +256,8 @@ suite("Agent source authorization on real isolated PostgreSQL", () => {
     if (change === "artifact_changed") await prisma.artifact.update({ where: { id: f.artifact.id }, data: { objectKey: "changed-object" } });
     if (change === "retention_expired") await prisma.artifact.update({ where: { id: f.artifact.id }, data: { retentionUntil: new Date(1) } });
     if (change === "audience_changed") await prisma.conversation.update({ where: { id: f.conversationId }, data: { audienceIdentityId: null } });
-    const stream = vi.fn(); const run = await new DelegatePiAgentRuntime().run({ runId: f.runId, sessionId: f.conversationId, userText: "Continue",
-      representative: { id: f.repId, versionId: f.versionId, name: "Synthetic", role: "Assistant" }, contextAuthorization: f.guard,
-      model: { model: {} as never, provider: "synthetic", modelId: "synthetic", streamFn: stream } });
-    expect(run.contextAuthorizationBlocked).toBe(true); expect(stream).not.toHaveBeenCalled();
+    const stream = vi.fn(); const run = await runV2WithGuard(f, f.guard, stream);
+    expect(run.error).toBe("permission_denied"); expect(stream).not.toHaveBeenCalled();
     storage.read.mockClear();
     expect(await getPublicConversationArtifactDownload({ representativeSlug: f.slug, artifactId: f.artifact.id, audienceIdentityId: f.audienceId })).toBeNull();
     expect(storage.read).not.toHaveBeenCalled(); expect(await prisma.ledgerEntry.count({ where: { sessionId: f.session.id } })).toBe(0);
@@ -284,37 +278,24 @@ suite("Agent source authorization on real isolated PostgreSQL", () => {
     const receipt = (await prisma.toolExecution.findUniqueOrThrow({ where: { id: f.execution.id } })).sourceReceipt;
     expect(JSON.stringify(receipt)).not.toContain(canary); expect(JSON.stringify(receipt)).not.toContain("SYNTHETIC_PRIVATE_REQUEST_ARGUMENT");
   });
-  it("resumes twice with DB-authorized remote evidence without reexecuting completed steps, then blocks after withdrawal", async () => {
-    const f = await remoteFixture(); const contextInputs: unknown[] = []; const dispatch = vi.fn();
-    const makeModel = (messages: any[]) => { const provider = fauxProvider({ tokensPerSecond: 100000 }); provider.setResponses(messages); const models = createModels(); models.setProvider(provider.provider);
-      return { model: provider.getModel(), streamFn: models.streamSimple.bind(models), provider: "faux", modelId: provider.getModel().id }; };
-    const sourceRef = await f.guard.registerToolResult(f.execution.id);
-    const input = { runId: f.runId, sessionId: f.conversationId, conversationId: f.conversationId, userId: f.audienceId,
-      userText: f.input.userText, contextAuthorization: f.guard, representative: { id: f.repId, versionId: f.versionId, name: "Synthetic", role: "Assistant" }, maxSteps: 8 };
-    const sandbox = { execute: dispatch.mockResolvedValue({ status: "pending_approval", text: "pending", details: { approvalId: "approval-1" } }) };
-    const mcp = { listTools: async () => [{ server: "fixture", name: "openmeteo_search_locations", description: "Synthetic public source", inputSchema: { type: "object", properties: {} }, readOnly: true, idempotent: true }],
-      callTool: vi.fn(async () => ({ status: "completed", text: canary, contextSourceRef: sourceRef! })) };
-    const first = await new DelegatePiAgentRuntime().run({ ...input, capabilities: { mcp, sandbox }, model: makeModel([
-      fauxAssistantMessage(fauxToolCall("mcp__fixture__openmeteo_search_locations", {}), { stopReason: "toolUse" }),
-      fauxAssistantMessage(fauxToolCall("execute_in_sandbox", { language: "python", code: "print(1)" }), { stopReason: "toolUse" }),
-    ]) });
-    expect(first.status).toBe("waiting_approval"); expect(first.checkpoint?.replaySourcesTracked).toBe(true);
-    const row = await prisma.generationRun.findUniqueOrThrow({ where: { id: f.runId } });
-    await prisma.generationRun.update({ where: { id: f.runId }, data: { contextSnapshot: { ...row.contextSnapshot as object,
-      piApprovalContinuation: { version: 2, status: "completed", approvalId: "approval-1", checkpoint: JSON.parse(JSON.stringify(first.checkpoint)) } } } });
-    const restored = await createAgentContextAuthorization({ ...f.input, restoring: true, checkpointProof: first.checkpoint!.contextAuthorization });
-    dispatch.mockResolvedValue({ status: "pending_approval", text: "pending", details: { approvalId: "approval-2" } });
-    const second = await new DelegatePiAgentRuntime().run({ ...input, contextAuthorization: restored, checkpoint: first.checkpoint!,
-      approvedToolResult: { approvalId: "approval-1", toolName: "execute_in_sandbox", status: "completed", text: "first action receipt" },
-      capabilities: { mcp, sandbox }, model: makeModel([(context: unknown) => { contextInputs.push(context); return fauxAssistantMessage(fauxToolCall("execute_in_sandbox", { language: "python", code: "print(2)" }), { stopReason: "toolUse" }); }]) });
-    expect(second.status).toBe("waiting_approval"); expect(second.checkpoint?.replaySourcesTracked).toBe(true);
-    expect(JSON.stringify(contextInputs)).toContain(canary); expect(mcp.callTool).toHaveBeenCalledOnce(); expect(dispatch).toHaveBeenCalledTimes(2);
-    await prisma.representativeMcpBinding.update({ where: { id: f.binding.id }, data: { enabled: false } });
-    const stream = vi.fn();
-    const third = await new DelegatePiAgentRuntime().run({ ...input, contextAuthorization: restored, checkpoint: second.checkpoint!,
-      approvedToolResult: { approvalId: "approval-2", toolName: "execute_in_sandbox", status: "completed", text: "second action receipt" },
-      capabilities: { mcp, sandbox }, model: { ...makeModel([]), streamFn: stream } });
-    expect(third.contextAuthorizationBlocked).toBe(true); expect(stream).not.toHaveBeenCalled(); expect(dispatch).toHaveBeenCalledTimes(2);
+  it("withholds a V2 tool result revoked between execution and model reuse", async () => {
+    const f = await remoteFixture(); const provider = fauxProvider({ tokensPerSecond: 100000 });
+    provider.setResponses([fauxAssistantMessage(fauxToolCall("read_reference", {}), { stopReason: "toolUse" })]);
+    const models = createModels(); models.setProvider(provider.provider);
+    const execute = vi.fn(async () => {
+      await f.guard.registerToolResult(f.execution.id);
+      await prisma.representativeMcpBinding.update({ where: { id: f.binding.id }, data: { enabled: false } });
+      return { text: canary };
+    });
+    const id = f.runId;
+    const result = await new DelegateAgentV2().run({ requestId: id, sessionId: f.conversationId, scope: id, userText: "Read the authorized reference", timezone: "UTC",
+      context: { traceId: id, runId: id, sessionId: f.conversationId, timezone: "UTC", attachments: [], idempotencyKey: id },
+      model: { model: provider.getModel(), provider: "faux", modelId: provider.getModel().id, streamFn: models.streamSimple.bind(models) },
+      authorize: boundary => f.guard.check(boundary),
+      tools: [{ name: "read_reference", label: "Reference", description: "Read an authorized reference", category: "mcp", effect: "read", parameters: Type.Object({}), execute }],
+    });
+    expect(result.error).toBe("permission_denied"); expect(result.modelCalls).toBe(1); expect(execute).toHaveBeenCalledOnce();
+    expect(result.text).not.toContain(canary); expect(result.sources).toEqual([]);
   });
   it("propagates a revoked remote dependency into a later derived action's artifact", async () => {
     const f = await remoteFixture(); await f.guard.registerToolResult(f.execution.id);
@@ -420,4 +401,10 @@ async function addKnowledge(f: Awaited<ReturnType<typeof fixture>>, asset = fals
   const hits = await recordMemoryUseSearchHits({ useRunId: use.run.id, hits: [{ sourceKind: "PUBLIC_KNOWLEDGE", publicKnowledgeProjectionId: projected.id }] });
   expect(hits.eligibleItems).toHaveLength(1);
   return { runId: use.run.id, itemId: hits.eligibleItems[0]!.memoryUseItemId, projectionId: projected.id };
+}
+
+async function runV2WithGuard(f: { runId: string; conversationId: string }, guard: Awaited<ReturnType<typeof createAgentContextAuthorization>>, streamFn: any) {
+  return new DelegateAgentV2().run({ requestId: f.runId, sessionId: f.conversationId, scope: f.runId, userText: "Continue", timezone: "UTC",
+    context: { traceId: f.runId, runId: f.runId, sessionId: f.conversationId, timezone: "UTC", attachments: [], idempotencyKey: f.runId },
+    model: { model: fauxProvider().getModel(), provider: "synthetic", modelId: "synthetic", streamFn }, tools: [], authorize: boundary => guard.check(boundary) });
 }

@@ -1,7 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn() }));
-vi.mock("../src/processor-pi", () => ({ buildPiAdapters: mocks.adapters, deliverGenerationOutput: mocks.deliver }));
+vi.mock("../src/agent-capabilities", () => ({ buildAgentCapabilities: mocks.adapters }));
+vi.mock("../src/generation-delivery", () => ({ deliverGenerationOutput: mocks.deliver }));
 vi.mock("@delegate/model-runtime/v2", async original => ({ ...await original<typeof import("@delegate/model-runtime/v2")>(),
   createV2ModelBindingFromEnv: () => ({ ok: true, binding: { provider: "faux", modelId: "faux" } }), delegateAgentV2: { run: mocks.run } }));
 vi.mock("@delegate/web-data", () => ({
@@ -12,7 +13,7 @@ vi.mock("@delegate/web-data", () => ({
   loadGenerationRecentTurns: mocks.history, loadGenerationV2Task: mocks.prior,
   projectPublicAnswerSources: (sources: unknown) => sources, readPublicExecution: () => [], updateGenerationPiProgress: async () => undefined, updateGenerationPiStream: mocks.stream,
 }));
-import { processV2ConversationTurn, shouldUseAgentV2 } from "../src/processor-v2";
+import { processV2ConversationTurn } from "../src/processor-v2";
 const makeHost = () => ({ config: {}, item: { runId: "run", conversationId: "conv", inputMessageId: "message", representativeSlug: "test", representativeName: "Test", representativeVersionId: "version", contactId: "contact", audienceIdentityId: "audience", channel: "web", userText: "test", accessMode: "FREE", inputAttachments: [] },
   setup: { id: "rep", ownerName: "Owner", tagline: "Assistant", tone: "concise" }, leaseGuard: { confirmOwned: vi.fn(async () => undefined) }, workLease: { outboxId: "outbox", leaseAttempt: 1 } });
 const usage = { modelTurns: 1, toolCalls: 0, attempts: 0, tokens: 10, inputTokens: 8, outputTokens: 2, costUsd: 0, activeMs: 5 };
@@ -25,15 +26,9 @@ beforeEach(() => {
     events: [], spans: [], calls: [], modelCalls: 1, toolCalls: 0, totalDurationMs: 5, usage, taskUsage: usage });
 });
 describe("V2 worker integration", () => {
-  it("requires explicit version and an exact representative allowlist", () => {
-    expect(shouldUseAgentV2("test", {})).toBe(false);
-    expect(shouldUseAgentV2("test", { DELEGATE_AGENT_VERSION: "v2" })).toBe(false);
-    expect(shouldUseAgentV2("test", { DELEGATE_AGENT_VERSION: "v2", DELEGATE_AGENT_V2_REPRESENTATIVES: "test-other" })).toBe(false);
-    expect(shouldUseAgentV2("test", { DELEGATE_AGENT_VERSION: "v2", DELEGATE_AGENT_V2_REPRESENTATIVES: "a, test" })).toBe(true);
-  });
   it("reuses delivery and preserves task counters without invoking the old runtime", async () => {
     await processV2ConversationTurn(makeHost() as any);
-    expect(mocks.adapters).toHaveBeenCalledWith(expect.objectContaining({ orchestration: "model_v2" }));
+    expect(mocks.adapters).toHaveBeenCalledWith(expect.objectContaining({ item: expect.objectContaining({ runId: "run" }) }));
     expect(mocks.complete).toHaveBeenCalledWith(expect.objectContaining({ intent: "agent_v2", agentTrace: expect.objectContaining({ runtime: "delegate-agent-v2", v2Task: expect.objectContaining({ inputMessageIds: ["message"], usage }) }) }));
     expect(mocks.deliver).toHaveBeenCalledOnce();
   });

@@ -1,3 +1,4 @@
+import { resolveV2ModelEnv } from "@delegate/model-runtime/v2";
 import { z } from "zod";
 
 import {
@@ -77,7 +78,7 @@ function sanitizeModelProvider(provider: string): ModelProvider | "unsupported" 
 export function resolveConversationWorkerModelReadiness(
   env: Record<string, string | undefined> = process.env,
 ): ConversationWorkerModelReadiness {
-  const runtime = resolveModelRuntimeEnv(env);
+  const runtime = resolveModelRuntimeEnv(resolveV2ModelEnv(env));
 
   return {
     state: runtime.state,
@@ -92,6 +93,7 @@ export function resolveConversationWorkerModelReadiness(
 export function resolveConversationWorkerConfig(
   env: Record<string, string | undefined> = process.env,
 ): ConversationWorkerConfig {
+  resolveV2ModelEnv(env);
   const matrixHomeserverUrl = env.MATRIX_HOMESERVER_URL?.trim() || undefined;
   const matrixApplicationServiceToken = env.MATRIX_AS_TOKEN?.trim() || undefined;
   const telegramBotToken = env.TELEGRAM_BOT_TOKEN?.trim() || undefined;

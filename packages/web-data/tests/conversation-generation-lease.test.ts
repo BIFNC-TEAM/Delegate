@@ -95,7 +95,6 @@ import {
   renewGenerationWorkItemLease,
   retryGenerationDelivery,
   updateGenerationTurnExecutionProgress,
-  pinGenerationPiExecutionProtocol,
   pinGenerationAgentVariant,
   cancelGenerationPendingApprovals,
 } from "../src/conversation-platform";
@@ -664,15 +663,25 @@ describe("conversation generation work leases", () => {
   });
 
   it.each([
-    [null, "goal_v2"],
-    [{ piExecutionProtocol: "legacy_v1" }, "legacy_v1"],
-    [{ piStream: { sequence: 1 } }, "legacy_v1"],
-    [{ piApprovalContinuation: { version: 1, approvalId: "a", status: "pending" } }, "legacy_v1"],
+    [null, "v2"],
+    [{ piExecutionProtocol: "legacy_v1" }, "pi"],
+    [{ piStream: { sequence: 1 } }, "pi"],
+    [{ piApprovalContinuation: { version: 1, approvalId: "a", status: "pending" } }, "pi"],
   ])("pins the execution loop under the current work lease", async (contextSnapshot, expected) => {
     mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.generationRun.findUnique.mockResolvedValue({ ...validRun, contextSnapshot });
-    expect(await pinGenerationPiExecutionProtocol({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 3 })).toBe(expected);
-    if ((contextSnapshot as any)?.piExecutionProtocol !== expected) expect(mocks.tx.generationRun.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ contextSnapshot: expect.objectContaining({ piExecutionProtocol: expected }) }) }));
+    expect(await pinGenerationAgentVariant({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 3 })).toBe(expected);
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ contextSnapshot: expect.objectContaining({ agentVariant: expected }) }) }));
+  });
+
+  it("terminally fails a retired run on its first lease and releases its reservation", async () => {
+    mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.generationRun.update.mockResolvedValue(validRun);
+    mocks.tx.memoryUseRun.findFirst.mockResolvedValue(null);
+    await failGenerationRun({ runId: validRun.id, conversationId: validRun.conversationId, outboxId: "outbox-stale", leaseAttempt: 1,
+      errorCode: "legacy_agent_runtime_retired", errorMessage: "Retired", retryable: false });
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "DEAD_LETTER" }) }));
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(expect.objectContaining({ expectedGenerationRunId: validRun.id, reason: "legacy_agent_runtime_retired" }), expect.anything());
   });
 
   it("cancels persisted approval waits and releases exactly their reservation", async () => {
@@ -689,11 +698,11 @@ describe("conversation generation work leases", () => {
   it("pins V2 and logical action identity only under the current lease", async () => {
     mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.generationRun.findUnique.mockResolvedValue({ ...validRun, contextSnapshot: { preserved: true } });
-    expect(await pinGenerationAgentVariant({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 3, preferV2: true })).toBe("v2");
+    expect(await pinGenerationAgentVariant({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 3 })).toBe("v2");
     expect(mocks.tx.generationRun.update).toHaveBeenCalledWith(expect.objectContaining({ data: { contextSnapshot: { preserved: true, agentVariant: "v2", piActionIdentityVersion: 1 } } }));
     mocks.tx.generationRun.update.mockClear();
     mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 0 });
-    await expect(pinGenerationAgentVariant({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 2, preferV2: true })).rejects.toBeInstanceOf(GenerationWorkLeaseLostError);
+    await expect(pinGenerationAgentVariant({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 2 })).rejects.toBeInstanceOf(GenerationWorkLeaseLostError);
     expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
   });
 

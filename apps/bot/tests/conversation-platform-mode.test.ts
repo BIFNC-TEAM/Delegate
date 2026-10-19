@@ -33,12 +33,13 @@ describe("Telegram conversation platform mode", () => {
     );
     const handlerSource = source.slice(source.indexOf('bot.on("message:text"'));
     const groupGate = handlerSource.indexOf(
-      'conversationPlatformMode === "worker" && !isPrivate',
+      '!isPrivate',
     );
     const legacyPlan = handlerSource.indexOf("const plan = createConversationPlan");
 
     expect(groupGate).toBeGreaterThan(-1);
-    expect(groupGate).toBeLessThan(legacyPlan);
+    expect(legacyPlan).toBe(-1);
+    expect(groupGate).toBeLessThan(handlerSource.indexOf("await acceptInboundConversationMessage"));
   });
 
   it("routes explicit compute commands through the worker-owned conversation platform", () => {
@@ -52,25 +53,10 @@ describe("Telegram conversation platform mode", () => {
     );
 
     expect(commandSource.indexOf('conversationPlatformMode === "worker"')).toBeGreaterThan(-1);
-    expect(commandSource.indexOf('conversationPlatformMode === "worker"')).toBeLessThan(
-      commandSource.indexOf("await handleComputeRequest"),
-    );
+    expect(commandSource).not.toContain("handleComputeRequest");
     expect(commandSource).toContain("await acceptInboundConversationMessage");
     expect(commandSource).toContain("queueGeneration: true");
     expect(commandSource).not.toContain("请从 Web 发起受控计算任务");
-  });
-
-  it("keeps an active structured collector ahead of inline compute parsing", () => {
-    const source = readFileSync(
-      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
-      "utf8",
-    );
-    const handlerSource = source.slice(source.indexOf('bot.on("message:text"'));
-
-    expect(handlerSource.indexOf("conversationContext?.collectorState")).toBeGreaterThan(-1);
-    expect(handlerSource.indexOf("conversationContext?.collectorState")).toBeLessThan(
-      handlerSource.indexOf("inlineComputeRequest && conversationContext"),
-    );
   });
 
   it("completes Telegram intake through the shared atomic transaction", () => {
@@ -93,17 +79,12 @@ describe("Telegram conversation platform mode", () => {
       new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
-    const computeSource = source.slice(
-      source.indexOf("async function handleComputeRequest"),
-      source.indexOf("function buildComputeReplyOptions"),
-    );
-
+    const computeSource = source.slice(source.indexOf('bot.command("compute"'), source.indexOf('bot.on("pre_checkout_query"'));
     expect(source).not.toContain("async function sendPlanInvoice");
     expect(source).not.toContain("createPlanInvoice");
+    expect(source).not.toContain("handleComputeRequest");
     expect(computeSource.indexOf("assertConversationChannelDeliveryAvailable")).toBeGreaterThan(-1);
-    expect(computeSource.indexOf("assertConversationChannelDeliveryAvailable")).toBeLessThan(
-      computeSource.indexOf("const session = await createAudienceComputeSession"),
-    );
+    expect(computeSource.indexOf("assertConversationChannelDeliveryAvailable")).toBeLessThan(computeSource.indexOf("await acceptInboundConversationMessage"));
   });
 
   it("always fails closed in worker mode", () => {

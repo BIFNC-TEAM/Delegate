@@ -53,7 +53,7 @@ import {
   type AgentUsageChargeSnapshot,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
-import { markPiApprovalContinuationPending, readPiApprovalContinuation } from "./pi-approval-continuation";
+import { markPiApprovalContinuationPending } from "./pi-approval-continuation";
 import { prisma } from "./prisma";
 import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
@@ -3737,44 +3737,24 @@ export async function cancelGenerationPendingApprovals(input: {
 }
 
 /** Pin once under the work lease so retries/approval continuations cannot switch loops. */
-export function resolveGenerationAgentVariant(snapshot: unknown, preferV2: boolean): "pi" | "v2" {
+export function resolveGenerationAgentVariant(snapshot: unknown): "pi" | "v2" {
   const value = isJsonRecord(snapshot) ? snapshot : {};
-  if (value.agentVariant === "v2" || value.agentVariant === "pi") return value.agentVariant;
-  if (value.piExecutionProtocol || value.agentTrace || value.piStream || readPiApprovalContinuation(value)) return "pi";
-  return preferV2 ? "v2" : "pi";
+  if (value.agentVariant === "pi" || value.piExecutionProtocol || value.piApprovalContinuation) return "pi";
+  if (value.agentVariant === "v2") return "v2";
+  if (value.agentTrace || value.piStream) return "pi";
+  return "v2";
 }
 
-export async function pinGenerationAgentVariant(input: { runId: string; outboxId: string; leaseAttempt: number; preferV2: boolean }): Promise<"pi" | "v2"> {
+export async function pinGenerationAgentVariant(input: { runId: string; outboxId: string; leaseAttempt: number }): Promise<"pi" | "v2"> {
   return runConversationWriteTransaction(async tx => {
     await fenceGenerationWorkLease(tx, input);
     const run = await tx.generationRun.findUnique({ where: { id: input.runId }, select: { contextSnapshot: true } });
     if (!run) throw new GenerationWorkLeaseLostError(input.outboxId, input.leaseAttempt);
     const snapshot = isJsonRecord(run.contextSnapshot) ? run.contextSnapshot : {};
-    const agentVariant = resolveGenerationAgentVariant(snapshot, input.preferV2);
+    const agentVariant = resolveGenerationAgentVariant(snapshot);
     await tx.generationRun.update({ where: { id: input.runId }, data: { contextSnapshot: { ...snapshot, agentVariant,
       ...(agentVariant === "v2" ? { piActionIdentityVersion: 1 } : {}) } } });
     return agentVariant;
-  });
-}
-
-/** Pin once under the work lease so retries/approval continuations cannot switch loops. */
-export async function pinGenerationPiExecutionProtocol(input: {
-  runId: string; outboxId: string; leaseAttempt: number;
-}): Promise<"legacy_v1" | "goal_v2"> {
-  return runConversationWriteTransaction(async tx => {
-    await fenceGenerationWorkLease(tx, input);
-    const run = await tx.generationRun.findUnique({ where: { id: input.runId }, select: { contextSnapshot: true } });
-    if (!run) throw new GenerationWorkLeaseLostError(input.outboxId, input.leaseAttempt);
-    const snapshot = isJsonRecord(run.contextSnapshot) ? run.contextSnapshot : {};
-    const continuation = readPiApprovalContinuation(snapshot);
-    const protocol = continuation?.version === 1 ? "legacy_v1"
-      : continuation?.version === 2 ? "goal_v2"
-      : snapshot.piExecutionProtocol === "legacy_v1" || snapshot.piExecutionProtocol === "goal_v2" ? snapshot.piExecutionProtocol
-      : snapshot.piStream || snapshot.agentTrace ? "legacy_v1" : "goal_v2";
-    const actionIdentityVersion = snapshot.piActionIdentityVersion === 1 || continuation?.checkpoint?.["actionIdentityVersion"] === 1 ? 1
-      : continuation || protocol === "legacy_v1" || snapshot.agentTrace || snapshot.piStream ? 0 : 1;
-    if (snapshot.piExecutionProtocol !== protocol || snapshot.piActionIdentityVersion !== actionIdentityVersion) await tx.generationRun.update({ where: { id: input.runId }, data: { contextSnapshot: { ...snapshot, piExecutionProtocol: protocol, piActionIdentityVersion: actionIdentityVersion } } });
-    return protocol;
   });
 }
 
@@ -8209,6 +8189,8 @@ export async function retryOperatorMessageDelivery(input: {
 }
 
 export async function failGenerationRun(input: {
+  /** Non-retryable retired protocols must never replay old effects. */
+  retryable?: boolean;
   conversationId: string;
   runId: string;
   outboxId: string;
@@ -8223,7 +8205,7 @@ export async function failGenerationRun(input: {
     `;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
     await fenceGenerationWorkLease(tx, input);
-    const terminalFailure = input.leaseAttempt >= GENERATION_WORK_MAX_ATTEMPTS;
+    const terminalFailure = input.retryable === false || input.leaseAttempt >= GENERATION_WORK_MAX_ATTEMPTS;
     if (terminalFailure) {
       await releaseConversationEntitlementByGenerationRunId(
         {

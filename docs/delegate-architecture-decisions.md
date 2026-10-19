@@ -2,7 +2,7 @@
 
 ## Status
 
-Directional architecture decisions captured on 2026-03-24 and reconciled with Agent Runtime V3 on 2026-08-21. The authoritative runtime protocol is [Agent Runtime V3](./agent-runtime-v3.md); this document retains broader product and stack tradeoffs.
+Directional architecture decisions captured on 2026-03-24 and reconciled with Agent Runtime V3 on 2026-08-21. The authoritative runtime protocol is [Agent Runtime V3](agent-v2-cleanup.md#历史实现); this document retains broader product and stack tradeoffs.
 
 ## Core shift
 
@@ -218,7 +218,7 @@ Next: collect lane-specific Shadow evidence, satisfy the executable release gate
 The phased implementation sequence that maps these decisions onto product delivery lives in [docs/roadmap.md](./roadmap.md).
 
 The detailed engineering breakdown for `V2: Isolated Compute Plane` lives in [docs/v2-isolated-compute-plane-plan.md](./v2-isolated-compute-plane-plan.md).
-The implemented planning and execution protocol lives in [docs/agent-runtime-v3.md](./agent-runtime-v3.md).
+The implemented planning and execution protocol lives in [docs/agent-runtime-v3.md](agent-v2-cleanup.md#历史实现).
 
 ## Sources
 

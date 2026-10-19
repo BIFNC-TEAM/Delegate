@@ -1,6 +1,6 @@
-# Agent V2 独立开发线
+# Agent V2 运行说明
 
-日期：2026-10-19。状态：可独立运行的实验版本，生产默认仍为原 Pi runtime。历史失败、后续修复和仍未验收的边界见 [验收记录](agent-v2-validation.md)。不把机制测试通过等同于模型能自主正确处理所有请求。
+日期：2026-10-19。V2 已验收，新请求统一使用 V2。旧编排已删除，历史任务和数据按[清理与切换说明](agent-v2-cleanup.md)保留。有限行为测试不代表任意任务均可靠。
 
 分支：`codex/agent-architecture`；基线：`0387c5f`。隔离 worktree：`/Users/neo/.codex/worktrees/agent-v2/Delegate`。原目录未跟踪的 reports/docs 保留，未带入本次开发线。
 
@@ -40,7 +40,7 @@ flowchart TD
 - 不调用知识查询重写、引用关键词过滤、附件专项 Skill 选择/恢复与输出文件名推断。
 - 不根据任务关键词隐藏/替换工具；大量目录仅提供通用词项发现和分页。
 
-唯一复用的旧 worker 导出是 `buildPiAdapters({ orchestration: "model_v2" })` 与渠道交付函数。该显式模式跳过上述适配器内的旧决策，并使用模型原始查询、授权正文和实际来源标识。它不是旧 runtime 的包裹层。旧默认模式保持原行为；用 import 边界测试防止 V2 core 引入旧决策模块。
+worker 通过 `agent-capabilities.ts` 复用授权检索和工具传输，通过 `generation-delivery.ts` 保留渠道交付。`processor.ts` 只负责认领、租约、确定性控制与 V2 入口，不再导入旧决策模块。
 
 ## 复用与安全边界
 
@@ -56,7 +56,7 @@ flowchart TD
 
 宿主确认脚本未提交，或受限 Python 已结束且输出格式被拒绝、没有发布文件时，可把结构化错误交回下一次正常模型响应，由模型决定修正参数；每次调用仍计预算。当前文件契约将完整 stdout 保存为唯一产物，日志必须写 stderr。未知执行结果、权限拒绝及交付完整性未确认不能借此重试，见[CSV 输出契约与真实恢复验证](agent-v2-csv-output-fix.md)。
 
-已有代表的 `answerScope=owner_and_domain` 或 `knowledgePolicy=domain_only` 在旧 worker 中要求专项语义审核。当前 V2 在模型/工具开始前明确阻止这些代表试运行，不默默丢掉审核要求，也不退回旧审核链。默认未切换的代表照常使用旧版本。
+已有代表的 `answerScope=owner_and_domain` 或 `knowledgePolicy=domain_only` 在旧 worker 中要求专项语义审核。当前 V2 在模型/工具开始前明确阻止这些受限配置，不默默丢掉审核要求，也不退回旧审核链。此限制适用于所有新请求，不会回退旧版本。
 
 ## 入口与文件
 
@@ -69,7 +69,7 @@ flowchart TD
 | `v2/provider.ts` | 复用 PI provider，关闭隐式模型重试 |
 | `v2/cli.ts` / `fixtures.ts` | 独立本地入口、显式合成工具 |
 | `v2/evaluate.ts` | 真模型决策 + 受控工具数据，对照旧版本 |
-| `apps/conversation-worker/src/processor-v2.ts` | 现有聊天入口的显式 V2 分支 |
+| `apps/conversation-worker/src/processor-v2.ts` | 所有聊天新请求的唯一模型执行入口 |
 | `packages/compute-protocol` / `apps/compute-broker` / `compute-client.ts` | 无审批等待的单调收紧约束及协议能力检查 |
 | `packages/web-data/src/agent-v2-session.ts` | 同 episode、同版本、同受众范围的澄清恢复 |
 | `public-agent-presentation.ts` / `public-agent-feedback.tsx` | 授权后的来源和可展开真实过程 |
@@ -103,11 +103,10 @@ CLI 默认没有业务工具；`--fixture-tools` 才启用合成库、合成天�
 
 ```sh
 DELEGATE_AGENT_VERSION=v2 \
-DELEGATE_AGENT_V2_REPRESENTATIVES=your-test-representative-slug \
 pnpm dev:conversation-worker
 ```
 
-上述两个变量必须同时设置且 slug 精确匹配。聊天仍访问 `/reps/<slug>/chat`、既有 run/SSE 接口，无需新建前端。首次认领在数据库租约内固定 `agentVariant`；已启动旧 Pi 工作/旧审批不会改跑 V2。移除开关会使新请求回到旧版本，已固定 V2 的在途请求继续按原版本收尾。测试期间不要混用配置不一致的 worker 消费同一测试队列。
+所有代表的新请求均使用 V2，不再需要白名单。`DELEGATE_AGENT_VERSION` 可省略或设为 `v2`；其他显式版本会拒绝启动。原白名单变量不再生效，应从部署配置移除。聊天和 SSE 路径保持不变。首次认领固定版本；旧版已启动任务不会改跑 V2，而是以不可重试的停止状态保留回执。部署时先停止旧 worker，避免不同版本同时消费队列。
 
 使用 MCP/沙盒/浏览器时，隔离测试栈的 Compute Broker 也须使用本开发线代码；旧 broker 会因不支持 `rejectApprovalWait` 而被拒绝。这个协议限制只会把 ask 收紧为 deny，不能把 deny/ask 升为 allow。
 
@@ -141,11 +140,11 @@ Web 显示现有进度阶段、最终来源和可展开的调用状态/耗时。
 
 token usage 使用 provider 的实际值；没有 usage 时以保守估值扣减预算。费用基于配置单价，`costAvailable=false` 时 0 不是“免费”，也不是实际账单。模型客户端超时仍受既有 `DELEGATE_MODEL_TIMEOUT_MS` 约束；模型容量使用既有 `DELEGATE_PI_CONTEXT_WINDOW_TOKENS` 配置，应依据真实 provider 容量设置。外部自定义 adapter 不得隐藏重试；必须把可重试错误抛成 `V2Error("transient")`，由 V2 统一计数。
 
-V2 默认对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus` 组合使用 PI 原生 Qwen thinking profile；这是模型能力适配，不依赖用户问题或业务关键词。思考发生在正常主模型请求内，不引入核验链，正文不会写入追踪或澄清状态。其他模型默认保留原绑定，旧 Pi 入口不变。具体质量、耗时取舍和复测见[澄清修复验收](agent-v2-clarification-fix.md)。
+V2 默认对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus` 组合使用 PI 原生 Qwen thinking profile；这是模型能力适配，不依赖用户问题或业务关键词。思考发生在正常主模型请求内，不引入核验链，正文不会写入追踪或澄清状态。其他模型保留已配置的 PI 传输绑定。具体质量、耗时取舍和复测见[澄清修复验收](agent-v2-clarification-fix.md)。
 
 自托管端点可显式配置 `DELEGATE_V2_REASONING_PROFILE=qwen-chat-template`。PI 0.85.1 会发送 `chat_template_kwargs.enable_thinking` 和 `thinking_token_budget`，而非 Qwen Plus 的顶层 `enable_thinking` / `thinking_budget`。必须先验证服务端支持；不能仅凭模型名字套用。当前本地 `qwen3.8-27b` 的配置、复测及限制见[模型切换验收](agent-v2-qwen38-validation.md)。
 
-同一 worker 承载旧流程与 V2 时，可同时配置 `DELEGATE_V2_MODEL_BASE_URL`、`DELEGATE_V2_MODEL_ID`、`DELEGATE_V2_MODEL_API_KEY`，仅覆盖 V2 的 Chat Completions 连接。三项必须完整，避免把旧凭据发往新地址；没有模型回退，不修改旧 `DELEGATE_MODEL_*` 配置。新端点费用单价默认未知，需用 `DELEGATE_V2_MODEL_INPUT_COST_USD_PER_1M_TOKENS` / `DELEGATE_V2_MODEL_OUTPUT_COST_USD_PER_1M_TOKENS` 单独提供，不能继承另一模型的单价。实际 `3002` 地理代表切换见[部署记录](agent-v2-geography-3002.md)。
+自定义模型端点时，同时配置 `DELEGATE_V2_MODEL_BASE_URL`、`DELEGATE_V2_MODEL_ID`、`DELEGATE_V2_MODEL_API_KEY`，仅覆盖 V2 的 Chat Completions 连接。三项必须完整，避免把旧凭据发往新地址；没有模型回退，不修改旧 `DELEGATE_MODEL_*` 配置。新端点费用单价默认未知，需用 `DELEGATE_V2_MODEL_INPUT_COST_USD_PER_1M_TOKENS` / `DELEGATE_V2_MODEL_OUTPUT_COST_USD_PER_1M_TOKENS` 单独提供，不能继承另一模型的单价。实际 `3002` 地理代表切换见[部署记录](agent-v2-geography-3002.md)。
 
 SDK 的 `authorizedUserLocation` 只能由可信主机提供已获授权的位置，缺省为 `null`；worker 不从时区、IP 或检索结果推断位置。模型同时收到本次真实工具结果摘要（不含原始参数），避免把工具描述或计划当成已经执行。
 
@@ -159,14 +158,14 @@ SDK 的 `authorizedUserLocation` 只能由可信主机提供已获授权的位�
 
 worker 将最小 `v2Task` 存入原有 `GenerationRun.contextSnapshot.agentTrace`，与最终消息事务一起保存，无需迁移表结构。澄清恢复只重新读取同 episode 的未删除用户消息、同代表版本和范围；关闭短期记忆时不恢复。检索正文、Skill 正文、工具结果不写入该状态。跨请求证据未获得当前 UseRun 重新授权时，不复用旧正文，必要时重新检索。
 
-## 已知限制与切换前条件
+## 已知限制
 
 1. 初轮两项行为失败已完成[定向修复与多轮真实复测](agent-v2-clarification-fix.md)；历史失败保留。有限样本不代表开放任务均可靠，也不能以 mocked tests 证明自主行为。
-2. 新的审批等待/恢复尚未实现 V2 checkpoint 协议。试运行明确阻止需要新审批、未知行为和不满足 allow 模式的沙盒/浏览器操作；不会自动回退旧流程或静默创建审批。一般写入的持久幂等仍由 Compute Broker 执行。
+2. 新的审批等待/恢复尚未实现 V2 checkpoint 协议。当前明确阻止需要新审批、未知行为和不满足 allow 模式的沙盒/浏览器操作；不会自动回退旧流程或静默创建审批。一般写入的持久幂等仍由 Compute Broker 执行。
 3. 保留明确的专项语义审核边界：上述受限代表配置暂不能进入 V2。并未用一个全局审核模型代替它。
 4. 主机目前没有单独配置 `web` Search adapter，实际生产能力依赖发布的具体 MCP 搜索工具或允许的沙盒浏览器。独立库的 Search adapter 接口已实现，演示使用合成工具。
 5. 当前生产沙盒仍遵循原有 Python、附件归属、单文本产物等底层限制；V2 不将它包装成无限制 shell 或任意文件编辑器。RAG 主机没有返回文档更新时间/公开版本的字段时保持缺失，不伪造时效。
 6. 已部署独立本地 Postgres + OpenViking + Compute Broker 验收栈，入口、自检和 10 个手工用例见[本地部署记录](agent-v2-local-deployment.md)。这不覆盖全部权限/账单/渠道组合，也不代表在线检索质量或负载压测完成。已有渠道交付使用原实现；无法强制撤销远程已提交的效果。
 7. 初始版本只做有界上下文和按需工具发现，没有复杂缓存或新增规划服务。超大任务可明确因 context/budget limit 停止。
 
-未来切换生产入口前：补齐当前授权/撤回、账单、来源投影、断线恢复和失败交付验收；补齐所需审批协议与专项审核扩展；对目标模型/任务集评估重复样本并人工检查关键结论支持；之后再逐代表扩大显式白名单。生产默认配置仍未改变，没有删除旧代码或业务数据。
+上线部署及回退边界见[清理与切换说明](agent-v2-cleanup.md)。本次仅修改代码，不自动部署、不修改数据库或代表配置。

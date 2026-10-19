@@ -6,9 +6,9 @@ import { NextResponse } from "next/server";
 import { demoRepresentative } from "@delegate/domain";
 import { parseTaskControlCommand } from "@delegate/runtime";
 import {
-  createPiModelBindingFromEnv,
-  delegatePiAgentRuntime,
-} from "@delegate/model-runtime";
+  createV2ModelBindingFromEnv,
+  delegateAgentV2,
+} from "@delegate/model-runtime/v2";
 import {
   acceptInboundConversationMessage,
   controlPublicAudienceTask,
@@ -292,27 +292,24 @@ export async function POST(
       freeRepliesUsed: 0,
       freeReplyLimit: representative.contract.freeReplyLimit,
     });
-    const modelBinding = createPiModelBindingFromEnv();
+    const modelBinding = createV2ModelBindingFromEnv();
     if (!modelBinding.ok) {
       return privateJson({
         error: modelBinding.reason,
         code: "pi_model_unavailable",
       }, 503);
     }
-    const piResult = await delegatePiAgentRuntime.run({
-      runId: `demo-${principal.audienceId}-${Date.now()}`,
-      sessionId: principal.audienceId,
-      userText: body.message,
-      representative: {
-        id: representative.id,
-        name: representative.name,
-        role: representative.tagline,
-        instructions: `语气：${representative.tone}`,
-        capabilities: ["普通问答"],
-      },
-      model: modelBinding.binding,
-      timeoutMs: 30_000,
-      maxSteps: 2,
+    if (runtime.setup.agentBehavior?.answerScope === "owner_and_domain" || runtime.setup.agentBehavior?.knowledgePolicy === "domain_only") {
+      return privateJson({ error: "The configured mandatory review is not available in V2.", code: "agent_policy_unavailable" }, 503);
+    }
+    const requestId = `demo-${principal.audienceId}-${Date.now()}`;
+    const timezone = process.env.DELEGATE_V2_TIMEZONE ?? "Asia/Shanghai";
+    const piResult = await delegateAgentV2.run({
+      requestId, sessionId: principal.audienceId, scope: requestId, userText: body.message, timezone,
+      model: modelBinding.binding, tools: [], authorize: async () => undefined,
+      context: { traceId: requestId, runId: requestId, sessionId: principal.audienceId, timezone, attachments: [], idempotencyKey: requestId },
+      instructions: `Representative: ${representative.name}. Role: ${representative.tagline}. Tone: ${representative.tone}. This nonpersistent demo has no knowledge or execution tools. Explain unavailable capabilities; do not imply a real lookup or action.`,
+      budget: { activeMs: 30000, finalReserveMs: 5000, modelTurns: 2 },
     });
     if (piResult.status === "failed" || piResult.status === "cancelled") {
       return privateJson({
@@ -321,7 +318,7 @@ export async function POST(
       }, piResult.status === "cancelled" ? 499 : 502);
     }
     const response = NextResponse.json({
-      status: "completed",
+      status: piResult.status,
       reply: {
         role: "assistant",
         text: piResult.text,

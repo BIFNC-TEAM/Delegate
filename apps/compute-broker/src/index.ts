@@ -67,6 +67,10 @@ const server = createServer(async (request, response) => {
       });
     }
 
+    if (method === "GET" && url.pathname === "/internal/compute/features") {
+      return sendJson(response, 200, { rejectApprovalWait: 1 });
+    }
+
     if (
       method === "GET" &&
       url.pathname === "/internal/compute/sandbox/metrics"

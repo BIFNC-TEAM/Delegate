@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { PublicAnswerSources, PublicRunProgress, type PublicSourceCitation } from "./public-agent-feedback";
+import { PublicAnswerSources, PublicRunProgress, PublicExecution, type PublicSourceCitation } from "./public-agent-feedback";
 import type { PublicAgentProgress, PublicAnswerSource, PublicWebAnswerSourceDisclosure } from "@delegate/web-data";
 
 import {
@@ -45,6 +45,7 @@ type ChatMessage = {
   status?: string;
   citations?: Citation[];
   sources?: PublicAnswerSource[];
+  execution?: import("@delegate/web-data").PublicExecutionCall[];
   attachments?: ChatAttachment[];
   senderType?: string;
   senderDisplayName?: string;
@@ -334,6 +335,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
             ...(message.sources?.length ? { sources: message.sources } : {}),
+            ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
@@ -389,6 +391,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
             ...(message.sources?.length ? { sources: message.sources } : {}),
+            ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
@@ -941,6 +944,7 @@ export function RepresentativeChatPanel(props: {
             createdAt?: string;
             citations: Citation[];
             sources?: PublicAnswerSource[];
+            execution?: import("@delegate/web-data").PublicExecutionCall[];
             attachments?: ChatAttachment[];
             displayAck?: PublicMemoryDisplayAck;
             sourceDisclosure?: PublicWebAnswerSourceDisclosure;
@@ -971,6 +975,7 @@ export function RepresentativeChatPanel(props: {
             status: snapshot.message.status,
             citations: snapshot.message.citations,
             ...(snapshot.message.sources ? { sources: snapshot.message.sources } : {}),
+            ...(snapshot.message.execution ? { execution: snapshot.message.execution } : {}),
             ...(snapshot.message.attachments?.length ? { attachments: snapshot.message.attachments } : {}),
             ...(snapshot.message.displayAck ? { displayAck: snapshot.message.displayAck } : {}),
             ...(snapshot.message.sourceDisclosure
@@ -1204,7 +1209,7 @@ export function RepresentativeChatPanel(props: {
                   <div className="representative-message-content">
                     <div className="representative-message-bubble">
                       <PublicChatText text={message.text} />
-                  {message.role === "assistant" && !isOperator ? <PublicAnswerSources sources={message.sources} citations={message.citations} locale={props.locale} /> : null}
+                  {message.role === "assistant" && !isOperator ? <><PublicAnswerSources sources={message.sources} citations={message.citations} locale={props.locale} /><PublicExecution calls={message.execution} locale={props.locale} /></> : null}
                   {message.role === "assistant"
                     && !message.sources?.length && !message.citations?.length
                     && message.sourceDisclosure

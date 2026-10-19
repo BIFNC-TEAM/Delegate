@@ -222,6 +222,8 @@ export type PiKnowledgeAdapter = {
 };
 
 export type PiWebAdapter = {
+  /** Trusted host description of actual provider coverage/freshness, if known. */
+  description?: string;
   search(input: {
     query: string;
     localDate?: string;

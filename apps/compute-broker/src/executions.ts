@@ -106,6 +106,7 @@ type LeasedSessionRecord = {
 };
 type NormalizedExecutionInput = {
   logicalAction?: ToolExecutionRequest["logicalAction"];
+  rejectApprovalWait?: boolean;
   capability: CapabilityKind;
   subagentId: ComputeSubagentId;
   browserMode: BrowserExecutionMode;
@@ -2138,7 +2139,14 @@ async function blockExecution(params: {
   return response;
 }
 
-export function resolveEffectiveDecision(params: {
+export function resolveEffectiveDecision(params: Parameters<typeof resolveEffectiveDecisionBase>[0]) {
+  const decision = resolveEffectiveDecisionBase(params);
+  return params.input.rejectApprovalWait && decision.decision === "ask"
+    ? { decision: "deny" as const, reason: "caller_cannot_resume_approval" }
+    : decision;
+}
+
+function resolveEffectiveDecisionBase(params: {
   context: PolicyExecutionContext;
   input: NormalizedExecutionInput;
   decision: {
@@ -2266,6 +2274,7 @@ export function normalizeExecutionInput(
   inlineCodeIntegrityVerified = false,
 ): NormalizedExecutionInput {
   return { ...normalizeExecutionInputBase(input, mcpBinding, serverVerifiedReadOnlyMcp, inlineCodeIntegrityVerified),
+    ...(input.rejectApprovalWait ? { rejectApprovalWait: true } : {}),
     ...(input.logicalAction ? { logicalAction: input.logicalAction } : {}),
     ...(input.generationWorkLease ? { generationWorkLease: input.generationWorkLease } : {}) };
 }
@@ -2680,6 +2689,7 @@ function reconstructExecutionInputBase(execution: {
 
 function toToolExecutionRequest(input: NormalizedExecutionInput): ToolExecutionRequest {
   return {
+    ...(input.rejectApprovalWait ? { rejectApprovalWait: true } : {}),
     capability: input.capability,
     subagentId: input.subagentId,
     ...(input.command ? { command: input.command } : {}),

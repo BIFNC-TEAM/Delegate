@@ -1,4 +1,4 @@
-import type { PublicAgentProgress, PublicAgentStage, PublicAnswerSource } from '@delegate/web-data';
+import type { PublicAgentProgress, PublicAgentStage, PublicAnswerSource, PublicExecutionCall } from '@delegate/web-data';
 
 const labels: Record<PublicAgentStage, [string, string]> = {
   processing: ['正在处理请求', 'Processing your request'],
@@ -25,6 +25,20 @@ export function PublicRunProgress({ progress, now, locale }: { progress?: Public
 }
 
 export type PublicSourceCitation = { title: string; kind?: 'knowledge' | 'memory' | 'authorized'; excerpt?: string };
+
+export function PublicExecution({ calls = [], locale }: { calls?: PublicExecutionCall[] | undefined; locale: 'zh' | 'en' }) {
+  if (!calls.length) return null;
+  const zh = locale === 'zh';
+  const categories = { knowledge: ['知识检索', 'Knowledge lookup'], web: ['网页查询', 'Web lookup'], mcp: ['外部服务', 'External service'], skill: ['任务方法', 'Task method'], sandbox: ['计算与文件处理', 'Calculation and files'], control: ['准备任务', 'Task preparation'] };
+  const states = { ok: ['已返回', 'Returned'], error: ['失败', 'Failed'], cancelled: ['已取消', 'Cancelled'], timeout: ['超时', 'Timed out'], blocked: ['未执行', 'Not executed'] };
+  return <details className="representative-execution">
+    <summary>{zh ? `实际调用过程 · ${calls.length} 次` : `Execution history · ${calls.length} calls`}</summary>
+    <ol>{calls.map((call, i) => <li key={i}>
+      <span>{categories[call.category][zh ? 0 : 1]} · {states[call.status][zh ? 0 : 1]}</span>
+      <span>{(call.durationMs / 1000).toFixed(2)} s</span>
+    </li>)}</ol>
+  </details>;
+}
 
 export function PublicAnswerSources({ sources = [], citations = [], locale }: {
   sources?: PublicAnswerSource[] | undefined; citations?: PublicSourceCitation[] | undefined; locale: 'zh' | 'en';

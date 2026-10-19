@@ -1,4 +1,4 @@
-import { readPublicAgentProgress, readPublicAnswerSources, type PublicAnswerSource, type PublicAgentStage } from "./public-agent-presentation";
+import { readPublicAgentProgress, readPublicAnswerSources, readPublicExecution, type PublicExecutionCall, type PublicAnswerSource, type PublicAgentStage } from "./public-agent-presentation";
 import { createHash, randomUUID } from "node:crypto";
 
 import { normalizeRepresentativeHandoffPrompt, readAgentBehavior } from "@delegate/domain";
@@ -156,6 +156,9 @@ export type GenerationRuntimeOutcome =
     };
 
 export type GenerationAgentTrace = {
+  calls?: Array<Record<string, unknown>>;
+  sources?: Array<{ id: string; channel: string }>;
+  v2Task?: import("./agent-v2-session").V2TaskRecord;
   runtime: string;
   traceId: string;
   status: string;
@@ -1269,6 +1272,7 @@ export async function getConversationDetailSnapshot(
           ...(message.redactedAt ? { redactedAt: message.redactedAt.toISOString() } : {}),
           createdAt: message.createdAt.toISOString(),
           sources: readPublicAnswerSources(message.content),
+        execution: message.redactedAt ? [] : readPublicExecution(message.content),
         citations: message.citations.map((citation) => ({
             title: citation.title,
             ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
@@ -2567,6 +2571,7 @@ export async function completeInlineGenerationRun(input: {
   /** Operational Pi lifecycle/timing evidence. It contains no hidden reasoning or raw tool payloads. */
   agentTrace?: GenerationAgentTrace;
   publicSources?: PublicAnswerSource[];
+  publicExecution?: PublicExecutionCall[];
   turnTrace?: ConversationTurnTrace;
   completeOutbox?: boolean;
   countUsage: boolean;
@@ -3014,6 +3019,7 @@ export async function completeInlineGenerationRun(input: {
         text: resolvedReplyText,
         ...(input.intent
           || input.publicSources?.length
+          || input.publicExecution?.length
           || input.humanHandoff
           || input.evidenceIndependentSystemFailure
           || input.sourceIndependentPublicRecovery
@@ -3021,6 +3027,7 @@ export async function completeInlineGenerationRun(input: {
               content: {
                 ...(input.intent ? { intent: input.intent } : {}),
                 ...(input.publicSources?.length ? { publicSources: readPublicAnswerSources({ publicSources: input.publicSources }) as unknown as Prisma.InputJsonArray } : {}),
+                ...(input.publicExecution?.length ? { publicExecution: readPublicExecution({ publicExecution: input.publicExecution }) as unknown as Prisma.InputJsonArray } : {}),
                 ...(input.humanHandoff
                   || input.evidenceIndependentSystemFailure
                   || input.sourceIndependentPublicRecovery
@@ -3724,6 +3731,27 @@ export async function cancelGenerationPendingApprovals(input: {
       canceledCount += 1;
     }
     return { canceledCount };
+  });
+}
+
+/** Pin once under the work lease so retries/approval continuations cannot switch loops. */
+export function resolveGenerationAgentVariant(snapshot: unknown, preferV2: boolean): "pi" | "v2" {
+  const value = isJsonRecord(snapshot) ? snapshot : {};
+  if (value.agentVariant === "v2" || value.agentVariant === "pi") return value.agentVariant;
+  if (value.piExecutionProtocol || value.agentTrace || value.piStream || readPiApprovalContinuation(value)) return "pi";
+  return preferV2 ? "v2" : "pi";
+}
+
+export async function pinGenerationAgentVariant(input: { runId: string; outboxId: string; leaseAttempt: number; preferV2: boolean }): Promise<"pi" | "v2"> {
+  return runConversationWriteTransaction(async tx => {
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({ where: { id: input.runId }, select: { contextSnapshot: true } });
+    if (!run) throw new GenerationWorkLeaseLostError(input.outboxId, input.leaseAttempt);
+    const snapshot = isJsonRecord(run.contextSnapshot) ? run.contextSnapshot : {};
+    const agentVariant = resolveGenerationAgentVariant(snapshot, input.preferV2);
+    await tx.generationRun.update({ where: { id: input.runId }, data: { contextSnapshot: { ...snapshot, agentVariant,
+      ...(agentVariant === "v2" ? { piActionIdentityVersion: 1 } : {}) } } });
+    return agentVariant;
   });
 }
 
@@ -8472,6 +8500,7 @@ export async function getPublicGenerationRunSnapshot(input: {
             createdAt: outputMessage.createdAt.toISOString(),
             ...(sourceDisclosure ? { sourceDisclosure } : {}),
             sources: readPublicAnswerSources(outputMessage.content),
+            execution: readPublicExecution(outputMessage.content),
             citations: outputMessage.citations.map((citation) => ({
               title: citation.title,
               kind: citation.memoryUseItem?.sourceKind === "PUBLIC_KNOWLEDGE" ? "knowledge" as const
@@ -8661,6 +8690,7 @@ export async function getPublicConversationHistory(input: {
           : {}),
         ...(sourceDisclosure ? { sourceDisclosure } : {}),
         sources: readPublicAnswerSources(message.content),
+        execution: message.redactedAt ? [] : readPublicExecution(message.content),
         citations: message.citations.map((citation) => ({
           title: citation.title,
           kind: citation.memoryUseItem?.sourceKind === "PUBLIC_KNOWLEDGE" ? "knowledge" as const

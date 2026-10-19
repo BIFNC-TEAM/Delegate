@@ -47,7 +47,7 @@ Delegate currently includes these working surfaces and services:
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
 - **AMN wallet control plane** covering immutable billing products and prices, snapshotted orders, internal wallet ledger entries, local mock payment, default-off WeChat Pay API v3 Native collection and recovery, service-credit fulfillment, usage charging, provisional Creator 20% revenue share, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
-- **Agent Runtime V3** across `packages/runtime`, `packages/model-runtime`, the conversation worker, Compute Broker, and workflow runner: one server-validated goal/action DAG, schema-pinned MCP compilation, atomic execution admission, verified results, evidence-bound composition, and V2 rollback compatibility.
+- **Embedded Pi Agent** for current conversations, with governed knowledge/tools, persistence and delivery. A separate opt-in [Agent V2 development line](./docs/agent-v2.md) adds model-directed RAG-first execution; the existing runtime remains the default.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
 - **OpenViking integration** as a rebuildable retrieval projection behind PostgreSQL-authoritative public knowledge and governed memory, with exact-version/hash sync and safe operational diagnostics.
@@ -706,6 +706,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 ## Documentation Map
 
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
+- [Agent V2](./docs/agent-v2.md): isolated entry, policies, budgets, startup, rollback, and [validation](./docs/agent-v2-validation.md).
 - [Pi Agent rearchitecture](./docs/pi-agent-rearchitecture.md): active Pi runtime path, capability adapters, timing and executable regression status.
 - [Agent Runtime V3](./docs/agent-runtime-v3.md): archived pre-Pi protocol and migration context; not an active runtime guide.
 - [Conversation runtime flow](./docs/conversation-runtime-flow.md): archived V3 flow plus the pointer to the current Pi path.

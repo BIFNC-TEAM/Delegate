@@ -96,6 +96,7 @@ export * from "./payout-destination-credentials";
 export * from "./public-audience-principal";
 export * from "./public-agent-wallet-state";
 export * from "./prisma";
+export * from "./agent-v2-session";
 export * from "./representative-setup";
 export * from "./compute-policy-view";
 export * from "./representative-skill-packs";

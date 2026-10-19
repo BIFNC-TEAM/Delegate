@@ -96,6 +96,7 @@ import {
   retryGenerationDelivery,
   updateGenerationTurnExecutionProgress,
   pinGenerationPiExecutionProtocol,
+  pinGenerationAgentVariant,
   cancelGenerationPendingApprovals,
 } from "../src/conversation-platform";
 
@@ -683,6 +684,17 @@ describe("conversation generation work leases", () => {
     expect(mocks.tx.generationRun.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { conversationId: validRun.conversationId, id: { not: validRun.id }, status: "WAITING_APPROVAL" } }));
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(expect.objectContaining({ expectedGenerationRunId: "pending-run", idempotencyKey: "generation:pending-run:release" }), expect.anything());
     expect(mocks.tx.toolExecution.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ["execution"] }, status: { in: ["QUEUED", "BLOCKED"] } }, data: expect.objectContaining({ status: "CANCELED" }) }));
+  });
+
+  it("pins V2 and logical action identity only under the current lease", async () => {
+    mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.generationRun.findUnique.mockResolvedValue({ ...validRun, contextSnapshot: { preserved: true } });
+    expect(await pinGenerationAgentVariant({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 3, preferV2: true })).toBe("v2");
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith(expect.objectContaining({ data: { contextSnapshot: { preserved: true, agentVariant: "v2", piActionIdentityVersion: 1 } } }));
+    mocks.tx.generationRun.update.mockClear();
+    mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 0 });
+    await expect(pinGenerationAgentVariant({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 2, preferV2: true })).rejects.toBeInstanceOf(GenerationWorkLeaseLostError);
+    expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
   });
 
   it("does not cancel or refund a concurrently approved action", async () => {

@@ -1,0 +1,67 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "repeats": 2,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": false,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": false,
+      "text": "无法确定今天的天气，因为您没有提供具体位置信息。天气情况因地区而异，需要明确城市或地理坐标才能查询。\n\n请提供您所在的城市或区域，我将为您查询实时天气信息。",
+      "sources": [],
+      "durationMs": 2128.5462079999998,
+      "firstTextMs": 2116.801333,
+      "firstFinalOutputMs": 2116.801333,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1554,
+      "outputTokens": 48,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 1,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": false,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": false,
+      "text": "无法确定今天的天气，因为您未提供具体位置信息。天气情况高度依赖地理位置。请告知城市或地区名称，我将为您查询实时天气信息。",
+      "sources": [],
+      "durationMs": 1750.04275,
+      "firstTextMs": 1748.538541,
+      "firstFinalOutputMs": 1748.538541,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1554,
+      "outputTokens": 37,
+      "error": null
+    }
+  ]
+}

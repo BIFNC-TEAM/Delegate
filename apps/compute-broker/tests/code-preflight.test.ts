@@ -8,6 +8,17 @@ import { verifyInlineCompiledTask } from "../src/policy";
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const context = { session: { runtimeClass: "CODE" }, profile: { networkMode: "full", filesystemMode: "ephemeral_full" }, runtimeAuthority: { compute: { autoApproveTokenLimit: 10000 } } };
 describe("code integrity is not execution authority", () => {
+  it("rejects approval waits atomically when the caller cannot resume them", () => {
+    for (const input of [
+      { capability: "browser", browserMode: "deterministic", allowMutations: false },
+      { capability: "mcp", serverVerifiedReadOnlyMcp: true, approvalRequired: true },
+    ]) {
+      expect(resolveEffectiveDecision({ context: context as never, input: { ...input, rejectApprovalWait: true } as never,
+        decision: { decision: input.capability === "browser" ? "ask" : "allow", reason: "current_policy" } })).toEqual({ decision: "deny", reason: "caller_cannot_resume_approval" });
+    }
+    expect(resolveEffectiveDecision({ context: context as never, input: { capability: "browser", browserMode: "deterministic", rejectApprovalWait: true } as never,
+      decision: { decision: "allow", reason: "current_policy" } })).toEqual({ decision: "allow", reason: "current_policy" });
+  });
   it.each(["print(55)", "import urllib.request\nurllib.request.urlopen('https://example.invalid/side-effect')"])("does not admit arbitrary code solely because both hashes match: %s", source => {
     const request = { capability: "exec" as const, subagentId: "compute-agent" as const, hasPaidEntitlement: false, browserMode: "deterministic" as const, maxSteps: 1, allowMutations: false,
       command: `python -c "import base64;exec(compile(base64.b64decode('${Buffer.from(source).toString("base64")}'),'<pi-agent>','exec'))"`,

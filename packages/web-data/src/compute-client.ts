@@ -128,6 +128,14 @@ export async function getAudienceCodeExecutionPreflight(sessionId: string) {
 }
 
 export async function executeAudienceTool(sessionId: string, request: ToolExecutionRequest) {
+  // Older brokers strip unknown schema fields. Verify support before sending a
+  // V2 operation, so an old broker cannot silently create an unresumable wait.
+  if (request.rejectApprovalWait) {
+    const features = await callComputeBroker<{ rejectApprovalWait?: number }>("/internal/compute/features", {
+      method: "GET", signal: AbortSignal.timeout(5_000),
+    });
+    if (features.rejectApprovalWait !== 1) throw new ComputeBrokerError("broker_approval_guard_unavailable", 409, "The compute service does not support this execution policy.");
+  }
   return callComputeBroker<ExecuteToolResponse>(
     `/internal/compute/sessions/${sessionId}/executions`,
     { method: "POST", body: JSON.stringify(request) },

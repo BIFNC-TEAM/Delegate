@@ -10,6 +10,23 @@ export type PublicAnswerSource = {
   access?: 'page' | 'search'; observedAt?: string;
 };
 
+export type PublicExecutionCall = {
+  category: 'knowledge' | 'web' | 'mcp' | 'skill' | 'sandbox' | 'control';
+  status: 'ok' | 'error' | 'cancelled' | 'timeout' | 'blocked';
+  durationMs: number;
+};
+/** Public-safe execution facts. No arguments, internal tool names, IDs or outputs. */
+export function readPublicExecution(content: unknown): PublicExecutionCall[] {
+  if (!content || typeof content !== 'object') return [];
+  const value = (content as Record<string, unknown>).publicExecution;
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 100).flatMap(call => call && typeof call === 'object'
+    && ['knowledge', 'web', 'mcp', 'skill', 'sandbox', 'control'].includes(call.category)
+    && ['ok', 'error', 'cancelled', 'timeout', 'blocked'].includes(call.status)
+    && typeof call.durationMs === 'number' && Number.isFinite(call.durationMs) && call.durationMs >= 0
+    ? [{ category: call.category, status: call.status, durationMs: Math.round(call.durationMs) }] : []);
+}
+
 export function readPublicAgentProgress(value: unknown): PublicAgentProgress | undefined {
   if (!value || typeof value !== 'object') return;
   const v = value as Record<string, unknown>;

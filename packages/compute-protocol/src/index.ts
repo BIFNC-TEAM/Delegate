@@ -463,6 +463,8 @@ export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.obj
   capability: capabilityKindSchema,
   /** Supplied by the trusted Agent host, never exposed in model parameters. */
   logicalAction: z.object({ version: z.literal(1), ordinal: z.number().int().min(1).max(256) }).strict().optional(),
+  /** Monotonic restriction: deny if current policy needs approval; never grants allow. */
+  rejectApprovalWait: z.boolean().optional(),
   subagentId: computeSubagentIdSchema,
   generationWorkLease: z.object({
     outboxId: z.string().min(1),

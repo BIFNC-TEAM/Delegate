@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { projectPublicAnswerSources, readPublicAnswerSources, readPublicAgentProgress } from '../src/public-agent-presentation';
+import { projectPublicAnswerSources, readPublicAnswerSources, readPublicAgentProgress, readPublicExecution } from '../src/public-agent-presentation';
 
 describe('public provenance projection', () => {
+  it('projects execution states without internal names, inputs or results', () => {
+    expect(readPublicExecution({ publicExecution: [{ category: 'knowledge', status: 'ok', durationMs: 12.7, toolName: 'private_contract', arguments: 'SECRET', result: 'PRIVATE' }, { category: 'web', status: 'invented', durationMs: 1 }] })).toEqual([{ category: 'knowledge', status: 'ok', durationMs: 13 }]);
+  });
   it('deduplicates selected sources, separates provider from mechanism, omits knowledge without authoritative citations', () => {
     const browser = { channel: 'web', title: 'UNTRUSTED_PAGE_TITLE', url: 'https://www.apec.org/about-us', provider: 'Tencent sandbox browser', observedAt: '2026-10-14T08:00:00Z' };
     const sources = projectPublicAnswerSources([browser, browser,

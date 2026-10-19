@@ -81,6 +81,7 @@ const envSchema = z.object({
   TENCENT_AGS_DOMAIN: z.string().optional(),
   TENCENT_AGS_REGION: z.string().optional(),
   TENCENT_AGS_CODE_TOOL: z.string().optional(),
+  TENCENT_AGS_ALL_IN_ONE_TOOL: z.string().optional(),
   ARTIFACT_STORE_ENDPOINT: z.string().url().default("http://artifact-store:9000"),
   ARTIFACT_STORE_BUCKET: z.string().min(1).default("delegate-compute-artifacts"),
   ARTIFACT_STORE_ACCESS_KEY: z.string().min(1).default("delegate"),
@@ -195,6 +196,9 @@ export const computeBrokerConfig = {
     ...(normalizeOptionalString(parsed.TENCENT_AGS_CODE_TOOL)
       ? { codeTool: normalizeOptionalString(parsed.TENCENT_AGS_CODE_TOOL) }
       : {}),
+    ...(normalizeOptionalString(parsed.TENCENT_AGS_ALL_IN_ONE_TOOL)
+      ? { allInOneTool: normalizeOptionalString(parsed.TENCENT_AGS_ALL_IN_ONE_TOOL) }
+      : {}),
   },
   artifactStore: artifactStoreConfigSchema.parse({
     endpoint: parsed.ARTIFACT_STORE_ENDPOINT,
@@ -262,7 +266,8 @@ function validateManualProviderCredentials(
     routing.document.newIdentityEnabled.tencent &&
     (!normalizeOptionalString(parsedEnv.TENCENT_AGS_API_KEY) ||
       !resolveTencentDomain(parsedEnv) ||
-      !normalizeOptionalString(parsedEnv.TENCENT_AGS_CODE_TOOL))
+      !(normalizeOptionalString(parsedEnv.TENCENT_AGS_ALL_IN_ONE_TOOL)
+        || normalizeOptionalString(parsedEnv.TENCENT_AGS_CODE_TOOL)))
   ) {
     throw new Error("sandbox_tencent_configuration_required");
   }

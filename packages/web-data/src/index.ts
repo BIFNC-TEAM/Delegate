@@ -97,6 +97,7 @@ export * from "./public-audience-principal";
 export * from "./public-agent-wallet-state";
 export * from "./prisma";
 export * from "./representative-setup";
+export * from "./compute-policy-view";
 export * from "./representative-skill-packs";
 export {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
@@ -148,3 +149,7 @@ export * from "./wechat-pay-operations";
 export * from "./wechat-pay-release-flags";
 
 export * from "./knowledge-web-capture";
+
+export * from "./agent-context-authorization";
+
+export * from "./public-agent-presentation";

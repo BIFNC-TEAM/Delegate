@@ -12,6 +12,7 @@ import {
   type SandboxProviderKind,
 } from "./sandbox-routing";
 import { TencentAgsxSandboxProvider } from "./tencent-agsx-provider";
+import type { TencentSandboxTools } from "./tencent-sandbox-config";
 
 export type SandboxProviderRegistryConfig = {
   legacyProvider: SandboxProviderKind;
@@ -30,10 +31,9 @@ export type SandboxProviderRegistryConfig = {
     resources?: DaytonaSandboxResources | undefined;
     ttlMinutes?: number | undefined;
   };
-  tencent: {
+  tencent: TencentSandboxTools & {
     apiKey?: string | undefined;
     domain?: string | undefined;
-    codeTool?: string | undefined;
   };
 };
 
@@ -64,14 +64,15 @@ export class SandboxProviderRegistry {
       });
     }
 
-    const { apiKey, domain, codeTool } = this.config.tencent;
-    if (!apiKey || !domain || !codeTool) {
+    const { apiKey, domain, codeTool, allInOneTool } = this.config.tencent;
+    if (!apiKey || !domain || !(allInOneTool || codeTool)) {
       throw new SandboxProviderError("CONFIG_INVALID", false);
     }
     return new TencentAgsxSandboxProvider({
       apiKey,
       domain,
       codeTool,
+      allInOneTool,
       sandboxTimeoutMs: this.config.sandboxLifecycle.idleStopMinutes * 60 * 1000,
     });
   }
@@ -79,7 +80,8 @@ export class SandboxProviderRegistry {
   configured(providerKind: SandboxProviderKind) {
     if (providerKind === "docker") return true;
     if (providerKind === "daytona") return Boolean(this.config.daytona.apiKey);
-    return Boolean(this.config.tencent.apiKey && this.config.tencent.domain && this.config.tencent.codeTool);
+    return Boolean(this.config.tencent.apiKey && this.config.tencent.domain
+      && (this.config.tencent.allInOneTool || this.config.tencent.codeTool));
   }
 
   resolveLegacyProvider(): SandboxProviderKind {

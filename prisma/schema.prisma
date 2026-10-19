@@ -229,6 +229,7 @@ enum EventType {
   SKILL_RESTORED
   SKILL_UPDATE_POLICY_CHANGED
   MCP_BINDING_CHANGED
+  MCP_PROVIDER_OUTCOME_OBSERVED
   COMPUTE_POLICY_CHANGED
   CHANNEL_CONFIGURATION_CHANGED
   OWNER_PROFILE_UPDATED
@@ -2272,6 +2273,7 @@ model Representative {
   displayName                           String
   roleSummary                           String
   tone                                  String
+  agentBehavior                         Json?
   avatarUrl                             String?
   publicMode                            Boolean                                @default(true)
   claimStatus                           RepresentativeClaimStatus              @default(CLAIMED)
@@ -3823,8 +3825,10 @@ model CapabilityPolicyRule {
   domainPattern          String?
   resourceScopeCondition PolicyResourceScope?
   channelCondition       Channel?
+  /// Legacy compatibility only; consumption quota is authorized per generation.
   requiredPlanTier       CapabilityPlanTier?
   maxEstimatedTokens           Int?
+  /// Retired membership flag. Writers persist false; policy evaluation ignores it.
   requiresPaidPlan       Boolean                 @default(false)
   requiresHumanApproval  Boolean                 @default(false)
   priority               Int                     @default(0)
@@ -3987,6 +3991,12 @@ model ToolExecution {
   generationLeaseAttempt Int?
   requestPayloadHash     String?
   responseSnapshot       Json?
+  /// Immutable server receipt: frozen input dependencies and result access contract.
+  sourceReceipt          Json?
+  /// Host-owned logical action and original event, independent of transport retries.
+  actionIdentity         Json?
+  /// Immutable provider contract, original operation key and scoped request digest.
+  providerOperation      Json?
   executionLeaseToken    String?                   @unique
   billingFinalizedAt     DateTime?
   billingSnapshot        Json?

@@ -807,6 +807,26 @@ export async function revalidateMemoryUseDeliverySourcesInTransaction(
   };
 }
 
+/** Reuses the same source checks BEFORE a model/tool request, including items
+ * not yet marked injected by output finalization. This reads metadata only. */
+export async function revalidateMemoryUseContextSourcesInTransaction(
+  tx: MemoryUseTransaction,
+  input: { generationRunId: string; conversationId: string; useRunId: string; itemIds: string[] },
+): Promise<void> {
+  const run = await tx.memoryUseRun.findUnique({ where: { id: input.useRunId }, select: memoryUseRunSnapshotSelect });
+  if (!run || run.generationRunId !== input.generationRunId || run.conversationId !== input.conversationId
+    || run.status === "FAILED" || run.status === "CANCELED") throw rejectedSource();
+  const evidence = await lockMemoryUseSharedSourceFence(tx, run);
+  await lockContactChannelMemoryCoordinate(tx, { representativeId: run.representativeId, contactId: run.contactId, sourceChannel: run.sourceChannel });
+  await assertRunStillCurrent(tx, run, { allowedEpisodeStatuses: [ConversationEpisodeStatus.ACTIVE, ConversationEpisodeStatus.WAITING_USER, ConversationEpisodeStatus.NEEDS_HUMAN] });
+  const ids = uniqueOpaqueIds(input.itemIds, "itemIds");
+  const items = await loadItemsForFinalization(tx, run.id, ids);
+  if (items.length !== ids.length || items.some(item => !item.safetyPassedAt || item.rejectionReasonCode)) throw rejectedSource();
+  for (const item of items) {
+    await assertItemStillInjectable(tx, run, item, new Date(), evidence);
+  }
+}
+
 export async function markMemoryUseItemsDisplayed(
   input: MarkMemoryUseItemsDisplayedInput,
   options: MemoryUseExecutionOptions = {},
@@ -1654,6 +1674,12 @@ async function assertItemStillInjectable(
       || !publicSourceMatchesRun(source, run)
       || source.contentHash !== item.contentHash
     ) throw rejectedSource();
+    if (source.sourceKind === "KNOWLEDGE_ASSET") {
+      if (!source.knowledgeAssetId) throw rejectedSource();
+      const asset = await tx.knowledgeAsset.findUnique({ where: { id: source.knowledgeAssetId }, select: { status: true, archivedAt: true } });
+      const binding = await tx.knowledgeAssetRepresentative.findUnique({ where: { assetId_representativeId: { assetId: source.knowledgeAssetId, representativeId: run.representativeId } }, select: { enabled: true, reviewStatus: true } });
+      if (!asset || asset.status === "ARCHIVED" || asset.archivedAt || !binding?.enabled || binding.reviewStatus !== "APPROVED") throw rejectedSource();
+    }
     return;
   }
   if (!item.projectionItemId || !item.memoryVersionId) throw rejectedSource();

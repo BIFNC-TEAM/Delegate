@@ -6,8 +6,11 @@ const mocks = vi.hoisted(() => {
     $queryRaw: vi.fn(),
     generationRun: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
       update: vi.fn(),
     },
+    approvalRequest: { findMany: vi.fn(), updateMany: vi.fn() },
     toolExecution: {
       findUnique: vi.fn().mockResolvedValue(null),
       updateMany: vi.fn(),
@@ -92,6 +95,8 @@ import {
   renewGenerationWorkItemLease,
   retryGenerationDelivery,
   updateGenerationTurnExecutionProgress,
+  pinGenerationPiExecutionProtocol,
+  cancelGenerationPendingApprovals,
 } from "../src/conversation-platform";
 
 const currentTime = new Date("2026-07-24T08:00:00.000Z");
@@ -655,6 +660,38 @@ describe("conversation generation work leases", () => {
     expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
     expect(mocks.tx.message.update).not.toHaveBeenCalled();
     expect(mocks.tx.conversation.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [null, "goal_v2"],
+    [{ piExecutionProtocol: "legacy_v1" }, "legacy_v1"],
+    [{ piStream: { sequence: 1 } }, "legacy_v1"],
+    [{ piApprovalContinuation: { version: 1, approvalId: "a", status: "pending" } }, "legacy_v1"],
+  ])("pins the execution loop under the current work lease", async (contextSnapshot, expected) => {
+    mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.generationRun.findUnique.mockResolvedValue({ ...validRun, contextSnapshot });
+    expect(await pinGenerationPiExecutionProtocol({ runId: validRun.id, outboxId: "outbox-stale", leaseAttempt: 3 })).toBe(expected);
+    if ((contextSnapshot as any)?.piExecutionProtocol !== expected) expect(mocks.tx.generationRun.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ contextSnapshot: expect.objectContaining({ piExecutionProtocol: expected }) }) }));
+  });
+
+  it("cancels persisted approval waits and releases exactly their reservation", async () => {
+    mocks.tx.generationRun.findMany.mockResolvedValue([{ ...validRun, id: "pending-run", status: "WAITING_APPROVAL" }]);
+    mocks.tx.approvalRequest.findMany.mockResolvedValue([{ id: "approval", toolExecutionId: "execution" }]);
+    mocks.tx.approvalRequest.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.generationRun.updateMany.mockResolvedValue({ count: 1 });
+    expect(await cancelGenerationPendingApprovals({ runId: validRun.id, conversationId: validRun.conversationId, outboxId: "outbox-stale", leaseAttempt: 3 })).toEqual({ canceledCount: 1 });
+    expect(mocks.tx.generationRun.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { conversationId: validRun.conversationId, id: { not: validRun.id }, status: "WAITING_APPROVAL" } }));
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(expect.objectContaining({ expectedGenerationRunId: "pending-run", idempotencyKey: "generation:pending-run:release" }), expect.anything());
+    expect(mocks.tx.toolExecution.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ["execution"] }, status: { in: ["QUEUED", "BLOCKED"] } }, data: expect.objectContaining({ status: "CANCELED" }) }));
+  });
+
+  it("does not cancel or refund a concurrently approved action", async () => {
+    mocks.tx.generationRun.findMany.mockResolvedValue([{ ...validRun, id: "pending-run", status: "WAITING_APPROVAL" }]);
+    mocks.tx.approvalRequest.findMany.mockResolvedValue([{ id: "approval", toolExecutionId: "execution" }]);
+    mocks.tx.approvalRequest.updateMany.mockResolvedValue({ count: 0 });
+    await expect(cancelGenerationPendingApprovals({ runId: validRun.id, conversationId: validRun.conversationId, outboxId: "outbox-stale", leaseAttempt: 3 })).rejects.toThrow("Approval changed");
+    expect(mocks.tx.generationRun.updateMany).not.toHaveBeenCalled();
+    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
   });
 
 });

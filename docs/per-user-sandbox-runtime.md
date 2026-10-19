@@ -26,7 +26,7 @@ flowchart TD
     SI --> SL["Reuse stopped/running SandboxLease or create a new lease"]
     SL --> SP["SandboxProvider adapter"]
     SP -->|"overseas/manual"| Daytona["Daytona code or browser runtime"]
-    SP -->|"China/manual"| Tencent["Tencent AGSX code runtime"]
+    SP -->|"China/manual"| Tencent["Tencent AGSX Code or All-in-One runtime"]
     Daytona --> EX
     Tencent --> EX
     EX --> BS["Record BrowserSession with sandbox identity"]
@@ -47,7 +47,11 @@ The adapter intentionally keeps Daytona calls inside `apps/compute-broker/src/sa
 
 ### Tencent AGSX
 
-Tencent AGSX is available only in `manual_poc` mode for server-marked test representatives. Phase 1 uses one Code Interpreter Tool through Tencent's E2B-compatible endpoint. Browser, customer workspace hydration, production billing, and automatic regional routing are not enabled by this phase.
+Tencent AGSX uses Tencent's E2B-compatible endpoint. Production admission remains in `manual_poc` mode for server-marked test representatives. The legacy Code tool supports code execution. Setting `TENCENT_AGS_ALL_IN_ONE_TOOL` takes precedence over the legacy tool and enables CODE and BROWSER runtimes on All-in-One. Customer workspace hydration and automatic regional routing remain outside this rollout.
+
+The current PUBLIC All-in-One tool does not honor E2B `allowInternetAccess=false` and rejects instance NetworkPolicy delivery. The adapter therefore accepts only `full` network mode on All-in-One and rejects `no_network`/`allowlist` before creating or connecting. Enabling All-in-One does not itself widen any representative's policy; both its live settings and published runtime authority must permit `full`.
+
+All-in-One browser execution resolves the preinstalled Node Playwright from `npm root -g` and system Chromium from PATH. It does not install packages or assume `/ms-playwright`. The browser profile is rooted in the provider workspace. OpenCode computer-use still requires Daytona.
 
 Every existing `SandboxIdentity.provider` remains authoritative. Changing the routing document affects only identities that do not exist yet; provider outages never trigger a Docker or cross-cloud fallback.
 
@@ -77,6 +81,9 @@ SANDBOX_PROVIDER_ROUTING_JSON='{"version":1,"default":"tencent","newIdentityEnab
 TENCENT_AGS_API_KEY=...
 TENCENT_AGS_REGION=ap-guangzhou
 TENCENT_AGS_CODE_TOOL=delegate-code-v1
+# All-in-One override. Leave empty to retain the legacy Code tool.
+# Requires explicitly approved FULL networking in live and published policy.
+TENCENT_AGS_ALL_IN_ONE_TOOL=delegate-aio-pi-v1
 
 # Cost controls
 SANDBOX_IDLE_STOP_MINUTES=15
@@ -105,6 +112,8 @@ The default lifecycle is:
 - Mark provider failures as `ERROR` so cleanup can retry safely.
 
 Stopping a lease must not delete the identity or user data. Archive/delete policy is separate and should only be enabled intentionally.
+
+All-in-One lease reuse includes the Tencent domain, tool name, and requested image in the lease's `baseImage` runtime identifier. This leaves the published `ComputeSession.baseImage` unchanged and prevents old Code leases from being reused after the switch. A READY session with a mismatched template fails with `sandbox_template_changed_new_session_required`; open a new compute session rather than silently moving its files to another instance. CODE and BROWSER retain separate lease identities. See [the migration record](tencent-all-in-one-migration.md) for local rollout evidence and network constraints.
 
 ## Observability
 

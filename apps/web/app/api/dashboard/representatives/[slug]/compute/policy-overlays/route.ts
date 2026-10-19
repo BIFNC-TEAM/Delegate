@@ -52,12 +52,6 @@ export async function PATCH(
             "mcpRequiresApproval" in body.baseline
               ? (body.baseline as { mcpRequiresApproval?: boolean }).mcpRequiresApproval !== false
               : true,
-          requiredPlanTier:
-            body.baseline &&
-            typeof body.baseline === "object" &&
-            (body.baseline as { requiredPlanTier?: string }).requiredPlanTier === "deep_help"
-              ? "deep_help"
-              : "pass",
         },
         trustedCustomer: {
           enabled:
@@ -104,13 +98,6 @@ export async function PATCH(
               ? (body.trustedCustomer as { mcpRequiresApproval?: boolean })
                   .mcpRequiresApproval !== false
               : true,
-          requiredPlanTier:
-            body.trustedCustomer &&
-            typeof body.trustedCustomer === "object" &&
-            (body.trustedCustomer as { requiredPlanTier?: string }).requiredPlanTier ===
-              "deep_help"
-              ? "deep_help"
-              : "pass",
         },
       },
     });

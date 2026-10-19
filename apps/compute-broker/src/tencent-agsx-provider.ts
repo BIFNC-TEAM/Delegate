@@ -1,5 +1,7 @@
 import type { Sandbox as E2BSandboxType } from "@e2b/code-interpreter";
 import type { DockerExecutionResult } from "./runner";
+import { executePythonOnExclusiveSandbox, type PythonProviderInput } from "./isolated-python/provider-execution";
+import { resolveTencentSandboxTool, type TencentSandboxTools } from "./tencent-sandbox-config";
 import {
   SandboxProviderError,
   requireWorkspaceInputFileName,
@@ -60,11 +62,10 @@ export type TencentAgsxClientLike = {
   }): Promise<TencentAgsxSandboxLike>;
 };
 
-export type TencentAgsxSandboxProviderOptions = {
+export type TencentAgsxSandboxProviderOptions = TencentSandboxTools & {
   client?: TencentAgsxClientLike | undefined;
   apiKey: string;
   domain: string;
-  codeTool: string;
   sandboxTimeoutMs?: number | undefined;
 };
 
@@ -73,19 +74,21 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
   private readonly client: TencentAgsxClientLike;
   private readonly apiKey: string;
   private readonly domain: string;
-  private readonly codeTool: string;
+  private readonly tools: TencentSandboxTools;
   private readonly sandboxTimeoutMs: number;
 
   constructor(options: TencentAgsxSandboxProviderOptions) {
     this.client = options.client ?? createTencentAgsxSdkClient();
     this.apiKey = options.apiKey;
     this.domain = options.domain;
-    this.codeTool = options.codeTool;
+    this.tools = options;
     this.sandboxTimeoutMs = options.sandboxTimeoutMs ?? 15 * 60 * 1000;
   }
 
   async start(input: SandboxProviderStartInput): Promise<SandboxProviderLease> {
-    assertPhaseOneTencentPolicy(input);
+    assertTencentPolicy(input, Boolean(this.tools.allInOneTool));
+    const template = resolveTencentSandboxTool(this.tools, input.networkMode);
+    let createdSandbox: TencentAgsxSandboxLike | undefined;
     try {
       const sandbox = input.providerSandboxId
         ? await this.client.connect({
@@ -95,13 +98,14 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
             timeoutMs: this.sandboxTimeoutMs,
           })
         : await this.client.create({
-            template: this.codeTool,
+            template,
             apiKey: this.apiKey,
             domain: this.domain,
             timeoutMs: this.sandboxTimeoutMs,
             allowInternetAccess: input.networkMode === "full",
             metadata: buildTencentMetadata(input),
           });
+      if (!input.providerSandboxId) createdSandbox = sandbox;
 
       const prepared = await sandbox.commands.run(`mkdir -p ${TENCENT_WORKSPACE_ROOT}`, {
         cwd: "/home/user",
@@ -123,6 +127,9 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
         sessionRoot: TENCENT_WORKSPACE_ROOT,
       };
     } catch (error) {
+      // A successful create followed by failed preparation must not leak a
+      // running instance which the broker has never had a chance to bind.
+      if (createdSandbox) await createdSandbox.kill().catch(() => undefined);
       throw mapTencentAgsxError(error, !input.providerSandboxId);
     }
   }
@@ -139,7 +146,10 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
         domain: this.domain,
         timeoutMs: this.sandboxTimeoutMs,
       });
-      const result = await sandbox.commands.run(mapTencentCommand(input.command), {
+      const command = this.tools.allInOneTool
+        ? `export DELEGATE_SESSION_ROOT=${TENCENT_WORKSPACE_ROOT}\nexport DELEGATE_BROWSER_RUNTIME=tencent-all-in-one\n${mapTencentCommand(input.command)}`
+        : mapTencentCommand(input.command);
+      const result = await sandbox.commands.run(command, {
         cwd: mapTencentWorkingDirectory(input.workingDirectory),
         timeoutMs: input.maxCommandSeconds * 1000,
         requestTimeoutMs: (input.maxCommandSeconds + 15) * 1000,
@@ -185,6 +195,15 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
       }
       throw mapped;
     }
+  }
+
+  async executeIsolatedPython(input: PythonProviderInput) {
+    if (!this.tools.allInOneTool) throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
+    const sandbox = await this.client.connect({
+      sandboxId: requireProviderSandboxId(input.lease), apiKey: this.apiKey,
+      domain: this.domain, timeoutMs: this.sandboxTimeoutMs,
+    });
+    return executePythonOnExclusiveSandbox(sandbox, input);
   }
 
   async writeInput(input: SandboxProviderInputWriteInput) {
@@ -254,7 +273,9 @@ export class TencentAgsxSandboxProvider implements SandboxProvider {
 export function createTencentAgsxSdkClient(): TencentAgsxClientLike {
   return {
     async create(input) {
-      const { Sandbox } = await import("@e2b/code-interpreter");
+      const { Sandbox } = await import("@e2b/code-interpreter").catch(() => {
+        throw new SandboxProviderError("CONFIG_INVALID", false);
+      });
       const sandbox = await Sandbox.create(input.template, {
         apiKey: input.apiKey,
         domain: input.domain,
@@ -265,7 +286,9 @@ export function createTencentAgsxSdkClient(): TencentAgsxClientLike {
       return adaptE2BSandbox(sandbox);
     },
     async connect(input) {
-      const { Sandbox } = await import("@e2b/code-interpreter");
+      const { Sandbox } = await import("@e2b/code-interpreter").catch(() => {
+        throw new SandboxProviderError("CONFIG_INVALID", false);
+      });
       const sandbox = await Sandbox.connect(input.sandboxId, {
         apiKey: input.apiKey,
         domain: input.domain,
@@ -338,8 +361,8 @@ export function readTencentCommandExitResult(error: unknown): TencentAgsxCommand
   };
 }
 
-function assertPhaseOneTencentPolicy(input: SandboxProviderStartInput) {
-  if ((input.runtimeClass ?? "code") !== "code") {
+function assertTencentPolicy(input: SandboxProviderStartInput, allInOne: boolean) {
+  if ((input.runtimeClass ?? "code") !== "code" && !allInOne) {
     throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
   }
   if (

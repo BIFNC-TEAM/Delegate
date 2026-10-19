@@ -3,6 +3,12 @@ import { SSEClientTransport, SseError } from "@modelcontextprotocol/sdk/client/s
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { isBailianSearchEndpoint } from "@delegate/web-data";
+import { normalizePublicSearchResult, publicSearchHeaders } from "./bailian-search";
+import { isAgentContextAuthorizationError, isActionIdentityError } from "@delegate/runtime";
+import type { McpProviderOperation, McpProviderState } from "@delegate/compute-protocol";
+import { classifyProviderReceipt, parseProviderContract, providerArguments } from "./mcp-recovery-contract";
+import { assertLiveMcpToolSchemaPin } from "./mcp-tool-definitions";
 
 import { computeBrokerConfig } from "./config";
 import { resolveMcpToolName } from "./mcp-bindings";
@@ -109,6 +115,8 @@ export async function callRemoteMcpTool(params: {
   retrySafe?: boolean | undefined;
   onBeforeToolCall?: (() => Promise<void>) | undefined;
   onToolsListed?: ((tools: RemoteMcpToolDefinition[]) => Promise<void>) | undefined;
+  providerOperation?: McpProviderOperation | undefined;
+  authorize?: (() => Promise<void>) | undefined;
 }) {
   const bindingUrl = await assertSafePublicMcpUrl(params.binding.serverUrl);
   const payloadLimits = computeBrokerConfig.mcpPayloadLimits;
@@ -126,34 +134,50 @@ export async function callRemoteMcpTool(params: {
   // Unknown outcomes are never retried for ordinary MCP bindings because the
   // remote side may already have committed a mutation. A server-verified,
   // naturally idempotent read can safely absorb one transient transport fault.
-  const maxAttempts = params.retrySafe
-    ? Math.max(2, Math.min(params.binding.maxRetries + 1, 3))
-    : 1;
+  const operation = params.providerOperation ? structuredClone(params.providerOperation) : undefined;
+  if (operation) operation.contract = parseProviderContract(operation.contract);
+  if (operation?.contract.mode === "keyed" && operation.contract.query?.toolName === resolveMcpToolName({ binding: params.binding, requestedToolName: params.requestedToolName }).toolName) throw new SessionError(409, "mcp_provider_contract_invalid");
+  const originalArguments = structuredClone(params.toolArguments ?? {});
+  const wireArguments = operation ? providerArguments(operation, originalArguments) : originalArguments;
+  const naturalRead = operation ? operation.contract.mode === "natural_read" : params.retrySafe === true;
+  const keyed = operation?.contract.mode === "keyed";
+  const maxAttempts = naturalRead || keyed ? Math.max(1, Math.min(params.binding.maxRetries + 1, 3)) : 1;
   const timeoutMs = resolveMcpCallTimeoutMs(
     computeBrokerConfig.mcpTimeoutMs,
-    params.retrySafe ?? false,
+    naturalRead,
   );
-  const recordToolCallStart = createAtMostOnceAsyncCallback(
-    params.onBeforeToolCall,
-  );
+  const monotonicExpiry = operation?.expiresAt ? performance.now() + Math.max(0, Date.parse(operation.expiresAt) - Date.now()) : 0;
+  const assertKeyLive = () => {
+    if (keyed && (!operation?.expiresAt || !Number.isFinite(Date.parse(operation.expiresAt))
+      || Date.now() >= Date.parse(operation.expiresAt) || performance.now() >= monotonicExpiry)) throw new SessionError(409, "mcp_provider_key_expired");
+  };
+  let queryAttempts = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let callStarted = false;
     try {
+      await params.authorize?.();
+      assertKeyLive();
       const result = await callRemoteMcpToolOnce({
         binding: params.binding,
         bindingUrl,
         timeoutMs,
         requestedToolName: params.requestedToolName,
-        toolArguments: params.toolArguments,
-        onBeforeToolCall: recordToolCallStart,
+        toolArguments: wireArguments,
+        // Authorization is per request, not a once-only lifecycle notification.
+        onBeforeToolCall: async () => { await params.authorize?.(); await params.onBeforeToolCall?.(); assertKeyLive(); callStarted = true; },
         onToolsListed: params.onToolsListed,
+        ...(keyed && operation.contract.mode === "keyed" && operation.contract.key.kind === "header"
+          ? { keyHeader: { name: operation.contract.key.name, value: operation.key } } : {}),
       });
 
       return {
         ...result,
         attempts: attempt,
         transportKind: params.binding.transportKind,
+        ...(keyed ? { providerState: classifyProviderReceipt(result.result, operation!), recoveredByQuery: false, queryAttempts } : {}),
       };
     } catch (error) {
+      if (isAgentContextAuthorizationError(error) || isActionIdentityError(error)) throw error;
       if (error instanceof SessionError && !(error instanceof McpTransportError)) {
         throw error;
       }
@@ -162,9 +186,29 @@ export async function callRemoteMcpTool(params: {
         params.binding.transportKind,
         attempt,
       );
-      if (!params.retrySafe || !normalized.retryable || attempt === maxAttempts) {
+      if (keyed && callStarted && operation!.contract.mode === "keyed" && operation!.contract.query) {
+        queryAttempts++;
+        // Query first. A missing/unknown receipt is never proof of no effect.
+        // Only the independently verified deduplication contract can authorize
+        // another submission, with the original key and exact original payload.
+        const queried = await queryRemoteMcpOperation({ binding: params.binding, operation: operation!,
+          authorize: params.authorize, onBeforeToolCall: params.onBeforeToolCall, onToolsListed: params.onToolsListed }).catch(queryError => {
+            if (isAgentContextAuthorizationError(queryError) || isActionIdentityError(queryError) || (queryError instanceof SessionError && !(queryError instanceof McpTransportError))
+              || (queryError instanceof McpTransportError && !queryError.retryable)) throw queryError;
+            return null;
+          });
+        if (queried && ["succeeded", "failed_no_effect", "pending"].includes(queried.state)) return {
+          toolName: params.requestedToolName ?? params.binding.defaultToolName!, allowedToolNames: queried.allowedToolNames,
+          availableToolNames: queried.availableToolNames, result: queried.result,
+          summary: `Provider status query: ${queried.state}.`, attempts: attempt, transportKind: params.binding.transportKind,
+          providerState: queried.state, recoveredByQuery: true, queryAttempts,
+        };
+        if (queried?.state === "unknown") throw new SessionError(409, "mcp_provider_receipt_unverified");
+      }
+      if ((!naturalRead && !keyed) || !normalized.retryable || attempt === maxAttempts) {
         throw normalized;
       }
+      assertKeyLive();
       if (params.binding.retryBackoffMs > 0) {
         await wait(params.binding.retryBackoffMs);
       }
@@ -178,6 +222,32 @@ export async function callRemoteMcpTool(params: {
   );
 }
 
+export async function queryRemoteMcpOperation(params: {
+  binding: BindingRecord; operation: McpProviderOperation;
+  onBeforeToolCall?: (() => Promise<void>) | undefined;
+  onToolsListed?: ((tools: RemoteMcpToolDefinition[]) => Promise<void>) | undefined;
+  authorize?: (() => Promise<void>) | undefined;
+}) {
+  const contract = parseProviderContract(params.operation.contract);
+  if (contract.mode !== "keyed" || !contract.query) throw new SessionError(409, "mcp_provider_status_unsupported");
+  await params.authorize?.();
+  const bindingUrl = await assertSafePublicMcpUrl(params.binding.serverUrl);
+  const query = contract.query;
+  const result = await callRemoteMcpToolOnce({ binding: params.binding, bindingUrl, timeoutMs: Math.min(computeBrokerConfig.mcpTimeoutMs, 10000),
+    requestedToolName: query.toolName, toolArguments: { [query.keyArgument]: params.operation.key },
+    onBeforeToolCall: async () => { await params.authorize?.(); await params.onBeforeToolCall?.(); },
+    onToolsListed: async tools => { await params.onToolsListed?.(tools); assertLiveMcpToolSchemaPin({ toolName: query.toolName, expectedToolSchemaHash: query.toolSchemaHash, tools }); },
+  });
+  const state = classifyProviderReceipt(result.result, params.operation);
+  const raw = result.result as { structuredContent?: Record<string, unknown> };
+  const fields = contract.receipt;
+  const minimal = state === "unknown" ? {} : { [fields.keyField]: raw.structuredContent?.[fields.keyField], [fields.stateField]: raw.structuredContent?.[fields.stateField] };
+  // A status observation is not an alternative route for returning an entire
+  // private business record supplied by a provider.
+  return { ...result, summary: `Provider status query: ${state}.`, result: { structuredContent: minimal, content: [{ type: "text", text: JSON.stringify(minimal) }] }, state };
+}
+
+/** Bookkeeping only; permission checks must run on every attempt/request. */
 export function createAtMostOnceAsyncCallback(
   callback?: (() => Promise<void>) | undefined,
 ) {
@@ -207,11 +277,15 @@ async function callRemoteMcpToolOnce(params: {
   toolArguments?: Record<string, unknown> | undefined;
   onBeforeToolCall?: (() => Promise<void>) | undefined;
   onToolsListed?: ((tools: RemoteMcpToolDefinition[]) => Promise<void>) | undefined;
+  keyHeader?: { name: string; value: string };
 }) {
+  const resolved = resolveMcpToolName({ binding: params.binding, requestedToolName: params.requestedToolName });
+  let admissionError: unknown;
   const transport = createTransport(
     params.binding.transportKind,
     params.bindingUrl,
     params.timeoutMs,
+    { toolName: resolved.toolName, beforeCall: async () => { try { await params.onBeforeToolCall?.(); } catch (error) { admissionError = error; throw error; } }, keyHeader: params.keyHeader },
   );
   const client = new Client({
     name: "delegate-compute-broker",
@@ -248,22 +322,17 @@ async function callRemoteMcpToolOnce(params: {
           : {}),
       } satisfies RemoteMcpToolDefinition;
     });
-    const resolved = resolveMcpToolName({
-      binding: params.binding,
-      requestedToolName: params.requestedToolName,
-    });
 
     if (!availableToolNames.includes(resolved.toolName)) {
       throw new SessionError(409, "mcp_tool_not_exposed_by_server");
     }
 
     await params.onToolsListed?.(toolDefinitions);
-    await params.onBeforeToolCall?.();
-    const result: unknown = await client.callTool({
+    const rawResult: unknown = await client.callTool({
       name: resolved.toolName,
       arguments: params.toolArguments ?? {},
     });
-    assertMcpJsonPayload(result, {
+    assertMcpJsonPayload(rawResult, {
       maxBytes: computeBrokerConfig.mcpPayloadLimits.maxResponseBytes,
       maxDepth: computeBrokerConfig.mcpPayloadLimits.maxJsonDepth,
       maxNodes: computeBrokerConfig.mcpPayloadLimits.maxJsonNodes,
@@ -273,6 +342,8 @@ async function callRemoteMcpToolOnce(params: {
       statusCode: 502,
     });
 
+    const result = isBailianSearchEndpoint(params.bindingUrl.href) && resolved.toolName === "search_pro"
+      ? normalizePublicSearchResult(rawResult) : rawResult;
     return {
       toolName: resolved.toolName,
       allowedToolNames: resolved.allowedToolNames,
@@ -284,6 +355,8 @@ async function callRemoteMcpToolOnce(params: {
           : undefined,
       ),
     };
+  } catch (error) {
+    throw admissionError ?? error;
   } finally {
     await client.close().catch(() => undefined);
   }
@@ -293,19 +366,27 @@ function createTransport(
   kind: BindingRecord["transportKind"],
   url: URL,
   timeoutMs: number,
+  call?: { toolName: string; beforeCall?: (() => Promise<void>) | undefined; keyHeader?: { name: string; value: string } | undefined },
 ) {
+  const publicFetch = createPublicOnlyMcpFetch(url.origin, timeoutMs, {
+    maxRequestBytes: computeBrokerConfig.mcpPayloadLimits.maxRequestBytes, maxResponseBytes: computeBrokerConfig.mcpPayloadLimits.maxResponseBytes,
+  });
   const common = {
-    fetch: createPublicOnlyMcpFetch(
-      url.origin,
-      timeoutMs,
-      {
-        maxRequestBytes: computeBrokerConfig.mcpPayloadLimits.maxRequestBytes,
-        maxResponseBytes: computeBrokerConfig.mcpPayloadLimits.maxResponseBytes,
-      },
-    ),
+    fetch: (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (init.method?.toUpperCase() === "POST" && typeof init.body !== "string") throw new SessionError(413, "mcp_request_payload_unsupported");
+      const body = typeof init.body === "string" ? JSON.parse(init.body) as Record<string, any> : null;
+      if (Array.isArray(body)) throw new SessionError(413, "mcp_request_payload_unsupported");
+      if (body?.method === "tools/call") {
+        if (!call || body.params?.name !== call.toolName) throw new SessionError(409, "mcp_provider_request_changed");
+        await call.beforeCall?.();
+        if (call.keyHeader) { const headers = new Headers(init.headers); headers.set(call.keyHeader.name, call.keyHeader.value); init = { ...init, headers }; }
+      }
+      return publicFetch(input, init);
+    }) as typeof fetch,
     requestInit: {
       headers: {
         "user-agent": "Delegate-Compute-Broker/0.1",
+        ...publicSearchHeaders(url),
       },
     },
   };

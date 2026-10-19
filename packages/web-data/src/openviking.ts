@@ -66,6 +66,14 @@ const OPENVIKING_SYNC_JOB_INITIAL_BACKOFF_MS = 5_000;
 const OPENVIKING_SYNC_JOB_MAX_BACKOFF_MS = 5 * 60 * 1_000;
 const OPENVIKING_SYNC_JOB_MAX_ATTEMPTS = 8;
 
+/** Configuration availability only; per-request authorization and live health are still checked during recall. */
+export function isKnowledgeRetrievalServiceConfigured(environment: NodeJS.ProcessEnv = process.env): boolean {
+  try {
+    const config = resolveOpenVikingEnv(environment);
+    return config.enabled && config.hasModelCredentials;
+  } catch { return false; }
+}
+
 export type RepresentativeOpenVikingSyncTrigger =
   | "manual"
   | "create"
@@ -2151,11 +2159,23 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
     const pinByAssetId = new Map(
       params.snapshot.knowledgeAssets.map((pin) => [pin.assetId, pin]),
     );
+    // Determine current visibility from metadata BEFORE selecting stored text.
+    // A published pin preserves bytes, not permission after archive/unbinding.
+    const liveBindings = pinByAssetId.size ? await prisma.knowledgeAssetRepresentative.findMany({
+      where: { representativeId: params.representative.id, assetId: { in: [...pinByAssetId.keys()] }, enabled: true, reviewStatus: "APPROVED",
+        asset: { ownerId: params.representative.ownerId, archivedAt: null, status: { not: "ARCHIVED" } } },
+      select: { assetId: true },
+    }) : [];
+    const liveAssetIds = liveBindings.map(binding => binding.assetId);
     const [manifestItems, ledgerItems] = await Promise.all([
       prisma.representativeVersionResource.findMany({
         where: {
           representativeId: params.representative.id,
           publishedVersionId: params.publishedVersionId,
+          OR: [
+            { sourceKind: "REPRESENTATIVE_VERSION_RESOURCE" },
+            { sourceKind: "KNOWLEDGE_ASSET", knowledgeAssetId: { in: liveAssetIds } },
+          ],
         },
         select: {
           publishedVersionId: true,
@@ -2227,6 +2247,7 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
         if (
           !assetId
           || !pin
+          || !liveAssetIds.includes(assetId)
           || manifest.resourceKey !== `knowledge/${assetId}.md`
           || manifest.contentHash !== pin.checksum
         ) {

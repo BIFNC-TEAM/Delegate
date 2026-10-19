@@ -18,7 +18,7 @@ const runEventsSource = readFileSync(
 describe("public Compute approval run lifecycle", () => {
   it("treats waiting approval as a terminal streamed response with a message", () => {
     expect(runEventsSource).toContain(
-      'new Set(["waiting_approval", "completed", "failed", "canceled"])',
+      'new Set(["waiting_approval", "waiting_human", "completed", "failed", "canceled"])',
     );
     expect(panelSource).toContain(
       '["completed", "waiting_approval"].includes(snapshot.status) && snapshot.message',

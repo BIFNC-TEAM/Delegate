@@ -172,8 +172,6 @@ describe("audience generation-run authorization", () => {
       generationRunId: "run-1",
       representativeId: "rep-1",
       productCode: null,
-      activePlanTier: undefined,
-      hasPaidEntitlement: false,
     });
     expect(verifier).not.toHaveBeenCalled();
     expect(
@@ -218,11 +216,12 @@ describe("audience generation-run authorization", () => {
         client as never,
         verifier,
       ),
-    ).resolves.toMatchObject({
+    ).resolves.toEqual({
       kind: "wallet",
       audienceIdentityId: "audience-1",
       generationRunId: "run-1",
-      activePlanTier: "pass",
+      representativeId: "rep-1",
+      productCode: "agent-wallet:service-credit:v1",
     });
     expect(verifier).toHaveBeenCalledWith({
       usageChargeId: "usage-1",

@@ -51,11 +51,12 @@ export async function enforcePublicChatNetworkAdmission(input: {
 export async function enforcePublicChatPrincipalAdmission(input: {
   representativeId: string;
   audienceIdentityId: string;
+  operation?: "new_message" | "task_control";
   now?: Date;
 }) {
   await claimPublicChatRateLimit({
     scope: "audience_minute",
-    identity: `${input.representativeId}:${input.audienceIdentityId}`,
+    identity: `${input.operation === "task_control" ? "task_control:" : ""}${input.representativeId}:${input.audienceIdentityId}`,
     limit: readPositiveInteger(
       process.env.PUBLIC_CHAT_AUDIENCE_REQUESTS_PER_MINUTE,
       12,
@@ -64,6 +65,7 @@ export async function enforcePublicChatPrincipalAdmission(input: {
     windowMs: MINUTE_MS,
     ...(input.now ? { now: input.now } : {}),
   });
+  if (input.operation === "task_control") return;
   await claimPublicChatRateLimit({
     scope: "representative_day",
     identity: input.representativeId,

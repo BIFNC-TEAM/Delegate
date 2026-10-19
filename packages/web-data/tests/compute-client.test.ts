@@ -4,6 +4,8 @@ import {
   callComputeBroker,
   ComputeBrokerError,
   uploadAudienceComputeInput,
+  executeAudienceTool,
+  queryAudienceToolProviderOutcome,
 } from "../src/compute-client";
 
 const previousInternalToken = process.env.COMPUTE_BROKER_INTERNAL_TOKEN;
@@ -16,6 +18,27 @@ afterEach(() => {
 });
 
 describe("compute client public error boundary", () => {
+  it("queries an existing outcome without accepting a replacement key or payload", async () => {
+    configureBroker(); const transport = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ state: "unknown", observationOnly: true }), { status: 200 }));
+    vi.stubGlobal("fetch", transport);
+    await queryAudienceToolProviderOutcome({ sessionId: "session", executionId: "original", audienceIdentityId: "visitor" });
+    expect(transport).toHaveBeenCalledOnce(); expect(transport.mock.calls[0]![0]).toBe("http://compute-broker.test/internal/compute/sessions/session/executions/original/provider-outcome");
+    expect(JSON.parse(String(transport.mock.calls[0]![1]!.body))).toEqual({ audienceIdentityId: "visitor" });
+  });
+  it("preserves the host action identity in the actual Broker HTTP request", async () => {
+    configureBroker();
+    const transport = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ outcome: "completed" }), { status: 200 }));
+    vi.stubGlobal("fetch", transport);
+    await executeAudienceTool("session", { capability: "mcp", subagentId: "compute-agent", logicalAction: { version: 1, ordinal: 3 },
+      bindingId: "binding", toolName: "create", toolArguments: { amount: 1 }, hasPaidEntitlement: false, browserMode: "deterministic", maxSteps: 1, allowMutations: false,
+      generationWorkLease: { outboxId: "work", leaseAttempt: 2 } });
+    expect(transport).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(transport.mock.calls[0]![1]!.body))).toMatchObject({ logicalAction: { version: 1, ordinal: 3 }, toolArguments: { amount: 1 }, generationWorkLease: { outboxId: "work", leaseAttempt: 2 } });
+  });
+  it("preserves the fixed action-conflict code for the runtime's no-retry barrier", async () => {
+    configureBroker(); vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "logical_action_previous_unresolved" }), { status: 409 })));
+    await expect(callComputeBroker("/internal/test", { method: "POST" })).rejects.toMatchObject({ code: "logical_action_previous_unresolved", statusCode: 409 });
+  });
   it("projects attachment records onto the Broker's strict session-input contract", async () => {
     configureBroker();
     const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({

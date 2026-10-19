@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
+import { agentTextFileOutputNotice } from "@delegate/domain";
+import { ComputePolicyStatus } from "./compute-policy-status";
 
 import {
   maxDeliverableBundleItems,
@@ -46,7 +48,6 @@ type ComputeSnapshot = {
         browserRequiresApproval: boolean;
         mcpDecision: "allow" | "ask" | "deny";
         mcpRequiresApproval: boolean;
-        requiredPlanTier: "pass" | "deep_help";
       };
       trustedCustomer: {
         enabled: boolean;
@@ -55,7 +56,6 @@ type ComputeSnapshot = {
         browserRequiresApproval: boolean;
         mcpDecision: "allow" | "ask" | "deny";
         mcpRequiresApproval: boolean;
-        requiredPlanTier: "pass" | "deep_help";
       };
     };
     governance: {
@@ -70,7 +70,6 @@ type ComputeSnapshot = {
         browserRequiresApproval: boolean;
         mcpDecision: "allow" | "ask" | "deny";
         mcpRequiresApproval: boolean;
-        requiredPlanTier: "pass" | "deep_help";
       };
       customerAccounts: Array<{
         id?: string | null;
@@ -81,7 +80,6 @@ type ComputeSnapshot = {
         browserRequiresApproval: boolean;
         mcpDecision: "allow" | "ask" | "deny";
         mcpRequiresApproval: boolean;
-        requiredPlanTier: "pass" | "deep_help";
         contactIds: string[];
       }>;
       contactAssignments: Array<{
@@ -1546,7 +1544,6 @@ export function DashboardCompute({
           browserRequiresApproval: true,
           mcpDecision: "allow",
           mcpRequiresApproval: false,
-          requiredPlanTier: "pass",
           contactIds: [],
         },
       ],
@@ -1820,6 +1817,7 @@ export function DashboardCompute({
             {snapshot.representative.computeEnabled ? t.enabledHeadline : t.disabledHeadline}
           </h3>
           <p>{t.heroCopy(snapshot.representative.baseImage, snapshot.representative.maxSessionMinutes)}</p>
+          <p>{t.fileOutputNotice}</p>
           <div className="chip-row">
             <span className="chip">{snapshot.representative.slug}</span>
             <span
@@ -1839,6 +1837,7 @@ export function DashboardCompute({
       {message ? <div className="status-banner status-success">{message}</div> : null}
       {error ? <div className="status-banner status-error">{error}</div> : null}
 
+      <ComputePolicyStatus representativeSlug={representativeSlug} locale={locale} savedRevision={JSON.stringify(snapshot.representative)} />
       <DashboardSignalStrip cards={platformCards} />
 
       <DashboardSurfaceGrid columns={2}>
@@ -1925,25 +1924,6 @@ export function DashboardCompute({
                     <option value="deny">{t.overlayDecisions.deny}</option>
                     <option value="ask">{t.overlayDecisions.ask}</option>
                     <option value="allow">{t.overlayDecisions.allow}</option>
-                  </select>
-                </label>
-                <label className="field-label">
-                  <span>{t.overlayFields.requiredPlanTier}</span>
-                  <select
-                    className="field-input"
-                    onChange={(event) =>
-                      setOverlayForm((current) => ({
-                        ...current,
-                        baseline: {
-                          ...current.baseline,
-                          requiredPlanTier: event.target.value as "pass" | "deep_help",
-                        },
-                      }))
-                    }
-                    value={overlayForm.baseline.requiredPlanTier}
-                  >
-                    <option value="pass">Pass</option>
-                    <option value="deep_help">Deep Help</option>
                   </select>
                 </label>
               </div>
@@ -2065,25 +2045,6 @@ export function DashboardCompute({
                     <option value="deny">{t.overlayDecisions.deny}</option>
                     <option value="ask">{t.overlayDecisions.ask}</option>
                     <option value="allow">{t.overlayDecisions.allow}</option>
-                  </select>
-                </label>
-                <label className="field-label">
-                  <span>{t.overlayFields.requiredPlanTier}</span>
-                  <select
-                    className="field-input"
-                    onChange={(event) =>
-                      setOverlayForm((current) => ({
-                        ...current,
-                        trustedCustomer: {
-                          ...current.trustedCustomer,
-                          requiredPlanTier: event.target.value as "pass" | "deep_help",
-                        },
-                      }))
-                    }
-                    value={overlayForm.trustedCustomer.requiredPlanTier}
-                  >
-                    <option value="pass">Pass</option>
-                    <option value="deep_help">Deep Help</option>
                   </select>
                 </label>
               </div>
@@ -2241,25 +2202,6 @@ export function DashboardCompute({
                     <option value="allow">{t.overlayDecisions.allow}</option>
                   </select>
                 </label>
-                <label className="field-label">
-                  <span>{t.overlayFields.requiredPlanTier}</span>
-                  <select
-                    className="field-input"
-                    onChange={(event) =>
-                      setGovernanceForm((current) => ({
-                        ...current,
-                        organizationBaseline: {
-                          ...current.organizationBaseline,
-                          requiredPlanTier: event.target.value as "pass" | "deep_help",
-                        },
-                      }))
-                    }
-                    value={governanceForm.organizationBaseline.requiredPlanTier}
-                  >
-                    <option value="pass">Pass</option>
-                    <option value="deep_help">Deep Help</option>
-                  </select>
-                </label>
               </div>
               <div className="chip-row">
                 <label className="field-toggle">
@@ -2414,29 +2356,6 @@ export function DashboardCompute({
                           <option value="deny">{t.overlayDecisions.deny}</option>
                           <option value="ask">{t.overlayDecisions.ask}</option>
                           <option value="allow">{t.overlayDecisions.allow}</option>
-                        </select>
-                      </label>
-                      <label className="field-label">
-                        <span>{t.overlayFields.requiredPlanTier}</span>
-                        <select
-                          className="field-input"
-                          onChange={(event) =>
-                            setGovernanceForm((current) => ({
-                              ...current,
-                              customerAccounts: current.customerAccounts.map((candidate, candidateIndex) =>
-                                candidateIndex === index
-                                  ? {
-                                      ...candidate,
-                                      requiredPlanTier: event.target.value as "pass" | "deep_help",
-                                    }
-                                  : candidate,
-                              ),
-                            }))
-                          }
-                          value={account.requiredPlanTier}
-                        >
-                          <option value="pass">Pass</option>
-                          <option value="deep_help">Deep Help</option>
                         </select>
                       </label>
                     </div>
@@ -5002,7 +4921,6 @@ function createEmptyOverlayForm(): OverlayFormState {
       browserRequiresApproval: true,
       mcpDecision: "ask",
       mcpRequiresApproval: true,
-      requiredPlanTier: "pass",
     },
     trustedCustomer: {
       enabled: true,
@@ -5011,7 +4929,6 @@ function createEmptyOverlayForm(): OverlayFormState {
       browserRequiresApproval: true,
       mcpDecision: "allow",
       mcpRequiresApproval: false,
-      requiredPlanTier: "pass",
     },
   };
 }
@@ -5029,7 +4946,6 @@ function createEmptyGovernanceForm(): GovernanceFormState {
       browserRequiresApproval: true,
       mcpDecision: "ask",
       mcpRequiresApproval: true,
-      requiredPlanTier: "pass",
     },
     customerAccounts: [],
     contactAssignments: [],
@@ -5078,13 +4994,14 @@ const copy = {
     loadingHeadline: "正在加载隔离 compute 控制台",
     loadingCopy: "再等一下，加载完成后这里会显示审批队列、session 和 artifact。",
     heroKicker: "Governed compute",
-    enabledHeadline: "这个代表已经可以申请隔离 compute session",
+    fileOutputNotice: agentTextFileOutputNotice.zh,
+    enabledHeadline: "编辑配置已启用沙盒能力",
     disabledHeadline: "这个代表的 compute 目前仍然关闭",
     heroCopy: (image: string, minutes: number) =>
       `默认镜像是 ${image}，session 上限 ${minutes} 分钟。这里不只是看命令有没有跑，而是看 approval、artifact 和成本是否受控。`,
     enabledChip: "compute on",
     disabledChip: "compute off",
-    policyChip: (value: string) => `default: ${value}`,
+    policyChip: (value: string) => `编辑默认策略：${value}`,
     signalCards: {
       pendingApprovals: "Pending approvals",
       pendingApprovalsDetail: "还需要 owner 决策的命令请求。",
@@ -5099,11 +5016,11 @@ const copy = {
       nativeProviders: "Native lanes",
       nativeProvidersDetail: (state: string) => `当前 native computer-use preflight 状态：${state}。`,
       autoApproveTokenLimitLabel: "自动执行 Token 上限",
-      autoApproveTokenLimitLabelDetail: "预计 Token 不超过此值时，低风险且策略允许的操作才可自动执行。",
+      autoApproveTokenLimitLabelDetail: "预计 Token 不超过此值时，策略允许的操作才可自动执行；0 表示正估算用量仍需审批，只读工具也受此上限约束。",
     },
     platformCards: {
-      policyMode: "Default policy",
-      policyModeDetail: "没有命中具体规则时，默认如何处理。",
+      policyMode: "编辑默认策略",
+      policyModeDetail: "已保存的编辑值；实际执行还受已发布上限与请求规则约束。",
       networkMode: "Network mode",
       networkModeDetail: "session 默认走什么网络边界。",
       networkAllowlistDetail: (value: string[]) =>
@@ -5132,7 +5049,6 @@ const copy = {
     overlayFields: {
       browserDecision: "Browser decision",
       mcpDecision: "MCP decision",
-      requiredPlanTier: "Required plan tier",
       trustTier: "Trust tier",
       enabled: "Overlay enabled",
       browserApproval: "Browser still needs approval",
@@ -5545,13 +5461,14 @@ const copy = {
     loadingHeadline: "Loading the isolated compute lane",
     loadingCopy: "One moment. This view will show the approval queue, sessions, and artifacts.",
     heroKicker: "Governed compute",
-    enabledHeadline: "This representative can request isolated compute sessions",
+    fileOutputNotice: agentTextFileOutputNotice.en,
+    enabledHeadline: "Compute is enabled in the saved configuration",
     disabledHeadline: "This representative still has compute turned off",
     heroCopy: (image: string, minutes: number) =>
       `Default image ${image}, session limit ${minutes} minutes. This lane is about approval, artifacts, and controlled cost, not just whether a command ran.`,
     enabledChip: "compute on",
     disabledChip: "compute off",
-    policyChip: (value: string) => `default: ${value}`,
+    policyChip: (value: string) => `Saved default: ${value}`,
     signalCards: {
       pendingApprovals: "Pending approvals",
       pendingApprovalsDetail: "Requests still waiting for an owner decision.",
@@ -5566,11 +5483,11 @@ const copy = {
       nativeProviders: "Native lanes",
       nativeProvidersDetail: (state: string) => `Current native computer-use preflight state: ${state}.`,
       autoApproveTokenLimitLabel: "Automatic-execution token limit",
-      autoApproveTokenLimitLabelDetail: "Only low-risk, policy-allowed actions at or below this estimated token count may run automatically.",
+      autoApproveTokenLimitLabelDetail: "Policy-allowed actions may run automatically at or below this estimated token count. Zero requires approval for positive estimates; read-only tools also obey this limit.",
     },
     platformCards: {
-      policyMode: "Default policy",
-      policyModeDetail: "How unmatched requests are handled by default.",
+      policyMode: "Saved default policy",
+      policyModeDetail: "Editing value; execution also obeys the published ceiling and request-specific rules.",
       networkMode: "Network mode",
       networkModeDetail: "The default network boundary for sessions.",
       networkAllowlistDetail: (value: string[]) =>
@@ -5597,7 +5514,6 @@ const copy = {
     overlayFields: {
       browserDecision: "Browser 决策",
       mcpDecision: "MCP 决策",
-      requiredPlanTier: "需要的套餐层级",
       trustTier: "信任等级",
       enabled: "启用 overlay",
       browserApproval: "Browser 仍需审批",

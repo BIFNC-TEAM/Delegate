@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import {
+  agentBehaviorSchema,
+  readAgentBehavior,
   conversationContractSchema,
   demoRepresentative,
   groupActivationSchema,
@@ -28,7 +30,6 @@ import {
   BillingPriceVersionStatus,
   BillingProductStatus,
   BillingRefundPolicy,
-  CapabilityPlanTier,
   Channel,
   ComputeFilesystemMode,
   ComputeNetworkMode,
@@ -146,6 +147,7 @@ const representativeSetupUpdateSchema = z.object({
   name: z.string().trim().min(1),
   tagline: z.string().trim().min(1),
   tone: z.string().trim().min(1),
+  agentBehavior: agentBehaviorSchema.optional(),
   languages: z.array(z.string().trim().min(1)).min(1),
   groupActivation: groupActivationSchema,
   publicMode: z.boolean(),
@@ -193,6 +195,7 @@ export type RepresentativeSetupSnapshot = Pick<
   | "name"
   | "tagline"
   | "tone"
+  | "agentBehavior"
   | "languages"
   | "groupActivation"
   | "skills"
@@ -490,6 +493,7 @@ export function buildRepresentativeRuntimeProfile(
     name: setup.name,
     tagline: setup.tagline,
     tone: setup.tone,
+    ...(setup.agentBehavior ? { agentBehavior: { ...setup.agentBehavior } } : {}),
     languages: [...setup.languages],
     groupActivation: setup.groupActivation,
     skills: [...setup.skills],
@@ -619,6 +623,12 @@ export async function createRepresentative(
           displayName: template.name,
           roleSummary: template.tagline,
           tone: template.tone,
+          agentBehavior: {
+            version: 1,
+            answerScope: "owner_and_domain",
+            knowledgePolicy: "domain_first",
+            commitmentPolicy: "information_only",
+          },
           publicMode: template.publicMode,
           groupModeEnabled: true,
           groupActivation: mapGroupActivationToDb(template.groupActivation),
@@ -1181,6 +1191,7 @@ export async function updateRepresentativeSetup(
           displayName: input.name,
           roleSummary: input.tagline,
           tone: input.tone,
+          ...(input.agentBehavior !== undefined ? { agentBehavior: input.agentBehavior } : {}),
           publicMode: input.publicMode,
           groupActivation: mapGroupActivationToDb(input.groupActivation),
           languages: input.languages,
@@ -1372,6 +1383,7 @@ function haveSameStringSet(left: string[], right: string[]): boolean {
 function serializeRepresentativeSetup(
   representative: RepresentativeSetupRecord,
 ): RepresentativeSetupSnapshot {
+  const agentBehavior = readAgentBehavior(representative.agentBehavior);
   return {
     id: representative.id,
     slug: representative.slug,
@@ -1380,6 +1392,7 @@ function serializeRepresentativeSetup(
     name: representative.displayName,
     tagline: representative.roleSummary,
     tone: representative.tone,
+    ...(agentBehavior ? { agentBehavior } : {}),
     languages: parseStringArray(representative.languages, demoRepresentative.languages),
     groupActivation: mapGroupActivationFromDb(representative.groupActivation),
     publicMode: representative.publicMode,
@@ -1483,7 +1496,8 @@ export function applyRepresentativeVersionSnapshot(
   value: unknown,
 ): RepresentativeSetupSnapshot {
   const snapshot = asJsonRecord(value);
-  if (!snapshot) return { ...current, skillPacks: [] };
+  const { agentBehavior: _draftBehavior, ...currentWithoutBehavior } = current;
+  if (!snapshot) return { ...currentWithoutBehavior, skillPacks: [] };
 
   const identity = asJsonRecord(snapshot.identity);
   const conversation = asJsonRecord(snapshot.conversation);
@@ -1523,9 +1537,12 @@ export function applyRepresentativeVersionSnapshot(
       })
     : [];
   const effectiveCompute = resolvePublishedComputeCeiling(current.compute, snapshot.compute);
+  if (snapshot.agentBehavior === null) throw new Error("representative_agent_behavior_invalid");
+  const publishedBehavior = readAgentBehavior(snapshot.agentBehavior);
 
   return {
-    ...current,
+    ...currentWithoutBehavior,
+    ...(publishedBehavior ? { agentBehavior: publishedBehavior } : {}),
     name: readSnapshotString(identity?.displayName) ?? current.name,
     tagline: readSnapshotString(identity?.roleSummary) ?? current.tagline,
     tone: readSnapshotString(identity?.tone) ?? current.tone,
@@ -2251,6 +2268,7 @@ function updateDemoFallbackRepresentativeSetup(
   snapshot.name = input.name;
   snapshot.tagline = input.tagline;
   snapshot.tone = input.tone;
+  if (input.agentBehavior !== undefined) snapshot.agentBehavior = { ...input.agentBehavior };
   snapshot.languages = [...input.languages];
   snapshot.groupActivation = input.groupActivation;
   snapshot.publicMode = input.publicMode;
@@ -2280,6 +2298,7 @@ function cloneRepresentativeSetupSnapshot(
 ): RepresentativeSetupSnapshot {
   return {
     ...snapshot,
+    ...(snapshot.agentBehavior ? { agentBehavior: { ...snapshot.agentBehavior } } : {}),
     languages: [...snapshot.languages],
     skills: [...snapshot.skills],
     skillPacks: snapshot.skillPacks.map((pack) => ({
@@ -2545,27 +2564,14 @@ async function upsertManagedCapabilityPolicyProfile(
   await tx.capabilityPolicyRule.createMany({
     data: [
       {
-        id: `${profile.id}_browser_paid_private`,
-        profileId: profile.id,
-        capability: "BROWSER",
-        decision: "ASK",
-        domainPattern: ".*",
-        resourceScopeCondition: "BROWSER_LANE",
-        channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
-        priority: 220,
-        requiresPaidPlan: true,
-        requiresHumanApproval: true,
-      },
-      {
         id: `${profile.id}_process_paid`,
         profileId: profile.id,
         capability: "PROCESS",
         decision: "ASK",
         resourceScopeCondition: "WORKSPACE",
-        requiredPlanTier: CapabilityPlanTier.PASS,
+        requiredPlanTier: null,
         priority: 210,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {
@@ -2600,30 +2606,10 @@ async function upsertOwnerManagedCapabilityProfiles(
   const baselineProfileId = `cap_profile_owner_baseline_${ownerId}`;
   const trustedProfileId = `cap_profile_owner_trusted_${ownerId}`;
 
-  const baselineProfile = await tx.capabilityPolicyProfile.upsert({
-    where: { id: baselineProfileId },
-    update: {
-      ownerId,
-      representativeId: null,
-      name: "Owner Managed Baseline",
-      isDefault: false,
-      enabled: true,
-      isManaged: true,
-      managedScope: "OWNER_MANAGED",
-      managedSource: "owner-managed",
-      editableByOwner: true,
-      contactTrustTierCondition: null,
-      precedence: 80,
-      defaultDecision: "ASK",
-      maxSessionMinutes: 15,
-      maxParallelSessions: 1,
-      maxCommandSeconds: 30,
-      artifactRetentionDays: 14,
-      networkMode: ComputeNetworkMode.NO_NETWORK,
-      networkAllowlist: [],
-      filesystemMode: ComputeFilesystemMode.WORKSPACE_ONLY,
-    },
-    create: {
+  const baselineProfile = { id: baselineProfileId };
+  const baselineCreated = await tx.capabilityPolicyProfile.createMany({
+    skipDuplicates: true,
+    data: {
       id: baselineProfileId,
       ownerId,
       representativeId: null,
@@ -2643,33 +2629,13 @@ async function upsertOwnerManagedCapabilityProfiles(
       networkMode: ComputeNetworkMode.NO_NETWORK,
       networkAllowlist: [],
       filesystemMode: ComputeFilesystemMode.WORKSPACE_ONLY,
-    },
+    }
   });
 
-  const trustedProfile = await tx.capabilityPolicyProfile.upsert({
-    where: { id: trustedProfileId },
-    update: {
-      ownerId,
-      representativeId: null,
-      name: "Trusted Customer Overlay",
-      isDefault: false,
-      enabled: true,
-      isManaged: true,
-      managedScope: "CUSTOMER_TRUST_TIER",
-      managedSource: "owner-managed",
-      editableByOwner: true,
-      contactTrustTierCondition: "verified",
-      precedence: 90,
-      defaultDecision: "ASK",
-      maxSessionMinutes: 15,
-      maxParallelSessions: 1,
-      maxCommandSeconds: 30,
-      artifactRetentionDays: 14,
-      networkMode: ComputeNetworkMode.NO_NETWORK,
-      networkAllowlist: [],
-      filesystemMode: ComputeFilesystemMode.WORKSPACE_ONLY,
-    },
-    create: {
+  const trustedProfile = { id: trustedProfileId };
+  const trustedCreated = await tx.capabilityPolicyProfile.createMany({
+    skipDuplicates: true,
+    data: {
       id: trustedProfileId,
       ownerId,
       representativeId: null,
@@ -2690,19 +2656,19 @@ async function upsertOwnerManagedCapabilityProfiles(
       networkMode: ComputeNetworkMode.NO_NETWORK,
       networkAllowlist: [],
       filesystemMode: ComputeFilesystemMode.WORKSPACE_ONLY,
-    },
+    }
   });
 
-  await tx.capabilityPolicyRule.deleteMany({
-    where: {
-      profileId: {
-        in: [baselineProfile.id, trustedProfile.id],
-      },
-    },
-  });
+  // Setup saves must not reset owner-configured overlays. Only initialize
+  // profiles actually inserted by this transaction (also safe for concurrent creation).
+  const createdProfileIds = new Set([
+    ...(baselineCreated.count ? [baselineProfile.id] : []),
+    ...(trustedCreated.count ? [trustedProfile.id] : []),
+  ]);
+  if (!createdProfileIds.size) return;
 
   await tx.capabilityPolicyRule.createMany({
-    data: [
+    data: ([
       {
         id: `${baselineProfile.id}_browser_baseline`,
         profileId: baselineProfile.id,
@@ -2710,9 +2676,9 @@ async function upsertOwnerManagedCapabilityProfiles(
         decision: "ASK",
         resourceScopeCondition: "BROWSER_LANE",
         channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
+        requiredPlanTier: null,
         priority: 160,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {
@@ -2733,9 +2699,9 @@ async function upsertOwnerManagedCapabilityProfiles(
         decision: "ASK",
         resourceScopeCondition: "BROWSER_LANE",
         channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
+        requiredPlanTier: null,
         priority: 170,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {
@@ -2749,7 +2715,7 @@ async function upsertOwnerManagedCapabilityProfiles(
         requiresPaidPlan: false,
         requiresHumanApproval: false,
       },
-    ],
+    ] satisfies Prisma.CapabilityPolicyRuleCreateManyInput[]).filter(rule => createdProfileIds.has(rule.profileId)),
   });
 }
 

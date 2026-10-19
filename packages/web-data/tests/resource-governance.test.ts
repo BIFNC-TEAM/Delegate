@@ -15,7 +15,6 @@ function createSource() {
         browserRequiresApproval: true,
         mcpDecision: "ask" as const,
         mcpRequiresApproval: true,
-        requiredPlanTier: "pass" as const,
       },
       trustedCustomer: {
         enabled: true,
@@ -24,7 +23,6 @@ function createSource() {
         browserRequiresApproval: false,
         mcpDecision: "allow" as const,
         mcpRequiresApproval: false,
-        requiredPlanTier: "pass" as const,
       },
     },
     governance: {
@@ -39,7 +37,6 @@ function createSource() {
         browserRequiresApproval: true,
         mcpDecision: "ask" as const,
         mcpRequiresApproval: true,
-        requiredPlanTier: "pass" as const,
       },
       customerAccounts: [
         {
@@ -51,7 +48,6 @@ function createSource() {
           browserRequiresApproval: false,
           mcpDecision: "allow" as const,
           mcpRequiresApproval: false,
-          requiredPlanTier: "pass" as const,
           contactIds: ["contact_acme"],
         },
       ],
@@ -167,7 +163,6 @@ describe("buildRepresentativeResourceGovernanceSnapshot", () => {
           browserRequiresApproval: true,
           mcpDecision: "ask",
           mcpRequiresApproval: true,
-          requiredPlanTier: "pass",
         },
         trustedCustomer: {
           enabled: true,
@@ -176,7 +171,6 @@ describe("buildRepresentativeResourceGovernanceSnapshot", () => {
           browserRequiresApproval: true,
           mcpDecision: "allow",
           mcpRequiresApproval: false,
-          requiredPlanTier: "pass",
         },
       },
       governance: {
@@ -191,7 +185,6 @@ describe("buildRepresentativeResourceGovernanceSnapshot", () => {
           browserRequiresApproval: true,
           mcpDecision: "ask",
           mcpRequiresApproval: true,
-          requiredPlanTier: "pass",
         },
         customerAccounts: [],
         contactAssignments: [],

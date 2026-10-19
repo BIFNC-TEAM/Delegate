@@ -22,7 +22,8 @@ describe("public Pi response streaming", () => {
     expect(snapshotSource).toContain("text.slice(-32_000)");
     expect(snapshotSource).toContain("...(piStream ? { stream: piStream } : {})");
     expect(panelSource).toContain("setStreamingReply(snapshot.stream.text)");
-    expect(panelSource).toContain("streamingReply || t.thinking");
+    expect(panelSource).toContain('text={streamingReply || ""}');
+    expect(panelSource).toContain("<PublicRunProgress");
     expect(eventsRouteSource).toContain("RUN_STREAM_POLL_INTERVAL_MS = 150");
   });
 });

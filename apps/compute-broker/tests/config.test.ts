@@ -11,6 +11,24 @@ describe("compute broker provider configuration", () => {
     vi.unstubAllEnvs();
   });
 
+  it("accepts All-in-One without requiring a legacy Code tool", async () => {
+    vi.stubEnv("TENCENT_AGS_API_KEY", "key");
+    vi.stubEnv("TENCENT_AGS_REGION", "ap-guangzhou");
+    vi.stubEnv("TENCENT_AGS_DOMAIN", "");
+    vi.stubEnv("TENCENT_AGS_CODE_TOOL", "");
+    vi.stubEnv("TENCENT_AGS_ALL_IN_ONE_TOOL", " delegate-aio-pi-v1 ");
+    vi.stubEnv("SANDBOX_ROUTING_MODE", "manual_poc");
+    vi.stubEnv("SANDBOX_PROVIDER_ROUTING_JSON", JSON.stringify({
+      version: 1, default: "tencent",
+      newIdentityEnabled: { docker: false, daytona: false, tencent: true },
+      phase1AllowedRepresentativeIds: [], representatives: {},
+    }));
+    const { computeBrokerConfig } = await import("../src/config");
+    expect(computeBrokerConfig.tencent).toEqual({
+      apiKey: "key", domain: "ap-guangzhou.tencentags.com", allInOneTool: "delegate-aio-pi-v1",
+    });
+  });
+
   it("treats blank optional Daytona settings as unset", async () => {
     vi.stubEnv("DAYTONA_API_URL", "");
     vi.stubEnv("DAYTONA_SANDBOX_CPU", " ");

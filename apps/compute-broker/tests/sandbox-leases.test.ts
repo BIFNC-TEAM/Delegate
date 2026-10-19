@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockPrisma } = vi.hoisted(() => {
   const prismaMock = {
@@ -45,6 +45,7 @@ vi.mock("../src/prisma", () => ({
 }));
 
 describe("ensureUserSandboxLease", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
@@ -71,6 +72,32 @@ describe("ensureUserSandboxLease", () => {
     mockPrisma.computeSession.update.mockResolvedValue({ id: "session-1" });
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
     mockPrisma.$queryRaw.mockResolvedValue([]);
+  });
+
+  it("creates a new AIO lease instead of reusing an old Tencent Code lease", async () => {
+    vi.stubEnv("TENCENT_AGS_ALL_IN_ONE_TOOL", "delegate-aio-pi-v1");
+    vi.stubEnv("TENCENT_AGS_REGION", "ap-guangzhou");
+    vi.stubEnv("TENCENT_AGS_DOMAIN", "");
+    const identity = buildIdentity({ provider: "TENCENT" });
+    mockPrisma.sandboxIdentity.findUnique.mockResolvedValue(identity);
+    mockPrisma.sandboxIdentity.findUniqueOrThrow.mockResolvedValue(identity);
+    const legacyLease = { ...buildLease({ provider: "TENCENT", status: "RUNNING" }), baseImage: buildSession().baseImage };
+    mockPrisma.sandboxLease.findFirst.mockImplementation(async ({ where }) =>
+      where.baseImage === legacyLease.baseImage ? legacyLease : null);
+    const provider = buildProvider("tencent");
+    const { ensureUserSandboxLease } = await import("../src/sandbox-leases");
+    await ensureUserSandboxLease({
+      session: buildSession(), networkMode: "full", filesystemMode: "ephemeral_full",
+      providerFactory: async () => provider,
+      selectProviderForNewIdentity: async () => ({ providerKind: "tencent", decisionSource: "default" }),
+    });
+    expect(mockPrisma.sandboxLease.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        provider: "TENCENT",
+        baseImage: "tencent://ap-guangzhou.tencentags.com/delegate-aio-pi-v1?image=debian%3Abookworm-slim",
+      }),
+    }));
+    expect(provider.start).toHaveBeenCalledWith(expect.objectContaining({ providerSandboxId: null }));
   });
 
   it("uses the representative/contact/conversation scope and creates one running lease", async () => {
@@ -198,6 +225,37 @@ describe("ensureUserSandboxLease", () => {
     expect(provider.start).toHaveBeenCalledWith(expect.objectContaining({
       providerSandboxId: "provider-sandbox-existing",
     }));
+  });
+
+  it("replaces a missing stopped runtime once for anonymous browser preparation", async () => {
+    const { SandboxProviderError } = await import('../src/sandbox-provider');
+    const { ensureUserSandboxLease } = await import('../src/sandbox-leases');
+    mockPrisma.sandboxIdentity.findUnique.mockResolvedValue(buildIdentity());
+    mockPrisma.sandboxLease.findFirst.mockResolvedValueOnce(buildLease({status:'STOPPED',providerSandboxId:'old-runtime'})).mockResolvedValue(null);
+    mockPrisma.sandboxLease.update.mockImplementation(async ({data}) => buildLease({status:data.status ?? 'STARTING',providerSandboxId:'old-runtime'}));
+    mockPrisma.sandboxLease.create.mockResolvedValue({...buildLease(),id:'lease-new'});
+    mockPrisma.sandboxLease.findUniqueOrThrow.mockResolvedValue({...buildLease({status:'RUNNING'}),id:'lease-new'});
+    const provider=buildProvider();provider.start.mockRejectedValueOnce(new SandboxProviderError('RUNTIME_NOT_FOUND',false));
+    const result=await ensureUserSandboxLease({session:{...buildSession(),runtimeClass:'BROWSER'},networkMode:'full',filesystemMode:'ephemeral_full',providerFactory:async()=>provider,selectProviderForNewIdentity:async()=>({providerKind:'docker',decisionSource:'legacy'}),recoverMissingBrowserRuntime:true});
+    expect(provider.start).toHaveBeenCalledTimes(2);
+    expect(provider.start).toHaveBeenNthCalledWith(1,expect.objectContaining({providerSandboxId:'old-runtime'}));
+    expect(provider.start).toHaveBeenNthCalledWith(2,expect.objectContaining({providerSandboxId:null,sandboxLeaseId:'lease-new'}));
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(result.identity.id).toBe('identity-1');expect(result.lease.id).toBe('lease-new');
+    expect(mockPrisma.sandboxLease.update).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({status:'ERROR',errorReason:'runtime_not_found'})}));
+    expect(mockPrisma.sandboxLease.create).toHaveBeenCalledOnce();
+  });
+
+  it.each(['disabled','stateful-code','auth','ambiguous','fresh-create','second-create-fails'])('does not silently retry unsafe or unbounded recovery: %s',async scenario=>{
+    const { SandboxProviderError } = await import('../src/sandbox-provider');
+    const { ensureUserSandboxLease } = await import('../src/sandbox-leases');
+    mockPrisma.sandboxIdentity.findUnique.mockResolvedValue(buildIdentity());
+    mockPrisma.sandboxLease.findFirst.mockResolvedValueOnce(scenario==='fresh-create'?null:buildLease({status:'STOPPED',providerSandboxId:'old-runtime'})).mockResolvedValue(null);
+    mockPrisma.sandboxLease.update.mockResolvedValue(buildLease({status:'STARTING',providerSandboxId:'old-runtime'}));
+    const provider=buildProvider();provider.start.mockRejectedValue(new SandboxProviderError(scenario==='auth'?'AUTH_INVALID':'RUNTIME_NOT_FOUND',false,scenario==='ambiguous'));
+    await expect(ensureUserSandboxLease({session:{...buildSession(),runtimeClass:scenario==='stateful-code'?'CODE':'BROWSER'},networkMode:'full',filesystemMode:'ephemeral_full',providerFactory:async()=>provider,selectProviderForNewIdentity:async()=>({providerKind:'docker',decisionSource:'legacy'}),recoverMissingBrowserRuntime:scenario!=='disabled'})).rejects.toThrow();
+    expect(provider.start).toHaveBeenCalledTimes(scenario==='second-create-fails'?2:1);
+    expect(provider.execute).not.toHaveBeenCalled();
   });
 
   it("marks the lease as error when the provider fails to start", async () => {
@@ -366,7 +424,7 @@ describe("ensureUserSandboxLease", () => {
   });
 });
 
-function buildProvider(kind: "docker" | "daytona" = "docker") {
+function buildProvider(kind: "docker" | "daytona" | "tencent" = "docker") {
   return {
     kind,
     start: vi.fn(async () => ({

@@ -1,7 +1,6 @@
 import { demoRepresentative } from "@delegate/domain";
 import {
   AudienceRole,
-  CapabilityPlanTier,
   ChannelDesiredState,
   ChannelHealthStatus,
   ChannelSourceProvider,
@@ -1505,7 +1504,7 @@ async function upsertDefaultCapabilityPolicyProfile(
         domainPattern: ".*",
         resourceScopeCondition: "BROWSER_LANE",
         priority: 70,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
     ],
@@ -1572,27 +1571,14 @@ async function upsertManagedCapabilityPolicyProfile(
   await tx.capabilityPolicyRule.createMany({
     data: [
       {
-        id: `${profile.id}_browser_paid_private`,
-        profileId: profile.id,
-        capability: "BROWSER",
-        decision: "ASK",
-        domainPattern: ".*",
-        resourceScopeCondition: "BROWSER_LANE",
-        channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
-        priority: 220,
-        requiresPaidPlan: true,
-        requiresHumanApproval: true,
-      },
-      {
         id: `${profile.id}_process_paid`,
         profileId: profile.id,
         capability: "PROCESS",
         decision: "ASK",
         resourceScopeCondition: "WORKSPACE",
-        requiredPlanTier: CapabilityPlanTier.PASS,
+        requiredPlanTier: null,
         priority: 210,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {
@@ -1739,9 +1725,9 @@ async function upsertOwnerManagedCapabilityProfiles(
         decision: "ASK",
         resourceScopeCondition: "BROWSER_LANE",
         channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
+        requiredPlanTier: null,
         priority: 160,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {
@@ -1762,9 +1748,9 @@ async function upsertOwnerManagedCapabilityProfiles(
         decision: "ASK",
         resourceScopeCondition: "BROWSER_LANE",
         channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
+        requiredPlanTier: null,
         priority: 170,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {

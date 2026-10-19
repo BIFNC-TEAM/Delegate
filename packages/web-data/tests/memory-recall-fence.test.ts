@@ -29,6 +29,7 @@ const { clientMocks, memoryUseMocks, mockPrisma } = vi.hoisted(() => ({
     representativeMemoryPolicy: { findUnique: vi.fn() },
     governedMemory: { findMany: vi.fn() },
     knowledgeAsset: { findMany: vi.fn() },
+    knowledgeAssetRepresentative: { findMany: vi.fn() },
     representativeVersionResource: { findMany: vi.fn() },
     publicKnowledgeProjectionItem: { findMany: vi.fn() },
     message: { findFirst: vi.fn() },
@@ -98,6 +99,7 @@ describe("governed memory recall fence", () => {
   });
 
   beforeEach(() => {
+    mockPrisma.knowledgeAssetRepresentative.findMany.mockImplementation(async ({ where }: { where: { assetId: { in: string[] } } }) => where.assetId.in.map(assetId => ({ assetId })));
     vi.clearAllMocks();
     mockPrisma.$transaction.mockReset();
     mockPrisma.$transaction.mockImplementation(
@@ -322,6 +324,20 @@ describe("governed memory recall fence", () => {
       }),
     ]);
     expect(memoryUseMocks.record).toHaveBeenCalledTimes(1);
+  });
+  it("checks live binding metadata before selecting any archived or unbound asset text", async () => {
+    installPublicKnowledgeAsset("SYNTHETIC_REVOKED_BODY 等温线", "withdrawn-asset");
+    mockPrisma.knowledgeAssetRepresentative.findMany.mockResolvedValue([]);
+    const recalled = await recallRepresentativeContext({ representativeSlug, conversationId: "conversation-1", contactId,
+      sourceChannel: "web", generationRunId: "generation-run-1", queryText: "等温线", allowedSourceKinds: ["PUBLIC_KNOWLEDGE"] });
+    expect(recalled.items).toEqual([]); expect(clientMocks.search).not.toHaveBeenCalled(); expect(clientMocks.read).not.toHaveBeenCalled();
+    expect(mockPrisma.knowledgeAssetRepresentative.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ representativeId, enabled: true, reviewStatus: "APPROVED", asset: expect.objectContaining({ archivedAt: null, status: { not: "ARCHIVED" } }) }),
+      select: { assetId: true },
+    }));
+    expect(mockPrisma.representativeVersionResource.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ OR: [{ sourceKind: "REPRESENTATIVE_VERSION_RESOURCE" }, { sourceKind: "KNOWLEDGE_ASSET", knowledgeAssetId: { in: [] } }] }),
+    }));
   });
 
   it("denies a knowledge probe when the active episode no longer matches the pinned version", async () => {

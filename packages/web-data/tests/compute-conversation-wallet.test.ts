@@ -540,4 +540,25 @@ describe("compute approval wallet finalization", () => {
       }),
     );
   });
+  it.each(["different_approval", "duplicate_completed"])("ignores %s v2 callbacks before changing messages or charges", async (kind) => {
+    mocks.tx.approvalRequest.findUnique.mockResolvedValue({ ...approvalWithPaidRun, generationRun: { ...approvalWithPaidRun.generationRun,
+      contextSnapshot: { piApprovalContinuation: { version: 2, approvalId: kind === "different_approval" ? "a2" : "approval-1", status: kind === "different_approval" ? "pending" : "completed", checkpoint: { version: 2 } } },
+    } });
+    expect(await finalizeComputeApprovalConversation({ approvalId: "approval-1", outcome: "completed", artifacts: [] })).toBeNull();
+    expect(mocks.tx.generationRun.updateMany).not.toHaveBeenCalled();
+    expect(mocks.tx.message.upsert).not.toHaveBeenCalled();
+    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "failed"] as const)("resumes v2 browser %s with original checkpoint and without settling twice", async (outcome) => {
+    const checkpoint = { version: 2, pending: { approvalId: "approval-1", callId: "call-1", toolName: "browse_in_sandbox" }, turnsUsed: 3 };
+    mocks.tx.approvalRequest.findUnique.mockResolvedValue({ ...approvalWithPaidRun, generationRun: { ...approvalWithPaidRun.generationRun,
+      contextSnapshot: { piApprovalContinuation: { version: 2, approvalId: "approval-1", status: "pending", checkpoint } },
+    } });
+    await finalizeComputeApprovalConversation({ approvalId: "approval-1", outcome, artifacts: [] });
+    expect(mocks.tx.generationRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "QUEUED", contextSnapshot: expect.objectContaining({ piApprovalContinuation: expect.objectContaining({ checkpoint, status: "completed", resultStatus: outcome }) }) }) }));
+    expect(mocks.tx.outboxEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { idempotencyKey: "generation.approval-continuation:run-1:approval-1" } }));
+    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
 });

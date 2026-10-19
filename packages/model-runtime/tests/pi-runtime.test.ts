@@ -39,6 +39,206 @@ const representative = {
 };
 
 describe("Delegate Pi Agent runtime", () => {
+  it("uses the managed sandbox browser instead of generating a Python browser launcher", async () => {
+    const model = modelBinding([
+      (context) => {
+        const names = context.tools?.map(tool => tool.name) ?? [];
+        expect(names).toContain("browse_in_sandbox");
+        expect(names).not.toContain("execute_in_sandbox");
+        return fauxAssistantMessage(fauxToolCall("browse_in_sandbox", { url: "https://example.com" }), { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage("页面标题是 Example Domain。"),
+    ]);
+    let visits = 0;
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "managed-browser", sessionId: "managed-browser", userText: "使用沙盒浏览器打开 https://example.com",
+      representative, model: model.binding,
+      capabilities: { sandbox: {
+        execute: async () => { throw new Error("must not generate browser code"); },
+        browse: async ({ url }: { url: string }) => {
+          visits++;
+          expect(url).toBe("https://example.com");
+          return { status: "completed", text: "Example Domain", sources: [{ id: "page-1", title: "Example Domain", channel: "web", provider: "sandbox-browser", url }] };
+        },
+      } } as PiCapabilityAdapters,
+    });
+    expect(visits).toBe(1);
+    expect(result.toolCalls).toBe(1);
+    expect(result.text).toContain("Example Domain");
+  });
+
+  it("waits for approval on the managed sandbox browser without falling back to code", async () => {
+    const model = modelBinding([fauxAssistantMessage(fauxToolCall("browse_in_sandbox", { url: "https://example.com" }), { stopReason: "toolUse" })]);
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "managed-browser-approval", sessionId: "managed-browser-approval", userText: "使用沙盒浏览器获取最新股票信息",
+      representative, model: model.binding,
+      capabilities: { sandbox: {
+        execute: async () => { throw new Error("must not execute code"); },
+        browse: async () => ({ status: "pending_approval", text: "Browser approval required." }),
+      } } as PiCapabilityAdapters,
+    });
+    expect(result.text).toContain("等待审批");
+    expect(result.modelCalls).toBe(1);
+    expect(result.toolCalls).toBe(1);
+  });
+
+
+  it("does not expose weather MCP as a substitute for an explicitly requested sandbox browser", async () => {
+    const model = modelBinding([
+      (context) => {
+        const names = context.tools?.map((tool) => tool.name) ?? [];
+        expect(names).toContain("execute_in_sandbox");
+        expect(names.some((name) => name.startsWith("mcp__"))).toBe(false);
+        expect(names).not.toContain("search_current_web");
+        return fauxAssistantMessage(fauxToolCall("execute_in_sandbox", {
+          language: "python", code: "print('browser')",
+        }), { stopReason: "toolUse" });
+      },
+    ]);
+    let mcpCalls = 0;
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "sandbox-browser-route", sessionId: "sandbox-browser-route",
+      userText: "使用沙盒浏览器获取最新的腾讯的股票信息", representative, model: model.binding,
+      capabilities: {
+        sandbox: { execute: async () => ({ status: "pending_approval", text: "Waiting for sandbox approval." }) },
+        web: { search: async () => { throw new Error("wrong route"); } },
+        mcp: {
+          listTools: async () => [{ server: "open-meteo", name: "openmeteo_search_locations", description: "Find weather locations", inputSchema: { type: "object", properties: {} }, readOnly: true, idempotent: true }],
+          callTool: async () => { mcpCalls++; return { status: "completed", text: "wrong weather result" }; },
+        },
+      },
+    });
+    expect(result.text).toContain("等待审批");
+    expect(result.text).not.toContain("MCP");
+    expect(result.sources).toEqual([]);
+    expect(result.modelCalls).toBe(1);
+    expect(mcpCalls).toBe(0);
+  });
+
+  it("stops all evidence corrections while a sandbox operation is awaiting approval", async () => {
+    const model = modelBinding([
+      fauxAssistantMessage(fauxToolCall("execute_in_sandbox", {
+        language: "python", code: "print('pending browser')",
+      }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("这段文字不应在等待审批时生成。"),
+    ]);
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "sandbox-pending-stop", sessionId: "sandbox-pending-stop",
+      userText: "使用沙盒浏览器查询最新股票行情，然后使用 MCP 整理结果", representative, model: model.binding,
+      capabilities: {
+        sandbox: { execute: async () => ({ status: "pending_approval", text: "Waiting for approval." }) },
+        mcp: {
+          listTools: async () => [{ server: "quotes", name: "read", description: "Current quotes", inputSchema: { type: "object", properties: {} }, readOnly: true, idempotent: true }],
+          callTool: async () => { throw new Error("must wait for approval"); },
+        },
+      },
+    });
+    expect(result.modelCalls).toBe(1);
+    expect(result.toolCalls).toBe(1);
+    expect(result.text).toContain("等待审批");
+    expect(result.text).not.toContain("来源：MCP");
+  });
+
+  it.each(["沙盒", "沙箱"])("requires real execution when a visitor explicitly requests the %s browser", async (sandboxWord) => {
+    const request = `使用${sandboxWord}浏览器获取最新的腾讯的股票信息`;
+    const model = modelBinding([
+      (context) => {
+        // Production supplies audience-only history. An unrelated old question
+        // must not become another pending user turn in the provider request.
+        expect(JSON.stringify(context.messages)).not.toContain("如何区分“的、地、得”");
+        expect(JSON.stringify(context.messages)).toContain(request);
+        return fauxAssistantMessage("的、地、得是三个结构助词。");
+      },
+      fauxAssistantMessage(fauxToolCall("execute_in_sandbox", {
+        language: "python", code: "print('browser probe')",
+      }), { stopReason: "toolUse" }),
+    ]);
+    let sandboxCalls = 0;
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: `browser-required-${sandboxWord}`, sessionId: "browser-required", userText: request,
+      representative, model: model.binding,
+      history: [{ role: "user", text: "如何区分“的、地、得”？" }],
+      capabilities: { sandbox: { execute: async () => {
+        sandboxCalls += 1;
+        return { status: "pending_approval", text: "Waiting for approval." };
+      } } },
+    });
+    expect(sandboxCalls).toBe(1);
+    expect(result.text).toContain("等待审批");
+    expect(result.text).not.toContain("结构助词");
+  });
+
+  it("does not deliver an unrelated answer when the model ignores a sandbox-browser correction", async () => {
+    const model = modelBinding([
+      fauxAssistantMessage("的、地、得是三个结构助词。"),
+      fauxAssistantMessage("沙盒不支持联网。"),
+    ]);
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "browser-evidence-missing", sessionId: "browser-evidence-missing",
+      userText: "请使用沙盒浏览器打开网页", representative, model: model.binding,
+      capabilities: { sandbox: { execute: async () => { throw new Error("should not run"); } } },
+    });
+    expect(result.text).toContain("没有实际调用沙盒");
+    expect(result.text).not.toContain("结构助词");
+    expect(result.text).not.toContain("不支持联网");
+  });
+
+  it("requires current evidence for Chinese stock-information requests", async () => {
+    const model = modelBinding([fauxAssistantMessage("股票现价是 999 元。")]);
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "stock-evidence-missing", sessionId: "stock-evidence-missing",
+      userText: "获取最新的腾讯的股票信息", representative, model: model.binding,
+    });
+    expect(result.text).toContain("没有取得可验证的数据");
+    expect(result.text).not.toContain("999");
+  });
+
+  it.each(["如何使用沙盒浏览器？", "不要使用沙盒，解释一下代码。", "Don't use the sandbox; explain the code."])("does not force sandbox execution for %s", async (userText) => {
+    const model = modelBinding([fauxAssistantMessage("这是一段说明。")]);
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: `sandbox-explanation-${userText}`, sessionId: "sandbox-explanation", userText,
+      representative, model: model.binding,
+      capabilities: { sandbox: { execute: async () => { throw new Error("not requested"); } } },
+    });
+    expect(result.modelCalls).toBe(1);
+    expect(result.toolCalls).toBe(0);
+    expect(result.text).toBe("这是一段说明。");
+  });
+
+  it("reports missing sandbox evidence when no sandbox tool is available", async () => {
+    const model = modelBinding([fauxAssistantMessage("的、地、得是三个结构助词。")]);
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "sandbox-unavailable", sessionId: "sandbox-unavailable", userText: "使用沙盒浏览器打开网页",
+      representative, model: model.binding,
+    });
+    expect(result.text).toContain("没有实际调用沙盒");
+    expect(result.text).not.toContain("结构助词");
+  });
+
+  it.each(["execute_in_sandbox", "browse_in_sandbox"])("uses approved %s evidence without reopening the completed task", async (toolName) => {
+    const model = modelBinding([fauxAssistantMessage("已抓取页面，页面未提供当前报价，因此无法确认最新股价。")]);
+    const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
+      runId: "sandbox-browser-approved", sessionId: "sandbox-browser-approved",
+      userText: "使用沙盒浏览器获取最新的腾讯的股票信息", representative, model: model.binding,
+      approvedToolResult: { approvalId: "approval-browser", toolName, status: "completed",
+        text: "Browser read completed; the retrieved page did not contain a current quote." },
+    });
+    expect(result.text).toContain("页面未提供当前报价");
+    expect(result.text).not.toContain("没有实际调用沙盒");
+    expect(result.toolCalls).toBe(0);
+    expect(result.modelCalls).toBe(1);
+  });
+
   it.each([
     ["真人转接", "request"],
     ["帮我找个人聊聊", "request"],
@@ -59,6 +259,7 @@ describe("Delegate Pi Agent runtime", () => {
       fauxAssistantMessage("摘要：示例服务用于整理公开资料，并在需要时通过隔离沙盒真实执行。"),
     ]);
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "approved-continuation-01",
       sessionId: "session-approved-continuation-01",
       userText: "生成摘要",
@@ -99,6 +300,7 @@ describe("Delegate Pi Agent runtime", () => {
       fauxAssistantMessage("摘要：这是一个用于记录笔记的新仓库欢迎文档。"),
     ]);
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "approved-continuation-replay-01",
       sessionId: "session-approved-continuation-replay-01",
       userText: "生成摘要",
@@ -130,6 +332,7 @@ describe("Delegate Pi Agent runtime", () => {
     const runtime = new DelegatePiAgentRuntime();
 
     const result = await runtime.run({
+      executionProtocol: "legacy_v1",
       runId: "basic-01",
       sessionId: "session-basic-01",
       userText: "你好",
@@ -154,6 +357,7 @@ describe("Delegate Pi Agent runtime", () => {
     let knowledgeCalls = 0;
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "representative-capabilities",
       sessionId: "session-representative-capabilities",
       userText: "我能让你做些什么？",
@@ -205,6 +409,7 @@ describe("Delegate Pi Agent runtime", () => {
     };
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "model-attempt-observation",
       sessionId: "session-model-attempt-observation",
       userText: "你好",
@@ -255,6 +460,7 @@ describe("Delegate Pi Agent runtime", () => {
     };
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "kb-01",
       sessionId: "session-kb-01",
       userText: "我们公司转正员工今年有几天年假？",
@@ -297,6 +503,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "representative-perspective-miss",
       sessionId: "session-representative-perspective-miss",
       userText: "我们公司转正员工今年有几天年假？",
@@ -343,6 +550,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "knowledge-unavailable",
       sessionId: "session-knowledge-unavailable",
       userText: "公司年假几天？",
@@ -376,6 +584,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "unsigned-authorship-guard",
       sessionId: "session-unsigned-authorship-guard",
       userText: "帮我写一条简短的会议通知，明天上午十点开会",
@@ -410,6 +619,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let calls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "kb-evidence-correction",
       sessionId: "session-kb-evidence-correction",
       userText: "按公司口径生成销售报告",
@@ -466,6 +676,7 @@ describe("Delegate Pi Agent runtime", () => {
     let knowledgeCalls = 0;
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "domain-knowledge-priority",
       sessionId: "session-domain-knowledge-priority",
       userText: "世界上面积最大的大洲是什么？",
@@ -516,6 +727,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "domain-knowledge-miss",
       sessionId: "session-domain-knowledge-miss",
       userText: "地球的形状是什么？",
@@ -550,12 +762,14 @@ describe("Delegate Pi Agent runtime", () => {
         expect(messages).toContain("Current request (answer only this request)");
         expect(messages).toContain("广州呢？");
         expect(messages).toContain("深圳今天天气怎么样？");
-        expect(messages).toContain("were already handled");
+        expect(messages).toContain("may supply missing information for an unresolved request");
+        expect(messages).not.toContain("were already handled");
         return fauxAssistantMessage("广州今天多云。");
       },
     ]);
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "safe-follow-up-history",
       sessionId: "session-safe-follow-up-history",
       userText: "广州呢？",
@@ -585,6 +799,7 @@ describe("Delegate Pi Agent runtime", () => {
     let webCalls = 0;
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "current-follow-up-correction",
       sessionId: "session-current-follow-up-correction",
       userText: "广州呢？",
@@ -634,6 +849,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let knowledgeCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "failed-current-data",
       sessionId: "session-failed-current-data",
       userText: "深圳现在天气如何？",
@@ -704,6 +920,7 @@ describe("Delegate Pi Agent runtime", () => {
           },
           readOnly: true,
           idempotent: true,
+          approvalRequired: false,
         }],
         callTool: async () => {
           starts.push(performance.now());
@@ -714,6 +931,7 @@ describe("Delegate Pi Agent runtime", () => {
     };
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "parallel",
       sessionId: "session-parallel",
       userText: "查深圳天气和订单 O1001",
@@ -754,6 +972,7 @@ describe("Delegate Pi Agent runtime", () => {
     };
     const runtime = new DelegatePiAgentRuntime();
     const pending = runtime.run({
+      executionProtocol: "legacy_v1",
       runId: "cancel-run",
       sessionId: "session-cancel",
       userText: "运行长脚本",
@@ -810,6 +1029,7 @@ describe("Delegate Pi Agent runtime", () => {
     };
 
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "skill-run",
       sessionId: "session-skill",
       userText: "分析这个销售表",
@@ -848,6 +1068,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let sandboxCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-evidence-gate",
       sessionId: "session-attachment-evidence-gate",
       userText: "分析这个表",
@@ -896,6 +1117,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let sandboxCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "structured-skill-bounded-failure",
       sessionId: "session-structured-skill-bounded-failure",
       userText: "分析这个销售 CSV",
@@ -951,6 +1173,7 @@ describe("Delegate Pi Agent runtime", () => {
       fauxAssistantMessage("附件解析失败，未生成结果。"),
     ]);
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-verified-failure",
       sessionId: "session-attachment-verified-failure",
       userText: "检查这个损坏的附件",
@@ -990,6 +1213,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let sandboxCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-pending-approval",
       sessionId: "session-attachment-pending-approval",
       userText: "生成摘要",
@@ -1030,6 +1254,7 @@ describe("Delegate Pi Agent runtime", () => {
       fauxAssistantMessage("第二次重试后文件已经生成：result.csv。"),
     ]);
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-evidence-terminal-gate",
       sessionId: "session-attachment-evidence-terminal-gate",
       userText: "分析附件并生成结果",
@@ -1063,6 +1288,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let recoveryCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-skill-recovery",
       sessionId: "session-attachment-skill-recovery",
       userText: "分析附件并生成 summary.csv",
@@ -1135,6 +1361,7 @@ describe("Delegate Pi Agent runtime", () => {
     let failedCalls = 0;
     let recoveryCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-failed-evidence-recovery",
       sessionId: "session-attachment-failed-evidence-recovery",
       userText: "分析附件并生成 summary.csv",
@@ -1190,6 +1417,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let recoveryCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-step-budget-recovery",
       sessionId: "session-attachment-step-budget-recovery",
       userText: "分析附件并生成 summary.csv",
@@ -1250,6 +1478,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let sandboxCalls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "attachment-final-escalation",
       sessionId: "session-attachment-final-escalation",
       userText: "分析附件并生成 summary.csv",
@@ -1293,6 +1522,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let calls = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "handoff-evidence-gate",
       sessionId: "session-handoff-evidence-gate",
       userText: "转人工客服",
@@ -1324,6 +1554,7 @@ describe("Delegate Pi Agent runtime", () => {
     ]);
     let attempts = 0;
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "retry-read",
       sessionId: "session-retry-read",
       userText: "公司年假几天？",
@@ -1361,6 +1592,7 @@ describe("Delegate Pi Agent runtime", () => {
       fauxAssistantMessage("This response must never be consumed."),
     ]);
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "max-steps",
       sessionId: "session-max-steps",
       userText: "不断查询",
@@ -1390,6 +1622,7 @@ describe("Delegate Pi Agent runtime", () => {
       fauxAssistantMessage("深圳销售额是 650。"),
     ]);
     const result = await new DelegatePiAgentRuntime().run({
+      executionProtocol: "legacy_v1",
       runId: "authoritative-summary",
       sessionId: "session-authoritative-summary",
       userText: "用沙盒核验销售额",

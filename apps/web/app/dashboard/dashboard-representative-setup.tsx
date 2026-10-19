@@ -13,6 +13,9 @@ import {
 import { DashboardRepresentativeBillingProducts } from "./dashboard-representative-billing-products";
 import { DashboardRepresentativeMemorySettings } from "./dashboard-representative-memory-settings";
 import { saveRepresentativeSetupRequests } from "./representative-setup-save";
+import { ComputePolicyStatus } from "./compute-policy-status";
+import { AgentBehaviorFields } from "./agent-behavior-fields";
+import type { AgentBehavior } from "@delegate/domain";
 
 type GroupActivation = "mention_only" | "reply_or_mention" | "always";
 type KnowledgeDocumentKind =
@@ -45,6 +48,7 @@ type RepresentativeSetupSnapshot = {
   name: string;
   tagline: string;
   tone: string;
+  agentBehavior?: AgentBehavior;
   languages: string[];
   groupActivation: GroupActivation;
   publicMode: boolean;
@@ -665,6 +669,7 @@ export function DashboardRepresentativeSetup({
                   value={draft.tone}
                 />
               </label>
+              <AgentBehaviorFields value={draft.agentBehavior} locale={locale} onChange={agentBehavior => updateDraft(value => ({ ...value, agentBehavior }))} />
 
               <label className="field-stack">
                 <span>{t.languages}</span>
@@ -832,6 +837,7 @@ export function DashboardRepresentativeSetup({
             title={t.computeTitle}
             tone="accent"
           >
+            <ComputePolicyStatus representativeSlug={representativeSlug} locale={locale} savedRevision={JSON.stringify(snapshot?.compute)} draft={draft.compute} />
             <div className="setup-grid">
               <div className="field-stack field-span-full">
                 <span>{t.togglesLabel}</span>

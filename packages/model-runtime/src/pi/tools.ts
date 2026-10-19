@@ -3,6 +3,8 @@ import { setMaxListeners } from "node:events";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "@earendil-works/pi-ai";
+import { agentTextFileOutput, agentTextFileOutputNotice } from "@delegate/domain";
+import { AgentActionIdentityError, isActionIdentityError, auditErrorCode } from "@delegate/runtime";
 
 import { PiTelemetry } from "./telemetry";
 import type {
@@ -21,6 +23,7 @@ export async function buildPiTools(input: {
   telemetry: PiTelemetry;
   maximumRetries: number;
   signal: AbortSignal;
+  actionContext?: (callId: string) => PiToolContext;
 }): Promise<PiToolBuildResult> {
   const tools: AgentTool<any>[] = [];
   const sources: PiToolBuildResult["sources"] = [];
@@ -45,7 +48,7 @@ export async function buildPiTools(input: {
       name: "retrieve_authorized_knowledge",
       label: "Knowledge",
       description:
-        "Search the representative's authorized knowledge library. Use it before answering factual or explanatory questions within the representative's role, specialty, published materials, or configured subject domain, as well as every organization-specific/private question, policy, rule, identity, price, or internal fact. A miss is not evidence that no policy or source exists.",
+        "Retrieve evidence from the represented owner's authorized knowledge library for that owner's facts, policies, services or explicitly designated materials. Access is scoped by the bound server session; do not request credential values. Reuse still-valid evidence when sufficient. Specialty explanations follow the published knowledge policy (materials-first or materials-only when configured). Otherwise, stable general explanations and other companies' public facts do not automatically require this library. A miss is not evidence that no fact or policy exists.",
       parameters: Type.Object({
         query: Type.String({ description: "The precise question to retrieve evidence for." }),
         maximumResults: Type.Optional(Type.Integer({ minimum: 1, maximum: 12 })),
@@ -148,6 +151,7 @@ export async function buildPiTools(input: {
         adapter: input.adapters.mcp,
         descriptor,
         context: input.context,
+        ...(input.actionContext ? { actionContext: input.actionContext } : {}),
         telemetry: input.telemetry,
         maximumRetries: input.maximumRetries,
         signal: input.signal,
@@ -224,6 +228,7 @@ export async function buildPiTools(input: {
                 skill: loaded.descriptor,
                 instructionsDigest: loaded.instructionsDigest,
                 resources: loaded.resources ?? [],
+                runtimeFileOutputCapabilities: agentTextFileOutput,
               },
             };
           },
@@ -254,27 +259,65 @@ export async function buildPiTools(input: {
   }
 
   if (input.adapters.sandbox) {
+    if (input.adapters.sandbox.browse) {
+      tools.push({
+        name: "browse_in_sandbox",
+        label: "Sandbox browser",
+        description: "Look up public information across topics using the configured sandbox's real browser. This general lookup capability also works when no topic-specific MCP/API is installed. Open a relevant public HTTP(S) page; if the source URL is unknown, open a public search-engine results page and follow relevant links. Returns title, visible text, links and screenshot. Use this managed browser instead of writing browser launch code. The broker applies the configured policy and approval. Report only observed facts; preserve the source's data time separately from page observation time. If a page lacks the requested facts, try a relevant alternative or explain the gap; page-load success alone is not task completion.",
+        parameters: Type.Object({ url: Type.String({ description: "Public HTTP(S) page to open." }) }),
+        executionMode: "sequential",
+        replay: "safe",
+        execute: async (callId, params: any, signal) => {
+          sandboxAttempts += 1;
+          const actionContext = input.actionContext?.(callId) ?? input.context;
+          await input.telemetry.event({ type: "sandbox.started", module: "sandbox", toolName: "browse_in_sandbox" });
+          const result = await executeAdapter({
+            module: "sandbox", operation: "browse", toolName: "browse_in_sandbox",
+            retrySafe: false, maximumRetries: 0,
+            signal: mergeSignals(input.signal, signal), telemetry: input.telemetry,
+            call: activeSignal => input.adapters.sandbox!.browse!({
+              url: params.url, context: actionContext, signal: activeSignal,
+            }),
+          });
+          sandboxEvidenceResults += 1;
+          if (result.status === "pending_approval") pendingApproval = true;
+          if (result.status === undefined || ["completed", "succeeded", "success"].includes(result.status)) {
+            sandboxSuccesses += 1;
+            sandboxConclusiveResults += 1;
+          } else if (result.details?.["verifiedFailure"] === true) sandboxConclusiveResults += 1;
+          collectResult(result, sources, artifacts);
+          if (result.authoritativeSummary) {
+            authoritativeSummaries.length = 0;
+            authoritativeSummaries.push(result.authoritativeSummary);
+          }
+          await input.telemetry.event({ type: "sandbox.completed", module: "sandbox", toolName: "browse_in_sandbox", status: result.status ?? "completed" });
+          for (const artifact of result.artifacts ?? []) {
+            await input.telemetry.event({ type: "artifact.created", module: "artifact", status: "created", data: { artifactId: artifact.id, fileName: artifact.fileName } });
+          }
+          return toolResult(result);
+        },
+      });
+    }
     tools.push({
       name: "execute_in_sandbox",
       label: "Sandbox",
       description:
-        "Run code in the configured isolated sandbox for calculations, data analysis, archive inspection, and file generation. The result is real execution evidence, not a simulation. When expectedOutputs contains one file, print exactly that file's final content to stdout; CSV output must include an ASCII field-name header row. The sandbox adapter validates and persists the verified stdout as the requested downloadable artifact.",
+        `Request restricted Python execution for calculations and data analysis. The server first checks availability, authorization and approval. Current profile: one process, standard library, no network, threads, subprocesses or package installation; read-only declared inputs, fresh temporary workspace, maximum 30 seconds, 256 MiB address space. JavaScript, shell and persistent processes are unavailable. A code hash or risk label grants no execution permission. ${agentTextFileOutputNotice.en} Use browse_in_sandbox for public web/browser requests. Never print invented values as execution evidence. For a supported output file, print exactly its final UTF-8 contents to stdout without extra logs. CSV requires a nonempty header and consistent row widths; JSON must parse. The adapter verifies stored bytes and current audience download access before confirming delivery.`,
       parameters: Type.Object({
         language: Type.Union([
           Type.Literal("python"),
-          Type.Literal("javascript"),
-          Type.Literal("shell"),
         ]),
-        code: Type.String(),
+        code: Type.String({ description: "Python source. When expectedOutputs declares a file, output its complete final contents to stdout; the server creates the downloadable file. Writing a sandbox path alone does not deliver it. Example: code=print(2+3), expectedOutputs=[\"result.txt\"] produces a text file containing 5." }),
         attachmentIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })),
         expectedOutputs: Type.Optional(Type.Array(Type.String({
-          description: "At most one requested output path; program stdout must be exactly that file's content.",
+          description: "One .txt, .md, .csv or .json filename (ASCII letters, digits, dots, underscores, hyphens), optionally under outputs/ or /workspace/outputs/. No binary formats. Stdout must equal the final content, at most 65536 UTF-8 bytes.",
         }), { maxItems: 1 })),
-        timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 120_000 })),
+        timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 30_000 })),
       }),
-      executionMode: "parallel",
-      replay: "safe",
-      execute: async (_callId, params: any, signal, onUpdate) => {
+      executionMode: "sequential",
+      replay: "never",
+      execute: async (callId, params: any, signal, onUpdate) => {
+        const actionContext = input.actionContext?.(callId) ?? input.context;
         sandboxAttempts += 1;
         const hasStructuredDataAttachment = input.context.attachments.some((attachment) =>
           /(?:csv|spreadsheet|excel|json)/iu.test(attachment.mimeType)
@@ -323,7 +366,7 @@ export async function buildPiTools(input: {
               attachmentIds: params.attachmentIds ?? [],
               expectedOutputs: params.expectedOutputs ?? [],
               timeoutMs: params.timeoutMs ?? 30_000,
-              context: input.context,
+              context: { ...actionContext, idempotencyKey: actionContext.logicalAction ? actionContext.idempotencyKey : `${input.context.idempotencyKey}:python:${callId}` },
               signal: activeSignal,
               onProgress: (message) => onUpdate?.({
                 content: [{ type: "text", text: message }],
@@ -533,6 +576,7 @@ function buildMcpTool(input: {
   adapter: NonNullable<PiCapabilityAdapters["mcp"]>;
   descriptor: PiMcpToolDescriptor;
   context: PiToolContext;
+  actionContext?: (callId: string) => PiToolContext;
   telemetry: PiTelemetry;
   maximumRetries: number;
   signal: AbortSignal;
@@ -549,9 +593,10 @@ function buildMcpTool(input: {
     label: `${input.descriptor.server}: ${input.descriptor.name}`,
     description: `${input.descriptor.description} Preserve the returned service, provider, record identifiers, and data time.`,
     parameters: input.descriptor.inputSchema as TSchema,
-    executionMode: input.descriptor.readOnly ? "parallel" : "sequential",
+    executionMode: input.descriptor.readOnly && input.descriptor.approvalRequired === false ? "parallel" : "sequential",
     replay: input.descriptor.readOnly || input.descriptor.idempotent ? "safe" : "never",
-    execute: async (_callId, params: any, signal) => {
+    execute: async (callId, params: any, signal) => {
+      const actionContext = input.actionContext?.(callId) ?? input.context;
       if (input.descriptor.readOnly) input.onReadAttempt();
       else input.onWriteAttempt();
       const result = await executeAdapter({
@@ -569,8 +614,8 @@ function buildMcpTool(input: {
           server: input.descriptor.server,
           tool: input.descriptor.name,
           arguments: params as Record<string, unknown>,
-          idempotencyKey: `${input.context.idempotencyKey}:mcp:${input.descriptor.server}:${input.descriptor.name}:${stableArgumentsHash(params)}`,
-          context: input.context,
+          idempotencyKey: actionContext.logicalAction ? actionContext.idempotencyKey : `${input.context.idempotencyKey}:mcp:${input.descriptor.readOnly ? callId : "action"}:${input.descriptor.server}:${input.descriptor.name}:${stableArgumentsHash(params)}`,
+          context: actionContext,
           signal: activeSignal,
         }),
       });
@@ -657,12 +702,18 @@ async function executeAdapter(input: {
       return result;
     } catch (error) {
       lastError = error;
+      if (isActionIdentityError(error)) throw new AgentActionIdentityError(error.code);
       const cancelled = input.signal.aborted || isAbortError(error);
       input.telemetry.end(spanId, {
         status: cancelled ? "cancelled" : isTimeoutError(error) ? "timeout" : "error",
         error: errorMessage(error),
       });
-      if (cancelled || !input.retrySafe || attempt > input.maximumRetries) throw error;
+      if (cancelled) throw abortError(auditErrorCode(error));
+      if (!input.retrySafe || attempt > input.maximumRetries) {
+        // SDK tool failures become model-visible tool results. Do not forward
+        // transport errors that can contain credentials or private payloads.
+        throw new Error(auditErrorCode(error));
+      }
       const backoffMs = Math.min(1_000, 50 * 2 ** (attempt - 1));
       const waitSpan = input.telemetry.start({
         module: "wait",
@@ -675,7 +726,7 @@ async function executeAdapter(input: {
       input.telemetry.end(waitSpan, { status: "ok" });
     }
   }
-  throw lastError;
+  throw new Error(auditErrorCode(lastError));
 }
 
 function toolResult(result: PiCapabilityResult) {
@@ -689,7 +740,9 @@ function toolResult(result: PiCapabilityResult) {
         sources: result.sources ?? [],
         artifacts: result.artifacts ?? [],
         resultRef: result.resultRef ?? null,
+        contextSourceRef: result.contextSourceRef,
         authoritativeSummary: result.authoritativeSummary ?? null,
+        observation: result.observation,
       }),
     }],
     details: result.details ?? {},
@@ -753,6 +806,12 @@ function normalizeMcpDescriptors(value: unknown): PiMcpToolDescriptor[] {
   return value.filter((item): item is PiMcpToolDescriptor => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return false;
     const candidate = item as Record<string, unknown>;
+    const classification = candidate["effectClassification"];
+    // Unknown host behavior is unavailable, not a writable tool that a
+    // confirmation can authorize. Keep legacy adapter contracts compatible.
+    if (classification !== undefined
+      && !(classification === "read" && candidate["readOnly"] === true)
+      && !(classification === "write" && candidate["readOnly"] === false)) return false;
     return typeof candidate["server"] === "string"
       && typeof candidate["name"] === "string"
       && typeof candidate["description"] === "string"

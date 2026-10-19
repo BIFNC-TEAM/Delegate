@@ -1,6 +1,5 @@
 import type {
   CapabilityKind,
-  CapabilityPlanTier,
   CapabilityPolicyProfile,
   ContactComputeTrustTier,
   CapabilityPolicyRule,
@@ -16,9 +15,7 @@ export type EvaluateCapabilityRequest = {
   domain?: string | undefined;
   resourceScope?: PolicyResourceScope | undefined;
   channel?: PolicyChannel | undefined;
-  activePlanTier?: CapabilityPlanTier | undefined;
   estimatedTokens?: number | undefined;
-  hasPaidEntitlement?: boolean | undefined;
   contactTrustTier?: ContactComputeTrustTier | undefined;
   customerAccountId?: string | undefined;
 };
@@ -86,6 +83,9 @@ function evaluateCapabilityPolicyRules(
   const sortedRules = [...profile.rules].sort((left, right) => right.priority - left.priority);
 
   for (const rule of sortedRules) {
+    // This exact membership-era built-in was generated independently of the
+    // Owner's browser setting. Do not revive it from old stored profiles.
+    if (isRetiredDefaultBrowserApproval(profile, rule)) continue;
     if (rule.capability !== request.capability) {
       continue;
     }
@@ -110,21 +110,8 @@ function evaluateCapabilityPolicyRules(
       continue;
     }
 
-    if (rule.requiredPlanTier && !satisfiesPlanTier(rule.requiredPlanTier, request.activePlanTier)) {
-      return {
-        decision: "deny",
-        reason: "plan_tier_required",
-        matchedRuleId: rule.id,
-      };
-    }
-
-    if (rule.requiresPaidPlan && !request.hasPaidEntitlement) {
-      return {
-        decision: "deny",
-        reason: "paid_plan_required",
-        matchedRuleId: rule.id,
-      };
-    }
+    // Consumption quota is authorized and reserved by the broker before this
+    // policy layer runs. Retired membership fields must never gate capabilities.
 
     if (
       typeof rule.maxEstimatedTokens === "number" &&
@@ -156,6 +143,17 @@ function evaluateCapabilityPolicyRules(
   return null;
 }
 
+function isRetiredDefaultBrowserApproval(profile: CapabilityPolicyProfile, rule: CapabilityPolicyRule): boolean {
+  return profile.isManaged && profile.managedScope === "delegate_managed"
+    && profile.managedSource === "delegate-default" && profile.precedence === 100 && !profile.editableByOwner
+    && profile.id === `cap_profile_managed_${profile.representativeId}`
+    && !profile.ownerId && !profile.organizationId && !profile.customerAccountId && !profile.contactTrustTierCondition
+    && rule.id === `${profile.id}_browser_paid_private` && rule.capability === "browser"
+    && rule.decision === "ask" && rule.requiresHumanApproval && rule.priority === 220
+    && rule.domainPattern === ".*" && rule.resourceScopeCondition === "browser_lane" && rule.channelCondition === "private_chat"
+    && !rule.commandPattern && !rule.pathPattern && rule.maxEstimatedTokens === undefined;
+}
+
 function matchesManagedProfile(
   profile: CapabilityPolicyProfile,
   request: EvaluateCapabilityRequest,
@@ -185,19 +183,4 @@ function matchesPattern(pattern: string | undefined, value: string | undefined):
   } catch {
     return value.includes(pattern);
   }
-}
-
-function satisfiesPlanTier(
-  requiredPlanTier: CapabilityPlanTier,
-  activePlanTier: CapabilityPlanTier | undefined,
-): boolean {
-  if (!activePlanTier) {
-    return false;
-  }
-
-  if (requiredPlanTier === "pass") {
-    return activePlanTier === "pass" || activePlanTier === "deep_help";
-  }
-
-  return activePlanTier === requiredPlanTier;
 }

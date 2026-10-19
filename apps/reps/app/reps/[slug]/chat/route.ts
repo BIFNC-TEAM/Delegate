@@ -4,12 +4,14 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { demoRepresentative } from "@delegate/domain";
+import { parseTaskControlCommand } from "@delegate/runtime";
 import {
   createPiModelBindingFromEnv,
   delegatePiAgentRuntime,
 } from "@delegate/model-runtime";
 import {
   acceptInboundConversationMessage,
+  controlPublicAudienceTask,
   AgentWalletReconciliationError,
   buildRepresentativeRuntimeProfile,
   buildWebAudienceExternalUserId,
@@ -118,10 +120,20 @@ export async function POST(
         clientAddress: resolvePublicChatClientAddress(request),
       });
     }
-    const runtime = await getPublicRepresentativeRuntime(slug);
-    if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     const { body, attachmentFiles } = await readPublicChatRequest(request);
     if (!body.message) return privateJson({ error: "Message is required." }, 400);
+    const control = parseTaskControlCommand(body.message);
+    if (control) {
+      if (attachmentFiles.length) return privateJson({ error: "Task controls do not accept attachments.", code: "task_control_attachments_not_allowed" }, 400);
+      const audienceRequest = await resolvePublicAudienceRequestPrincipal({ representativeSlug: slug, cookieStore: await cookies() });
+      await audienceRequest.revalidate();
+      const result = await controlPublicAudienceTask({ representativeSlug: slug, audienceIdentityId: audienceRequest.principal.audienceIdentityId, audienceId: audienceRequest.principal.audienceId, ...control });
+      const response = privateJson({ status: "completed", reply: { role: "assistant", text: result.text }, taskControl: { outcome: result.outcome, tasks: result.tasks } }, 200);
+      setPublicAudienceSessionCookie(response, request, slug, audienceRequest.sessionState);
+      return response;
+    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     if (!publicMemoryDisclosureMatches(
       body.memoryDisclosure,
       runtime.governedMemoryDisclosure,
@@ -322,6 +334,7 @@ export async function POST(
     setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
+    if (error instanceof Error && error.message === "public_task_control_conflict") return privateJson({ error: "Task state changed. Check its current state before trying again.", code: "task_control_conflict" }, 409);
     if (error instanceof ConversationIngressValidationError) {
       return privateJson(
         {

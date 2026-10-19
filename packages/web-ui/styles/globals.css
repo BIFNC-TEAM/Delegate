@@ -9657,3 +9657,14 @@ button.skill-row:hover {
     display: none;
   }
 }
+
+/* Public execution facts and answer provenance share the existing chat palette. */
+.representative-run-progress { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 8px 0 0; color: var(--marketing-soft); font-size: 0.8rem; }
+.representative-run-elapsed { color: var(--marketing-faint); font-variant-numeric: tabular-nums; }
+.representative-answer-sources { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--marketing-line); color: var(--marketing-soft); font-size: 0.76rem; line-height: 1.55; }
+.representative-source-item { overflow-wrap: anywhere; }
+.representative-source-item a { color: var(--marketing-ink); text-decoration: underline; text-underline-offset: 3px; }
+.representative-source-item a:focus-visible { outline: 2px solid var(--marketing-ink); outline-offset: 3px; }
+.representative-source-kind { color: var(--marketing-soft); }
+
+.representative-message-bubble { overflow-wrap: anywhere; }

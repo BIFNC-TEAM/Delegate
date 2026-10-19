@@ -9,6 +9,56 @@ import {
 } from "../src/tencent-agsx-provider";
 
 describe("Tencent AGSX sandbox provider", () => {
+  it("uses All-in-One for browser sessions with explicit full-network permission", async () => {
+    const sandbox = buildSandbox();
+    const client = buildClient(sandbox);
+    const provider = new TencentAgsxSandboxProvider({
+      client, apiKey: "key", domain: "ap-guangzhou.tencentags.com",
+      codeTool: "old-code", allInOneTool: "delegate-aio-pi-v1",
+    });
+    const lease = await provider.start({ ...buildStartInput(), runtimeClass: "browser", networkMode: "full" });
+    expect(client.create).toHaveBeenCalledWith(expect.objectContaining({
+      template: "delegate-aio-pi-v1", allowInternetAccess: true,
+    }));
+    await provider.execute({
+      lease, runnerType: "docker", command: "printf test", maxCommandSeconds: 10,
+      filesystemMode: "ephemeral_full", sessionId: "session-1", executionId: "aio-exec",
+    });
+    expect(sandbox.commands.run).toHaveBeenLastCalledWith(
+      expect.stringContaining("export DELEGATE_BROWSER_RUNTIME=tencent-all-in-one"),
+      expect.objectContaining({ cwd: "/home/user/workspace" }),
+    );
+    expect(sandbox.commands.run).toHaveBeenLastCalledWith(
+      expect.stringContaining("export DELEGATE_SESSION_ROOT=/home/user/workspace"), expect.anything(),
+    );
+  });
+
+  it("never substitutes a public AIO or legacy Code tool for a restricted-network task", async () => {
+    const client = buildClient(buildSandbox());
+    const provider = new TencentAgsxSandboxProvider({
+      client, apiKey: "key", domain: "ap-guangzhou.tencentags.com",
+      codeTool: "old-code", allInOneTool: "delegate-aio-pi-v1",
+    });
+    for (const networkMode of ["no_network", "allowlist"] as const) {
+      await expect(provider.start({ ...buildStartInput(), networkMode }))
+        .rejects.toMatchObject({ code: "POLICY_UNSUPPORTED" });
+    }
+    expect(client.create).not.toHaveBeenCalled();
+    expect(client.connect).not.toHaveBeenCalled();
+  });
+
+  it("deletes newly created instances when workspace preparation fails", async () => {
+    const sandbox = buildSandbox();
+    sandbox.commands.run = vi.fn(async () => ({ exitCode: 1, stdout: "", stderr: "permission denied" }));
+    const provider = buildProvider(buildClient(sandbox));
+    await expect(provider.start(buildStartInput())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(sandbox.kill).toHaveBeenCalledOnce();
+    vi.mocked(sandbox.kill).mockClear();
+    await expect(provider.start({ ...buildStartInput(), providerSandboxId: sandbox.sandboxId }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(sandbox.kill).not.toHaveBeenCalled();
+  });
+
   it("creates an isolated code sandbox with server-owned metadata", async () => {
     const sandbox = buildSandbox();
     const client = buildClient(sandbox);

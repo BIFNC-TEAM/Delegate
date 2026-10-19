@@ -12,6 +12,7 @@ export type PiRunStatus =
   | "partial"
   | "failed"
   | "cancelled"
+  | "waiting_approval"
   | "waiting_user";
 
 export type PiSpanStatus = "ok" | "error" | "timeout" | "cancelled";
@@ -67,6 +68,8 @@ export type PiRuntimeEvent = {
     | "model.started"
     | "model.first_event"
     | "response.delta"
+    | "response.review_started"
+    | "response.review_rejected"
     | "retrieval.completed"
     | "skill.discovered"
     | "skill.loaded"
@@ -93,6 +96,8 @@ export type PiRuntimeEvent = {
 };
 
 export type PiHistoryMessage = {
+  messageId?: string;
+  taskAnchor?: boolean;
   role: "user" | "assistant";
   text: string;
   timestamp?: number;
@@ -113,6 +118,7 @@ export type PiSource = {
   provider?: string;
   url?: string;
   dataTime?: string;
+  observedAt?: string;
   version?: string;
 };
 
@@ -134,9 +140,62 @@ export type PiCapabilityResult = {
   sources?: PiSource[];
   artifacts?: PiArtifact[];
   resultRef?: string;
+  contextSourceRef?: string;
   status?: string;
   /** Optional user-safe summary whose deterministic facts must not be rewritten by the model. */
   authoritativeSummary?: string;
+  observation?: {
+    state: "available" | "empty" | "blocked" | "unavailable" | "unknown";
+    /** Host-classified result kind; not inferred from text, URLs or a model-selected tool name. */
+    evidenceKind?: "search_results";
+    reason?: string;
+    httpStatus?: number;
+    observedAt?: string;
+    sourceTime?: string;
+    retryAfterMs?: number;
+  };
+};
+
+export type PiToolObservation = {
+  callId: string;
+  toolName: string;
+  status: string;
+  text: string;
+  argumentsHash?: string;
+  contextSourceRef?: string;
+  actionOrdinal?: number;
+  sources: PiSource[];
+  artifacts: PiArtifact[];
+  observation?: PiCapabilityResult["observation"];
+};
+
+/** Product/task requirements; a model's assessment cannot clear these. */
+export type PiEvidenceRequirements = {
+  evidence?: boolean;
+  sandbox?: boolean;
+  browser?: boolean;
+  artifact?: boolean;
+  /** Unambiguous requested output targets, held by the host, not the reviewer. */
+  outputFiles?: Array<{ format: string; fileName?: string }>;
+};
+
+export type PiExecutionCheckpoint = {
+  version: 2;
+  runId: string;
+  sessionId: string;
+  scopeHash: string;
+  goal: string;
+  messages: AgentMessage[];
+  observations: PiToolObservation[];
+  turnsUsed: number;
+  activeMs: number;
+  usage?: { inputTokens: number; outputTokens: number };
+  evidenceRequirements?: PiEvidenceRequirements;
+  contextAuthorization?: import("@delegate/runtime").AgentContextProof;
+  replaySourcesTracked?: boolean;
+  actionIdentityVersion?: 1;
+  nextActionOrdinal?: number;
+  pending: { approvalId: string; callId: string; toolName: string };
 };
 
 export type PiToolContext = {
@@ -150,6 +209,7 @@ export type PiToolContext = {
   timezone: string;
   attachments: PiAttachment[];
   idempotencyKey: string;
+  logicalAction?: { version: 1; ordinal: number };
 };
 
 export type PiKnowledgeAdapter = {
@@ -175,8 +235,12 @@ export type PiMcpToolDescriptor = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Trusted host classification; legacy adapters may omit it. */
+  effectClassification?: "read" | "write" | "unknown";
   readOnly: boolean;
   idempotent: boolean;
+  /** Host-verified permission metadata; absence is not permission to parallelize. */
+  approvalRequired?: boolean;
 };
 
 export type PiMcpAdapter = {
@@ -222,6 +286,12 @@ export type PiSkillAdapter = {
 };
 
 export type PiSandboxAdapter = {
+  /** Uses the broker's managed browser, including its runtime launch settings. */
+  browse?(input: {
+    url: string;
+    context: PiToolContext;
+    signal: AbortSignal;
+  }): Promise<PiCapabilityResult>;
   execute(input: {
     language: "python" | "javascript" | "shell";
     code: string;
@@ -285,7 +355,7 @@ export type PiAttachmentEvidenceRecovery = {
 export type PiModelBinding = {
   model: Model<any>;
   streamFn: StreamFn;
-  createObservedStreamFn?: ((observer: (event: PiModelAttemptEvent) => void) => StreamFn) | undefined;
+  createObservedStreamFn?: ((observer: (event: PiModelAttemptEvent) => void, beforeRequest?: () => Promise<void>) => StreamFn) | undefined;
   provider: string;
   modelId: string;
 };
@@ -311,6 +381,7 @@ export type PiAgentRunInput = {
     /** The person or organization that authorized this public representative. */
     ownerName?: string;
     role: string;
+    agentBehavior?: import("@delegate/domain").AgentBehavior;
     instructions?: string;
     capabilities?: string[];
   };
@@ -322,24 +393,42 @@ export type PiAgentRunInput = {
   };
   model: PiModelBinding;
   capabilities?: PiCapabilityAdapters;
+  /** v1 only drains already-pending requests; new production requests use v2. */
+  executionProtocol?: "legacy_v1" | "goal_v2";
+  /** Host-selected review policy. bounded_v1 skips ordinary review and caps required review at one; earlier modes remain for compatibility. */
+  reviewMode?: "always" | "simple_text_v1" | "selective_text_v2" | "bounded_v1";
+  /** Trusted host requirement. Neither visitor text nor the generating model can clear it. */
+  semanticReviewRequired?: boolean;
+  /** Host prefetch through the normal authorized knowledge tool before first generation. */
+  knowledgePrefetch?: "ordinary_questions_v1";
+  checkpoint?: PiExecutionCheckpoint;
+  contextAuthorization?: import("@delegate/runtime").AgentContextAuthorization;
+  evidenceRequirements?: PiEvidenceRequirements;
   /**
    * Optional fail-closed recovery compiled from a server-trusted, immutable Skill
    * resource. It runs only after Pi ignores both bounded attachment corrections.
    */
   attachmentEvidenceRecovery?: PiAttachmentEvidenceRecovery;
   history?: PiHistoryMessage[];
+  /** Authorized user context only, with a server-resolved conversational focus. */
+  conversationContextMode?: "focused_v1";
   attachments?: PiAttachment[];
   /** Trusted product state for a tool that completed after owner approval. */
   approvedToolResult?: {
     approvalId: string;
     toolName: string;
-    status: "completed";
+    status: "completed" | "failed";
     text: string;
+    contextSourceRef?: string;
     artifacts?: PiArtifact[];
+    sources?: PiSource[];
+    observation?: PiCapabilityResult["observation"];
   };
   conversationId?: string;
   userId?: string;
   timezone?: string;
+  /** Server language fallback for identifiers with no linguistic signal/history. */
+  responseLanguage?: string;
   /** Deterministic clock for regression/control tests; production omits it. */
   currentTime?: string;
   caseId?: string;
@@ -351,6 +440,9 @@ export type PiAgentRunInput = {
 };
 
 export type PiAgentRunResult = {
+  /** 0=current visitor request, n=history[n-1]. Never a permission grant. */
+  conversationFocusIndex?: number;
+  conversationTargetIndex?: number;
   runtime: typeof PI_RUNTIME_VERSION;
   traceId: string;
   runId: string;
@@ -369,6 +461,8 @@ export type PiAgentRunResult = {
   modelCalls: number;
   toolCalls: number;
   error?: string;
+  checkpoint?: PiExecutionCheckpoint;
+  contextAuthorizationBlocked?: true;
 };
 
 export type PiToolBuildResult = {

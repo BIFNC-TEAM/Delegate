@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  mockContextAuthorization,
   mockLoadComputeRuntimeAuthority,
+  mockLoadMcpBinding,
   mockPrisma,
   mockRequireAudienceGenerationRunAuthorization,
 } = vi.hoisted(() => ({
+  mockContextAuthorization: vi.fn(),
   mockLoadComputeRuntimeAuthority: vi.fn(),
+  mockLoadMcpBinding: vi.fn(),
   mockRequireAudienceGenerationRunAuthorization: vi.fn(),
   mockPrisma: {
     computeSession: {
@@ -13,6 +17,13 @@ const {
       updateMany: vi.fn(),
     },
   },
+}));
+
+vi.mock("@delegate/web-data", async original => ({ ...await original<typeof import("@delegate/web-data")>(), assertAgentContextForExecution: mockContextAuthorization }));
+
+vi.mock("../src/mcp-bindings", () => ({
+  loadRepresentativeMcpBinding: mockLoadMcpBinding,
+  resolveMcpToolName: ({ requestedToolName }: { requestedToolName: string }) => ({ toolName: requestedToolName }),
 }));
 
 vi.mock("../src/prisma", () => ({
@@ -28,6 +39,9 @@ vi.mock("../src/entitlements", () => ({
   requireAudienceGenerationRunAuthorization:
     mockRequireAudienceGenerationRunAuthorization,
 }));
+
+// Collect the module outside the per-test deadline; authority dependencies are mocked above.
+import "../src/policy";
 
 function capabilityProfile() {
   return {
@@ -95,6 +109,7 @@ function audienceSession() {
 describe("execution-time audience authorization revalidation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockContextAuthorization.mockResolvedValue(undefined);
     mockPrisma.computeSession.findUnique.mockResolvedValue(audienceSession());
     mockPrisma.computeSession.updateMany.mockResolvedValue({ count: 0 });
     mockLoadComputeRuntimeAuthority.mockResolvedValue({
@@ -134,8 +149,6 @@ describe("execution-time audience authorization revalidation", () => {
       generationRunId: "run-1",
       representativeId: "rep-1",
       productCode: null,
-      activePlanTier: undefined,
-      hasPaidEntitlement: false,
     });
   });
 
@@ -157,6 +170,26 @@ describe("execution-time audience authorization revalidation", () => {
       conversationId: "conversation-1",
       generationRunId: "run-1",
     });
+  });
+
+  it.each((["allow", "ask", "deny"] as const).flatMap((mode) => [
+    { mode, classified: true }, { mode, classified: false },
+  ]))("honors published $mode with classified=$classified in the execution path", async ({ mode, classified }) => {
+    const { evaluateExecutionRequest } = await import("../src/policy");
+    const session = audienceSession();
+    session.policyProfile.defaultDecision = "ALLOW";
+    mockPrisma.computeSession.findUnique.mockResolvedValue(session);
+    const binding = { id: "deepwiki", slug: "deepwiki", serverUrl: classified ? "https://mcp.deepwiki.com/mcp" : "https://unknown.invalid/mcp", transportKind: "STREAMABLE_HTTP", configRevision: 1, approvalRequired: false, estimatedTokensPerCall: 0 };
+    const authority = await mockLoadComputeRuntimeAuthority();
+    authority.compute.defaultPolicyMode = "allow";
+    authority.compute.capabilityModes.mcp = mode;
+    authority.mcpBindings = [{ ...binding, allowedToolNames: ["ask_question"], toolDefinitions: [{ exactToolName: "ask_question", bindingRevision: 1, toolSchemaHash: "5f937ca02cb792c59d6f31b22d1e09db2a6412ee27b8e180a04c0bb38a24cd24", inputSchema: { type: "object" } }] }];
+    mockLoadComputeRuntimeAuthority.mockResolvedValue(authority);
+    mockLoadMcpBinding.mockResolvedValue(binding);
+    const result = await evaluateExecutionRequest("session-1", { capability: "mcp", bindingId: "deepwiki", toolName: "ask_question", toolArguments: {}, subagentId: "compute-agent" });
+    expect(result.serverVerifiedReadOnlyMcp).toBe(classified);
+    expect(result.decision.decision).toBe(classified ? mode : "deny");
+    if (!classified) expect(result.decision.reason).toBe("mcp_tool_behavior_unclassified");
   });
 
   it("fails closed when the reservation becomes terminal after session creation", async () => {

@@ -4,6 +4,7 @@ import type {
   ResolveApprovalResponse,
   ToolExecutionRequest,
 } from "@delegate/compute-protocol";
+import { actionIdentityErrorCodes } from "@delegate/runtime";
 
 export class ComputeBrokerError extends Error {
   constructor(
@@ -17,6 +18,9 @@ export class ComputeBrokerError extends Error {
 }
 
 const publicBrokerErrors: Record<string, { statusCode: number; message: string }> = {
+  mcp_provider_scope_changed: { statusCode: 403, message: "This provider observation is no longer authorized." },
+  mcp_provider_status_unsupported: { statusCode: 409, message: "This provider has no verified outcome-query contract; the result remains unknown." },
+  ...Object.fromEntries(actionIdentityErrorCodes.map(code => [code, { statusCode: 409, message: "The recorded action conflicts with this request or is unresolved. Inspect the existing receipt before further actions." }])),
   generation_execution_in_progress: {
     statusCode: 409,
     message: "This delegated execution is still in progress.",
@@ -116,11 +120,23 @@ export async function createAudienceComputeSession(input: {
   });
 }
 
+export async function getAudienceCodeExecutionPreflight(sessionId: string) {
+  const { codeExecutionPreflightResponseSchema } = await import("@delegate/compute-protocol");
+  return codeExecutionPreflightResponseSchema.parse(await callComputeBroker<unknown>(
+    `/internal/compute/sessions/${encodeURIComponent(sessionId)}/code-preflight`, { method: "GET" },
+  ));
+}
+
 export async function executeAudienceTool(sessionId: string, request: ToolExecutionRequest) {
   return callComputeBroker<ExecuteToolResponse>(
     `/internal/compute/sessions/${sessionId}/executions`,
     { method: "POST", body: JSON.stringify(request) },
   );
+}
+export async function queryAudienceToolProviderOutcome(input: { sessionId: string; executionId: string; audienceIdentityId: string }) {
+  return callComputeBroker<{ executionId: string; state: string; providerReportedState: string; observedAt: string; observationOnly: true }>(
+    `/internal/compute/sessions/${encodeURIComponent(input.sessionId)}/executions/${encodeURIComponent(input.executionId)}/provider-outcome`,
+    { method: "POST", body: JSON.stringify({ audienceIdentityId: input.audienceIdentityId }) });
 }
 
 export async function uploadAudienceComputeInput(sessionId: string, input: {

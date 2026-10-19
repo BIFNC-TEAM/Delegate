@@ -65,7 +65,11 @@ const harnessSha256 = fingerprint(await readFile(new URL("./evaluate.ts", import
 const casesSha256 = fingerprint(await readFile(new URL("./evaluation-cases.ts", import.meta.url), "utf8"));
 const capabilitySha256 = fingerprint(await readFile(new URL("./capabilities.ts", import.meta.url), "utf8"));
 const fixtureSha256 = fingerprint(await readFile(new URL("./fixtures.ts", import.meta.url), "utf8"));
-const persist = () => writeFile(output, JSON.stringify({ suite, harnessSha256, casesSha256, capabilitySha256, fixtureSha256, v2Reasoning: { enabled: v2Binding.binding.model.reasoning && evaluationBudget.thinkingTokens > 0, maximumThinkingTokens: evaluationBudget.thinkingTokens, maximumOutputTokens: evaluationBudget.outputTokens }, caseIds: selected.map(c => c.id), expectedResumeCount: selected.filter(c => c.resumeWith).length * repeats, mode: "real-model-controlled-tools", provider: binding.binding.provider, model: binding.binding.modelId, temperature: 0, promptSha256: fingerprint(V2_SYSTEM_PROMPT), repeats,
+const providerSha256 = fingerprint(await readFile(new URL("./provider.ts", import.meta.url), "utf8"));
+const reasoningModel = v2Binding.binding.model;
+const reasoningFormat = reasoningModel.api === "openai-completions" && reasoningModel.compat && "thinkingFormat" in reasoningModel.compat
+  ? reasoningModel.compat.thinkingFormat ?? null : null;
+const persist = () => writeFile(output, JSON.stringify({ suite, harnessSha256, casesSha256, capabilitySha256, fixtureSha256, providerSha256, v2Reasoning: { enabled: reasoningModel.reasoning && evaluationBudget.thinkingTokens > 0, format: reasoningFormat, maximumThinkingTokens: evaluationBudget.thinkingTokens, maximumOutputTokens: evaluationBudget.outputTokens }, caseIds: selected.map(c => c.id), expectedResumeCount: selected.filter(c => c.resumeWith).length * repeats, mode: "real-model-controlled-tools", provider: binding.binding.provider, model: binding.binding.modelId, temperature: 0, promptSha256: fingerprint(V2_SYSTEM_PROMPT), repeats,
   conditions: "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.", rows }, null, 2));
 for (let repeat = 0; repeat < repeats; repeat++) for (const [index, test] of selected.entries()) {
   for (const variant of compare ? index % 2 ? ["old", "v2"] : ["v2", "old"] : ["v2"]) {

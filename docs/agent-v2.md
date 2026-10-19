@@ -132,13 +132,16 @@ Web 显示现有进度阶段、最终来源和可展开的调用状态/耗时。
 | `READ_RETRIES` | 1 | 仅 host 明确分类为 transient 的只读错误 |
 | `DIRECT_TOOLS` | 16 | 小目录直接暴露；大目录 discover_tools 分页加载 |
 | `TEMPERATURE` | 0 | 初始低随机性配置，不保证模型策略正确 |
-| `THINKING_TOKENS` | 1024 | 已验证 Qwen Plus 的原生思考上限，包含在输出额度内；0 关闭，最后收尾或输出不足时关闭 |
+| `THINKING_TOKENS` | 1024 | 已验证 profile 的原生思考上限，包含在输出额度内；0 关闭，最后收尾或输出不足时关闭 |
+| `REASONING_PROFILE` | auto | 自动应用已验证的 Qwen Plus 配置；可显式设为 `qwen-chat-template`，仅用于支持对应字段的 Chat Completions 端点 |
 | `COST_USD` | 未设置 | 可选费用准入；必须有可信的模型输入/输出单价，否则拒绝 |
 | `TIMEZONE` | Asia/Shanghai | worker/CLI 的可信时区；不能从访客文本授予身份或位置 |
 
 token usage 使用 provider 的实际值；没有 usage 时以保守估值扣减预算。费用基于配置单价，`costAvailable=false` 时 0 不是“免费”，也不是实际账单。模型客户端超时仍受既有 `DELEGATE_MODEL_TIMEOUT_MS` 约束；模型容量使用既有 `DELEGATE_PI_CONTEXT_WINDOW_TOKENS` 配置，应依据真实 provider 容量设置。外部自定义 adapter 不得隐藏重试；必须把可重试错误抛成 `V2Error("transient")`，由 V2 统一计数。
 
-V2 对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus` 组合使用 PI 原生 Qwen thinking profile；这是模型能力适配，不依赖用户问题或业务关键词。思考发生在正常主模型请求内，不引入核验链，正文不会写入追踪或澄清状态。其他模型保留原绑定，旧 Pi 入口不变。具体质量、耗时取舍和复测见[澄清修复验收](agent-v2-clarification-fix.md)。
+V2 默认对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus` 组合使用 PI 原生 Qwen thinking profile；这是模型能力适配，不依赖用户问题或业务关键词。思考发生在正常主模型请求内，不引入核验链，正文不会写入追踪或澄清状态。其他模型默认保留原绑定，旧 Pi 入口不变。具体质量、耗时取舍和复测见[澄清修复验收](agent-v2-clarification-fix.md)。
+
+自托管端点可显式配置 `DELEGATE_V2_REASONING_PROFILE=qwen-chat-template`。PI 0.85.1 会发送 `chat_template_kwargs.enable_thinking` 和 `thinking_token_budget`，而非 Qwen Plus 的顶层 `enable_thinking` / `thinking_budget`。必须先验证服务端支持；不能仅凭模型名字套用。当前本地 `qwen3.8-27b` 的配置、复测及限制见[模型切换验收](agent-v2-qwen38-validation.md)。
 
 SDK 的 `authorizedUserLocation` 只能由可信主机提供已获授权的位置，缺省为 `null`；worker 不从时区、IP 或检索结果推断位置。模型同时收到本次真实工具结果摘要（不含原始参数），避免把工具描述或计划当成已经执行。
 

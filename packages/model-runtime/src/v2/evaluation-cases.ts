@@ -51,8 +51,11 @@ export function requestsUnsupportedPersonalData(text: string): boolean {
   const fields = /员工(?:编号|号)|工号|职级|部门|身份证|证件|手机号|手机号码|电话|邮箱|个人(?:信息|资料)|账号|密码|凭证|姓名|employee\s*(?:id|number)|phone|email|password|credentials?|department/i;
   const asks = /请|需要(?:您|你)|(?:能否|是否|方便|愿意)|^\s*(?:提供|告知|输入|上传|发送|补充)|(?:您|你)(?:可以|可|需|要|必须).{0,8}(?:提供|告知|输入|上传|发送|补充)|提供.{0,50}(?:即可|才能|便能|就能)|是多少|是什么|\b(?:provide|share|send|enter|upload|tell me|give me|need your|what is your|what's your|which department)\b/i;
   const negated = /无需|不用|不要|不必|不需要|不应|不能.{0,8}(?:索要|收集)|\b(?:do not|don't|no need|not necessary|should not)\b/i;
+  // A conditional statement that supplying data cannot help is not an ask.
+  // Keep this anchored so an imperative ("请提供...") is still detected.
+  const ineffectiveOffer = /^\s*(?:即使|即便|就算)?\s*提供.{0,60}(?:无法|不能|不足以).{0,20}(?:查询|查到|核实|确认)/i;
   return text.split(/[，,。；;\n!?！？]|(?:但是|但|不过|然而|\bhowever\b|\bbut\b)/iu)
-    .some(clause => fields.test(clause) && asks.test(clause) && !negated.test(clause));
+    .some(clause => fields.test(clause) && asks.test(clause) && !negated.test(clause) && !ineffectiveOffer.test(clause));
 }
 
 export function checkV2EvaluationCase(test: V2EvaluationCase, result: {

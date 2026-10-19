@@ -42,4 +42,31 @@ describe("V2 verified Qwen native reasoning wire contract", () => {
     expect(binding.binding.model.reasoning).toBe(false);
     expect(binding.binding.model.compat).not.toHaveProperty("thinkingFormat");
   });
+  it.each([true, false])("encodes the opt-in chat-template profile with thinking enabled=%s", async enabled => {
+    const settings = { ...env, DELEGATE_BAILIAN_MODEL: "qwen3.8-27b", DELEGATE_V2_REASONING_PROFILE: "qwen-chat-template" };
+    const binding = createV2ModelBindingFromEnv(settings);
+    const legacy = createPiModelBindingFromEnv(settings);
+    if (!binding.ok || !legacy.ok) throw Error("fixture binding failed");
+    expect(legacy.binding.model.reasoning).toBe(false);
+    let sent: any;
+    const stream = await binding.binding.streamFn(binding.binding.model, {
+      systemPrompt: "fixture system", messages: [{ role: "user", content: "fixture", timestamp: 0 }],
+    }, { ...(enabled ? { reasoning: "low" as const } : {}), thinkingBudgets: { low: 1024 }, maxTokens: 2048,
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return new Response('data: ' + JSON.stringify({ id: 'fixture', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+      } });
+    expect((await stream.result()).stopReason).toBe("stop");
+    expect(sent).toMatchObject({ chat_template_kwargs: { enable_thinking: enabled, preserve_thinking: true }, max_tokens: 2048 });
+    expect(sent.thinking_token_budget).toBe(enabled ? 1024 : undefined);
+    expect(sent.enable_thinking).toBeUndefined();
+    expect(sent.thinking_budget).toBeUndefined();
+    expect(sent.reasoning_effort).toBeUndefined();
+    expect(sent.messages[0].role).toBe("system");
+  });
+  it("rejects unknown profiles and incompatible transports", () => {
+    expect(() => createV2ModelBindingFromEnv({ ...env, DELEGATE_V2_REASONING_PROFILE: "typo" })).toThrow();
+    expect(() => createV2ModelBindingFromEnv({ DELEGATE_MODEL_PROVIDER: "openai", OPENAI_API_KEY: "fixture",
+      DELEGATE_V2_REASONING_PROFILE: "qwen-chat-template" })).toThrow(/Chat Completions/);
+  });
 });

@@ -143,6 +143,8 @@ V2 默认对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus`
 
 自托管端点可显式配置 `DELEGATE_V2_REASONING_PROFILE=qwen-chat-template`。PI 0.85.1 会发送 `chat_template_kwargs.enable_thinking` 和 `thinking_token_budget`，而非 Qwen Plus 的顶层 `enable_thinking` / `thinking_budget`。必须先验证服务端支持；不能仅凭模型名字套用。当前本地 `qwen3.8-27b` 的配置、复测及限制见[模型切换验收](agent-v2-qwen38-validation.md)。
 
+同一 worker 承载旧流程与 V2 时，可同时配置 `DELEGATE_V2_MODEL_BASE_URL`、`DELEGATE_V2_MODEL_ID`、`DELEGATE_V2_MODEL_API_KEY`，仅覆盖 V2 的 Chat Completions 连接。三项必须完整，避免把旧凭据发往新地址；没有模型回退，不修改旧 `DELEGATE_MODEL_*` 配置。新端点费用单价默认未知，需用 `DELEGATE_V2_MODEL_INPUT_COST_USD_PER_1M_TOKENS` / `DELEGATE_V2_MODEL_OUTPUT_COST_USD_PER_1M_TOKENS` 单独提供，不能继承另一模型的单价。实际 `3002` 地理代表切换见[部署记录](agent-v2-geography-3002.md)。
+
 SDK 的 `authorizedUserLocation` 只能由可信主机提供已获授权的位置，缺省为 `null`；worker 不从时区、IP 或检索结果推断位置。模型同时收到本次真实工具结果摘要（不含原始参数），避免把工具描述或计划当成已经执行。
 
 ## 来源、状态与数据保存

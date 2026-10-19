@@ -7,7 +7,18 @@ export function createV2ModelBindingFromEnv(env: NodeJS.ProcessEnv = process.env
   const budget = resolveV2Budget(env);
   // Explicit deployment capability, never inferred from a question or model name.
   const profile = z.enum(["auto", "qwen-chat-template"]).parse(env.DELEGATE_V2_REASONING_PROFILE ?? "auto");
-  const result = createPiModelBindingFromEnv({ ...env, DELEGATE_PI_MODEL_MAX_RETRIES: "0", DELEGATE_PI_MAX_OUTPUT_TOKENS: String(budget.outputTokens) });
+  const hasEndpointOverride = [env.DELEGATE_V2_MODEL_BASE_URL, env.DELEGATE_V2_MODEL_ID, env.DELEGATE_V2_MODEL_API_KEY].some(value => value !== undefined);
+  // A complete V2-only Chat Completions connection prevents changing other
+  // representatives' legacy model or sending inherited credentials to a new URL.
+  const endpoint = hasEndpointOverride ? z.object({ baseUrl: z.string().url(), id: z.string().trim().min(1), apiKey: z.string().trim().min(1) })
+    .parse({ baseUrl: env.DELEGATE_V2_MODEL_BASE_URL, id: env.DELEGATE_V2_MODEL_ID, apiKey: env.DELEGATE_V2_MODEL_API_KEY }) : undefined;
+  const modelEnv = endpoint ? { ...env, DELEGATE_MODEL_PROVIDER: "agicto", DELEGATE_MODEL_FALLBACK_PROVIDER: "",
+    DELEGATE_AGICTO_BASE_URL: endpoint.baseUrl, DELEGATE_AGICTO_MODEL: endpoint.id, DELEGATE_AGICTO_API_KEY: endpoint.apiKey,
+    // New endpoints must not inherit a different model's accounting rates.
+    DELEGATE_AGICTO_INPUT_COST_USD_PER_1M_TOKENS: env.DELEGATE_V2_MODEL_INPUT_COST_USD_PER_1M_TOKENS ?? "0",
+    DELEGATE_AGICTO_OUTPUT_COST_USD_PER_1M_TOKENS: env.DELEGATE_V2_MODEL_OUTPUT_COST_USD_PER_1M_TOKENS ?? "0",
+  } : env;
+  const result = createPiModelBindingFromEnv({ ...modelEnv, DELEGATE_PI_MODEL_MAX_RETRIES: "0", DELEGATE_PI_MAX_OUTPUT_TOKENS: String(budget.outputTokens) });
   if (!result.ok) return result;
   const model = result.binding.model;
   if (profile === "qwen-chat-template") {

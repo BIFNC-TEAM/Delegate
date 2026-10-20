@@ -63,7 +63,7 @@ export async function createV2Capabilities(adapters: PiCapabilityAdapters, conte
       const result = await adapters.sandbox!.execute({ ...args, timeoutMs: args.timeoutMs ?? 20000, context, signal });
       if (["failed", "unavailable"].includes(result.status ?? "") && !["unknown", "blocked"].includes(result.observation?.state ?? "")
         && !result.artifacts?.length && result.recovery
-        && ["not_dispatched", "isolated_output_rejected"].includes(result.recovery.kind)
+        && ["not_dispatched", "isolated_output_rejected", "isolated_program_failed"].includes(result.recovery.kind)
         && /^[a-z][a-z0-9_]{0,79}$/.test(result.recovery.reason)) {
         throw new V2RecoverableToolError(result.recovery.kind, result.recovery.reason, result.text);
       }

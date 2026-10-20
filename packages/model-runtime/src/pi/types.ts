@@ -247,9 +247,9 @@ export type PiSandboxAdapter = {
     onProgress?: (message: string) => void;
   }): Promise<PiCapabilityResult & {
     /** Host-verified only: never infer from stdout or accept from remote MCP data.
-     * output_rejected requires a terminal receipt from the isolated no-egress
+     * Program/output recovery requires a terminal receipt from the isolated no-egress
      * Python profile, with no deliverable file published. */
-    recovery?: { kind: "not_dispatched" | "isolated_output_rejected"; reason: string };
+    recovery?: { kind: "not_dispatched" | "isolated_output_rejected" | "isolated_program_failed"; reason: string };
   }>;
 };
 

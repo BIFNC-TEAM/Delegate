@@ -272,6 +272,20 @@ describe("governed V2 host capabilities", () => {
     expect(mocks.executeTool).toHaveBeenCalledOnce(); expect(mocks.publicArtifactDownload).not.toHaveBeenCalled();
   });
 
+  it.each(["confirmed", "missing-finish", "unknown-transport", "unknown-semantics", "zero-exit", "published-file"])("only permits isolated program correction with a conclusive receipt: %s", async state => {
+    const execute = await sandboxFixture("synthetic");
+    mocks.executeTool.mockResolvedValueOnce({ outcome: "failed", session: { failureReason: "isolated_python_program_failed" },
+      execution: { id: "program-failed", transportOutcome: state === "unknown-transport" ? "outcome_unknown" : "response_received",
+        semanticOutcome: state === "unknown-semantics" ? "unknown" : "failed", exitCode: state === "zero-exit" ? 0 : 1,
+        finishedAt: state === "missing-finish" ? null : "2026-10-20T01:00:00Z" },
+      artifacts: state === "published-file" ? [{ id: "file", kind: "file", mimeType: "text/csv", sizeBytes: 10 }] : [],
+    });
+    const result = await execute(["result.csv"]);
+    if(state === "confirmed") expect(result).toMatchObject({ recovery: { kind: "isolated_program_failed", reason: "isolated_python_program_failed" }, artifacts: [] });
+    else expect(result).not.toHaveProperty("recovery");
+    expect(mocks.executeTool).toHaveBeenCalledOnce();
+  });
+
   it("does not permit correction when an output error label lacks a terminal receipt", async () => {
     const execute = await sandboxFixture("synthetic");
     mocks.executeTool.mockResolvedValueOnce({ outcome: "failed", session: { failureReason: "output_csv_invalid" }, execution: { id: "unknown", transportOutcome: "outcome_unknown" }, artifacts: [] });

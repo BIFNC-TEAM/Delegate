@@ -343,6 +343,21 @@ export function buildAgentCapabilities(input: {
       if(execution.approvalRequest) input.onPendingApproval(execution.approvalRequest.id);
       const unknown = execution.execution?.transportOutcome === "outcome_unknown";
       const outputRejection = execution.session?.failureReason;
+      // Only this verified no-egress profile can safely correct a terminated
+      // program failure. A missing/contradictory receipt or published file is
+      // not proof of a harmless failure; retain the conservative path below.
+      if(execution.outcome === "failed" && outputRejection === "isolated_python_program_failed"
+        && execution.execution?.transportOutcome === "response_received"
+        && execution.execution.semanticOutcome === "failed"
+        && Number.isInteger(execution.execution.exitCode) && execution.execution.exitCode! > 0
+        && typeof execution.execution.finishedAt === "string" && Number.isFinite(Date.parse(execution.execution.finishedAt))
+        && !execution.artifacts.some(artifact => artifact.kind === "file")) {
+        return {
+          status: "failed", text: "隔离 Python 程序已明确以非零状态退出，没有交付文件。请检查并修正 Python 用法及工具定义中的输出契约；系统没有自动重试，也不会执行其他外部操作。调试说明写到 stderr，stdout 只输出最终文件内容。",
+          details: { reason: outputRejection, transportOutcome: "response_received", exitCode: execution.execution.exitCode },
+          recovery: { kind: "isolated_program_failed", reason: outputRejection }, artifacts: [],
+        };
+      }
       if(outputFile && execution.outcome === "failed"
         && execution.execution?.transportOutcome === "response_received"
         && ["output_not_supported_text", "output_csv_invalid", "output_json_invalid", "output_file_too_large"].includes(outputRejection ?? "")) {
@@ -655,7 +670,7 @@ export function buildAgentCapabilities(input: {
       : {}),
     ...(input.setup.compute.enabled ? {
       sandbox: {
-        executionDescription: `Only Python is available after host preflight. ${agentTextFileOutputNotice.en} expectedOutputs declares the delivered filename; the host saves COMPLETE stdout as that file. Output only the final file bytes to stdout; send logs/explanations to stderr. CSV must have a non-empty unique header and equal column counts on every row. Use csv.writer(sys.stdout) directly or sys.stdout.write(csv_text); do not add blank rows, a separate average/log line, or Markdown fences. Writing a file inside the sandbox alone does not deliver it; return its exact contents on stdout.`,
+        executionDescription: `Only Python is available after host preflight. ${agentTextFileOutputNotice.en} expectedOutputs declares the delivered filename; the host saves COMPLETE stdout as that file. Output only the final file bytes to stdout; send logs/explanations to stderr. CSV must have a non-empty unique header and equal column counts on every row. Use writer = csv.writer(sys.stdout), then writer.writerow([...]) or writer.writerows([...]); csv.writer is NOT a context manager, so never use with csv.writer(...). Alternatively use sys.stdout.write(csv_text); do not add blank rows, a separate average/log line, or Markdown fences. Writing a file inside the sandbox alone does not deliver it; return its exact contents on stdout.`,
         execute: executeSandbox,
         ...(["allow", "ask"].includes(input.authority?.compute?.capabilityModes?.browser ?? "deny") ? { browse: browseSandbox } : {}),
       }

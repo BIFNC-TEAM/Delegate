@@ -1,0 +1,18 @@
+--- a/cli.js
++++ b/cli.js
+@@ -168,4 +168,14 @@
+ `||a==="\r"?(process.stdin.setRawMode(!1),process.stdin.pause(),process.stdin.removeListener("data",r),process.stdout.write(`
+ `),t(i)):a===""?(process.stdin.setRawMode(!1),process.exit(1)):a==="\x7F"||a==="\b"?(i=i.slice(0,-1),n()):(i+=a,process.stdout.write(e?a:"*".repeat(a.length)))};process.stdin.on("data",r)}else{let i="";process.stdin.setEncoding("utf-8"),process.stdin.on("data",n=>{i+=n}),process.stdin.on("end",()=>{t(i.trimEnd())}),process.stdin.resume()}})}function Bc(){(process.platform==="win32"||process.platform==="darwin")&&!kr()&&console.warn(`
+ Warning: btime native module failed to load. File creation times will not be preserved.
+-`)}function te(){let s=Ve();return s||(console.error(`No account logged in. Run "${J} login" first.`),process.exit(2)),s}x.parse();
++`)}function te(){let s=Ve();return s||(console.error(`No account logged in. Run "${J} login" first.`),process.exit(2)),s}if (require.main === module) x.parse();
++else {
++  // Delegate's narrow, version-pinned read adapter. No CLI state or filesystem credentials.
++  Ut = (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(30000) });
++  module.exports = {
++    login: As, logout: Ds, listVaults: token => Ts(token, Lr),
++    deriveKey: Or, keyHash: Nr, accessVault: Zr,
++    encryption: kc, encodeKey: bo, decodeKey: yo, Client: Zi
++  };
++}
++

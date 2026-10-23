@@ -1009,6 +1009,9 @@
 .knowledge-obsidian-sync select:focus { border-color: var(--v2-teal); box-shadow: 0 0 0 3px rgba(22,163,148,.1); }
 .knowledge-sync-selection-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .knowledge-sync-selection-footer > small { margin-right: auto; }
+.knowledge-publish-add-link > summary { cursor: pointer; line-height: 1.6; }
+.knowledge-publish-add-link > .knowledge-form-field { margin-top: 12px; gap: 8px; }
+.knowledge-publish-add-link > button { margin-top: 12px; }
 .knowledge-sync-selection-footer small { color: var(--v2-muted); font-size: .6rem; line-height: 1.6; }
 .knowledge-obsidian-sync button.knowledge-sync-primary { flex-shrink: 0; min-height: 36px; border-color: var(--v2-teal); background: var(--v2-teal); color: #fff; font-weight: 750; }
 .knowledge-obsidian-sync button.knowledge-sync-primary:hover:not(:disabled) { border-color: var(--v2-teal-strong); background: var(--v2-teal-strong); }

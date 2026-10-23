@@ -687,6 +687,8 @@ function knowledgeFetch(activeSlug: string, input: RequestInfo | URL, init: Requ
   return fetch(input, { ...init, headers });
 }
 function useModalBehavior(onClose: () => void, selector: string) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -702,7 +704,7 @@ function useModalBehavior(onClose: () => void, selector: string) {
     const firstButton = document.querySelector<HTMLElement>(`${selector} button`);
     firstButton?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
@@ -714,7 +716,7 @@ function useModalBehavior(onClose: () => void, selector: string) {
       }
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onClose, selector]);
+  }, [selector]);
 }
 
 function sortKnowledgeAssets(assets: KnowledgeAssetRecord[]) {

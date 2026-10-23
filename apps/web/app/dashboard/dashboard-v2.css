@@ -989,9 +989,44 @@
 .knowledge-obsidian-selection legend { color: var(--v2-copy); font-size: .69rem; font-weight: 750; }
 .knowledge-obsidian-selection-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; font-size: .69rem; }
 .knowledge-obsidian-tree-scroll { max-height: 280px; overflow: auto; margin-bottom: 12px; }
+.knowledge-sync-tabs { display: flex; gap: 4px; justify-self: start; padding: 4px; border: 1px solid var(--v2-line); border-radius: 10px; background: var(--v2-canvas); }
+.knowledge-sync-tabs button { border-color: transparent; background: transparent; font-weight: 750; }
+.knowledge-sync-tabs button[aria-pressed="true"] { color: var(--v2-teal-strong); background: var(--v2-teal-soft); border-color: var(--v2-line); }
+.knowledge-obsidian-sync { display: grid; gap: 16px; min-width: 0; color: var(--v2-copy); font-size: .69rem; }
+.knowledge-obsidian-sync > p { margin: 0; }
+.knowledge-obsidian-sync > .knowledge-form-error { color: #dc2626; }
+.knowledge-sync-connect, .knowledge-sync-unlock { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--v2-line); border-radius: 10px; }
+.knowledge-sync-connect legend, .knowledge-sync-unlock legend { padding: 0 4px; color: var(--v2-copy); font-size: .69rem; font-weight: 750; }
+.knowledge-sync-account { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border: 1px solid var(--v2-line); border-radius: 10px; background: #f9fafb; }
+.knowledge-sync-account > div { display: grid; grid-template-columns: auto minmax(0,1fr); align-items: center; gap: 6px 8px; min-width: 0; }
+.knowledge-sync-account strong { min-width: 0; overflow-wrap: anywhere; font-size: .69rem; font-weight: 750; }
+.knowledge-sync-connected { padding: 3px 6px; border-radius: 6px; color: var(--v2-teal-strong); background: var(--v2-teal-soft); font-size: .56rem; font-weight: 750; }
+.knowledge-sync-account small { grid-column: 1 / -1; color: var(--v2-muted); font-size: .6rem; line-height: 1.5; }
+.knowledge-sync-account > button { flex-shrink: 0; }
+.knowledge-sync-vault-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 8px; }
+.knowledge-sync-vault-row > button { min-height: 40px; }
+.knowledge-obsidian-sync select { width: 100%; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: 8px; background: #fff; color: var(--v2-copy); font-family: inherit; font-size: .69rem; }
+.knowledge-obsidian-sync select:focus { border-color: var(--v2-teal); box-shadow: 0 0 0 3px rgba(22,163,148,.1); }
+.knowledge-sync-selection-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.knowledge-sync-selection-footer > small { margin-right: auto; }
+.knowledge-sync-selection-footer small { color: var(--v2-muted); font-size: .6rem; line-height: 1.6; }
+.knowledge-obsidian-sync button.knowledge-sync-primary { flex-shrink: 0; min-height: 36px; border-color: var(--v2-teal); background: var(--v2-teal); color: #fff; font-weight: 750; }
+.knowledge-obsidian-sync button.knowledge-sync-primary:hover:not(:disabled) { border-color: var(--v2-teal-strong); background: var(--v2-teal-strong); }
+.knowledge-sync-connect > button, .knowledge-sync-unlock > button { justify-self: start; }
+@media (max-width: 600px) {
+  .knowledge-sync-account, .knowledge-sync-selection-footer { align-items: stretch; flex-direction: column; }
+  .knowledge-sync-vault-row { grid-template-columns: minmax(0,1fr); }
+  .knowledge-obsidian-sync button, .knowledge-obsidian-sync select { min-height: 44px; }
+  .knowledge-sync-account > button, .knowledge-sync-vault-row > button { justify-self: start; align-self: flex-start; }
+}
 .knowledge-obsidian-tree { margin: 0; padding: 0 0 0 16px; list-style: none; font-size: .69rem; }
 .knowledge-obsidian-tree label, .knowledge-obsidian-tree summary { padding: 6px 0; overflow-wrap: anywhere; cursor: pointer; }
 .knowledge-obsidian-tree label, .knowledge-obsidian-selection-heading label { display: flex; align-items: center; gap: 8px; }
+.knowledge-obsidian-tree label { border-radius: 6px; transition: background-color 120ms ease; }
+.knowledge-obsidian-tree label:hover { background: #e5e7eb; }
+.knowledge-obsidian-tree label > span { padding: 2px 6px; }
+.knowledge-obsidian-tree input { flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) { .knowledge-obsidian-tree label { transition: none; } }
 .knowledge-obsidian-tree summary input { margin-right: 8px; }
 .knowledge-obsidian-tree small { margin-left: 8px; color: var(--v2-muted); }
 .knowledge-obsidian-import p, .knowledge-obsidian-preview > details > small { margin: 0 0 8px; color: var(--v2-muted); font-size: .65rem; line-height: 1.6; overflow-wrap: anywhere; }

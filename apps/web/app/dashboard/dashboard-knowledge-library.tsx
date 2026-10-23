@@ -257,6 +257,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
   const [obsidianBatch, setObsidianBatch] = useState(0);
+  const [obsidianSource, setObsidianSource] = useState<"local" | "sync" | "publish">("local");
   const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [obsidianQueue, setObsidianQueue] = useState<UploadQueueItem[]>([]);
   const queue = mode === "obsidian" ? obsidianQueue : fileQueue;
@@ -281,6 +282,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     if (!submitting && !isUploading && !preparing) onClose();
   }, [isUploading, onClose, submitting, preparing, previewingId]);
   useModalBehavior(closeDialog, previewItem ? ".knowledge-preview-dialog" : ".knowledge-import-dialog");
+
 
   function updateQueueItem(itemId: string, patch: Partial<Omit<UploadQueueItem, "id" | "file">>) {
     setQueue((current) => current.map((item) => item.id === itemId ? { ...item, ...patch } : item));
@@ -492,7 +494,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       <header><div><span>Knowledge Intake</span><h2>{zh ? "导入新的知识" : "Import new knowledge"}</h2><p>{zh ? "支持批量上传、进度跟踪和失败重试；导入后会自动提取正文、生成摘要与标签。" : "Batch upload with progress and retry; Delegate then extracts, summarizes, tags, and indexes every source."}</p></div><button aria-label={zh ? "关闭" : "Close"} disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">×</button></header>
       <nav className="knowledge-import-tabs">{((repairAsset ? ["url"] : ["file", "url", "text", "obsidian"]) as ImportMode[]).map((item) => <button className={mode === item ? "is-active" : undefined} disabled={submitting || isUploading || preparing} key={item} onClick={() => setMode(item)} type="button"><span>{item === "file" ? "▤" : item === "url" ? "↗" : item === "obsidian" ? "⇥" : "Aa"}</span>{item === "file" ? (zh ? "上传文件" : "Upload files") : item === "url" ? (zh ? "导入网址" : "Import URL") : item === "obsidian" ? (zh ? "第三方导入" : "Third-party import") : (zh ? "手工文本" : "Manual text")}</button>)}</nav>
       <form onSubmit={submit}>
-        {!repairAsset ? <div hidden={mode !== "obsidian"}><KnowledgeObsidianImport key={obsidianBatch} activeSlug={activeSlug} zh={zh} disabled={submitting || obsidianQueue.some((item) => item.status === "uploading" || item.status === "processing")} onPrepared={preparedObsidian} onBusyChange={setPreparing} /></div> : null}
+        {!repairAsset ? <div hidden={mode !== "obsidian"}><KnowledgeObsidianImport key={obsidianBatch} initialSource={obsidianSource} onSourceChange={setObsidianSource} activeSlug={activeSlug} zh={zh} disabled={submitting || obsidianQueue.some((item) => item.status === "uploading" || item.status === "processing")} onPrepared={preparedObsidian} onBusyChange={setPreparing} /></div> : null}
         {fileMode ? <>
           {mode === "file" ? <>
           <div className={`knowledge-dropzone${queue.length ? " has-file" : ""}`} onClick={() => { if (!submitting) fileRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!submitting) addFiles(Array.from(event.dataTransfer.files)); }}>
@@ -581,7 +583,7 @@ function KnowledgeDetailDrawer({ activeSlug, asset, locale, representatives, onC
 function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: Locale }) {
   const zh = locale === "zh";
   const facts = [
-    [zh ? "来源类型" : "Source type", asset.obsidianImport ? "Obsidian" : kindLabel(asset.kind)],
+    [zh ? "来源类型" : "Source type", asset.obsidianImport?.publishSource ? "Obsidian Publish" : asset.obsidianImport ? "Obsidian" : kindLabel(asset.kind)],
     [zh ? "文件大小" : "File size", asset.sizeBytes ? formatBytes(asset.sizeBytes) : "—"],
     [zh ? "处理版本" : "Processing version", `v${asset.processingVersion}`],
     [zh ? "最近处理" : "Last processed", asset.processedAt ? formatDate(asset.processedAt, locale) : "—"],
@@ -592,7 +594,8 @@ function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: L
     <section className="knowledge-detail-facts">{facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>
     {asset.obsidianImport ? <section className="knowledge-obsidian-preview">
       <details><summary>{zh ? "Obsidian 来源与属性" : "Obsidian source and properties"}</summary>
-        <p>{asset.obsidianImport.sourcePath}</p>
+        {asset.obsidianImport.publishSource ? <><p>{asset.obsidianImport.publishSource.siteName} · {formatDateTime(asset.obsidianImport.publishSource.importedAt, locale)}</p><a href={asset.obsidianImport.publishSource.sourceUrl} target="_blank" rel="noreferrer">{zh ? "打开原文" : "Open original"} ↗</a></> : null}
+        <p>{asset.obsidianImport.publishSource?.originalPath ?? asset.obsidianImport.sourcePath}</p>
         <pre>{JSON.stringify(asset.obsidianImport.properties, null, 2)}</pre>
         {asset.obsidianImport.warnings.length ? <ul className="knowledge-obsidian-warnings">{asset.obsidianImport.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
       </details>

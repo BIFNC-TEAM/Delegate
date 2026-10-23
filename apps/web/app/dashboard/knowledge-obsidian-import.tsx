@@ -3,6 +3,7 @@
 import type { ObsidianReadResult } from "./knowledge-obsidian-types";
 import { useEffect, useRef, useState } from "react";
 import { KnowledgeObsidianSync } from "./knowledge-obsidian-sync";
+import { KnowledgeObsidianPublish } from "./knowledge-obsidian-publish";
 import { KnowledgeObsidianSelection } from "./knowledge-obsidian-selection";
 import {
   KNOWLEDGE_TITLE_MAX_LENGTH, renameKnowledgeMarkdownFile,
@@ -16,9 +17,9 @@ type NoteFile = ObsidianReadResult["files"][number];
 export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, onBusyChange, initialSource = "local", onSourceChange }: {
   activeSlug: string; zh: boolean; disabled: boolean;
   onPrepared: (items: ObsidianUpload[], removeSelection?: (path: string) => void) => void; onBusyChange: (busy: boolean) => void;
-  initialSource?: "local" | "sync"; onSourceChange?: (source: "local" | "sync") => void;
+  initialSource?: "local" | "sync" | "publish"; onSourceChange?: (source: "local" | "sync" | "publish") => void;
 }) {
-  const [source, setSource] = useState<"local" | "sync">(initialSource);
+  const [source, setSource] = useState<"local" | "sync" | "publish">(initialSource);
   const [syncBusy, setSyncBusy] = useState(false);
   const remotePaths = useRef<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -135,9 +136,10 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
 
   return <section className="knowledge-obsidian-import" aria-busy={busy || syncBusy} aria-label={source === "local" ? (zh ? "Obsidian 本地导入" : "Obsidian local import") : source === "sync" ? "Obsidian Sync import" : "Obsidian Publish import"}>
     <nav className="knowledge-sync-tabs" aria-label={zh ? "导入来源" : "Import source"}>
-      {(["local", "sync"] as const).map(value => <button key={value} type="button" disabled={locked} aria-pressed={source === value} onClick={() => { setSource(value); onSourceChange?.(value); }}>{value === "local" ? (zh ? "本地笔记" : "Local notes") : value === "sync" ? "Obsidian Sync" : "Obsidian Publish"}</button>)}
+      {(["local", "sync", "publish"] as const).map(value => <button key={value} type="button" disabled={locked} aria-pressed={source === value} onClick={() => { setSource(value); onSourceChange?.(value); }}>{value === "local" ? (zh ? "本地笔记" : "Local notes") : value === "sync" ? "Obsidian Sync" : "Obsidian Publish"}</button>)}
     </nav>
     {source === "sync" ? <KnowledgeObsidianSync activeSlug={activeSlug} zh={zh} disabled={disabled || busy} onRead={acceptSync} onBusyChange={setSyncBusy} /> : null}
+    {source === "publish" ? <KnowledgeObsidianPublish activeSlug={activeSlug} zh={zh} disabled={disabled || busy} onRead={acceptSync} onBusyChange={setSyncBusy} /> : null}
     <div hidden={source !== "local"}>
     <div className="knowledge-conflict-policy"><div><span>Obsidian</span><small>{zh ? "选择本地 Markdown 笔记，引用的笔记需一并选择" : "Select local Markdown notes, including any referenced notes."}</small></div>
       <button type="button" disabled={locked} onClick={() => inputRef.current?.click()}>{zh ? (files.length ? "继续添加文件" : "选择笔记文件") : (files.length ? "Add more files" : "Choose note files")}</button>

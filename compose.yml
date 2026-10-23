@@ -3,6 +3,7 @@ name: delegate
 x-app-environment: &app-environment
   NODE_ENV: ${NODE_ENV:-production}
   DATABASE_URL: postgresql://postgres:postgres@postgres:5432/delegate
+  OBSIDIAN_SYNC_CREDENTIAL_KEY: ${OBSIDIAN_SYNC_CREDENTIAL_KEY:-}
   NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
   NEXT_PUBLIC_DASHBOARD_URL: ${NEXT_PUBLIC_DASHBOARD_URL:-}
   NEXT_PUBLIC_REPRESENTATIVE_URL: ${NEXT_PUBLIC_REPRESENTATIVE_URL:-}

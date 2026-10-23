@@ -23,6 +23,8 @@ services:
       - ./apps/web/public:/app/apps/web/public:ro
       - ./apps/web/auth-guard.ts:/app/apps/web/auth-guard.ts:ro
       - ./apps/web/next.config.ts:/app/apps/web/next.config.ts:ro
+      - ./apps/web/instrumentation.ts:/app/apps/web/instrumentation.ts:ro
+      - ./packages/obsidian-sync/src:/app/packages/obsidian-sync/src:ro
       - ./apps/web/proxy.ts:/app/apps/web/proxy.ts:ro
       - ./packages/artifacts/src:/app/packages/artifacts/src:ro
       - ./packages/compute-protocol/src:/app/packages/compute-protocol/src:ro

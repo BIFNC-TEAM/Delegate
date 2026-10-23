@@ -1295,10 +1295,23 @@ model Owner {
   acknowledgedWalletExceptions WalletExceptionCase[]      @relation("WalletExceptionAcknowledgedBy")
   walletExceptionActions       WalletExceptionAction[]
   telegramBotConnections       TelegramBotConnection[]
+  obsidianSyncConnection       ObsidianSyncConnection?
   auditEvents                  EventAudit[]               @relation("OwnerAuditEvents")
   payoutProfile                CreatorPayoutProfile?      @relation("PayoutProfileOwner")
   createdPayoutProfiles        CreatorPayoutProfile[]     @relation("PayoutProfileCreator")
   createdPayoutDestinations    PayoutDestination[]        @relation("PayoutDestinationCreator")
+}
+
+model ObsidianSyncConnection {
+  id         String   @id @default(cuid())
+  ownerId    String   @unique
+  owner      Owner    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ciphertext String   @db.Text
+  expiresAt  DateTime
+  revision   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
 }
 
 model OwnerIdentityLink {

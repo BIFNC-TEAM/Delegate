@@ -11,7 +11,9 @@
     "./owner-identity-profile": "./src/owner-identity-profile.ts",
     "./owner-avatar-storage": "./src/owner-avatar-storage.ts",
     "./knowledge-web-capture": "./src/knowledge-web-capture.ts",
-    "./knowledge-obsidian": "./src/knowledge-obsidian.ts"
+    "./knowledge-obsidian": "./src/knowledge-obsidian.ts",
+    "./obsidian-sync": "./src/obsidian-sync/service.ts",
+    "./obsidian-publish": "./src/obsidian-publish.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -40,7 +42,8 @@
     "pdfjs-dist": "5.4.296",
     "sharp": "0.35.0",
     "yaml": "2.9.0",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@delegate/obsidian-sync": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^4.1.0"

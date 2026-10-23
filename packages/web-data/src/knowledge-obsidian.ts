@@ -18,6 +18,12 @@ export const obsidianImportSchema = z.object({
   properties: z.record(z.string(), z.unknown()).refine((value) => JSON.stringify(value).length <= 64_000, "笔记属性过长。"),
   referencedPaths: z.array(sourcePathSchema).max(MAX_OBSIDIAN_NOTES),
   warnings: z.array(z.string().max(2048)).max(100),
+  publishSource: z.object({
+    siteName: z.string().max(512),
+    sourceUrl: z.url().max(2048).refine(value => { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password; }),
+    originalPath: sourcePathSchema,
+    importedAt: z.iso.datetime(),
+  }).strict().optional(),
 }).strict();
 
 export type ObsidianImportMetadata = z.infer<typeof obsidianImportSchema>;

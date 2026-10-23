@@ -122,6 +122,7 @@ export async function POST(request: Request) {
             kind,
             title,
             ...(obsidianImport ? { metadata: { obsidianImport } } : {}),
+            ...(obsidianImport?.publishSource ? { sourceUrl: obsidianImport.publishSource.sourceUrl } : {}),
             visibility: readVisibility(form),
             originalFileName: file.name,
             mimeType: file.type || "application/octet-stream",

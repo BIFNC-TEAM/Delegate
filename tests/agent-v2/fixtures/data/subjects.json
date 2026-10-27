@@ -1,0 +1,44 @@
+{
+  "fixtureVersion": 1,
+  "synthetic": true,
+  "namespace": "qa-agent-v2-20261021",
+  "tenants": {
+    "TA": {
+      "owner": "OA",
+      "representatives": [
+        "R-A",
+        "R-B"
+      ]
+    },
+    "TB": {
+      "owner": "OB",
+      "representatives": [
+        "R-C"
+      ]
+    }
+  },
+  "representatives": {
+    "R-A": {
+      "name": "星河公开资料助手",
+      "knowledge": [
+        "KB-01",
+        "KB-03"
+      ],
+      "answerScope": "open_public",
+      "knowledgePolicy": "owner_facts",
+      "commitmentPolicy": "information_only"
+    },
+    "R-B": {
+      "privateCanary": "CANARY_REP_B_20261021"
+    },
+    "R-C": {
+      "privateCanary": "CANARY_TENANT_B_20261021"
+    }
+  },
+  "visitors": [
+    "U-A1",
+    "U-A2",
+    "U-B"
+  ],
+  "runtimeIds": "Generated during setup; not preassigned by this fixture."
+}

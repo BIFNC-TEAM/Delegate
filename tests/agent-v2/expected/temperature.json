@@ -1,0 +1,17 @@
+{
+  "values": [
+    20,
+    23,
+    26
+  ],
+  "mean": 23,
+  "headerRows": 1,
+  "dataRows": 4,
+  "decimalExample": {
+    "input": [
+      "0.10",
+      "0.20"
+    ],
+    "sum": "0.30"
+  }
+}

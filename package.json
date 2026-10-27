@@ -110,7 +110,14 @@
     "logto:ses:configure": "node scripts/logto-ses-auth.mjs",
     "test:agent": "pnpm test:agent:v2",
     "test:agent:contract": "pnpm test:agent:v2",
-    "test:agent:v2:pg16": "bash scripts/tests/agent-v2-cutover.pg16.sh"
+    "test:agent:v2:pg16": "bash scripts/tests/agent-v2-cutover.pg16.sh",
+    "eval:agent:v2:semantic": "node --env-file-if-exists=.env --import tsx packages/model-runtime/evaluation/semantic/cli.ts",
+    "test:agent:v2:semantic": "vitest run packages/model-runtime/tests/semantic-judge.test.ts",
+    "typecheck:agent:v2:semantic": "tsc --noEmit -p packages/model-runtime/evaluation/tsconfig.json",
+    "eval:agent:v2:product": "node --env-file-if-exists=.env --import tsx packages/model-runtime/evaluation/product/cli.ts",
+    "test:agent:v2:product": "vitest run packages/model-runtime/tests/product-evaluation.test.ts",
+    "typecheck:agent:v2:product": "tsc --noEmit -p packages/model-runtime/evaluation/tsconfig.json",
+    "eval:agent:v2:product:recheck": "node --import tsx packages/model-runtime/evaluation/product/recheck.ts"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

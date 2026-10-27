@@ -1,0 +1,4 @@
+id,category,amount,status
+r1,A,10,completed
+r2,A,-2,completed
+r3,B,5,completed

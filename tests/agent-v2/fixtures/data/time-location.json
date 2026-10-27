@@ -1,0 +1,8 @@
+{
+  "T0": "2026-10-21T15:55:00Z",
+  "T1": "2026-10-21T16:05:00Z",
+  "timezone": "Asia/Shanghai",
+  "defaultLocation": null,
+  "authorizedLocationVariant": "上海",
+  "e2eClock": "actual server time; do not change host clock"
+}

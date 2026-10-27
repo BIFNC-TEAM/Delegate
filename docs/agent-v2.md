@@ -54,11 +54,15 @@ worker 通过 `agent-capabilities.ts` 复用授权检索和工具传输，通过
 
 `AgentContextAuthorization` 在每次模型调用、工具派发、结果接收和最终释放处复查。拒绝会终止相应 run，不允许换工具绕过。未知行为工具拒绝派发。写操作串行，不做基础设施重试；结果未知停止且明确告知查回执。主机适配器仍须实施持久幂等与远程取消，单纯 AbortSignal 无法撤销已发生的外部效果。
 
+worker 在交给 V2 前，按同一权限判断过滤工具清单并在执行时再次检查：沙盒执行要求有效计算配置启用且 `exec/write=allow`，浏览器要求 `browser=allow`，MCP 要求 `mcp=allow`。需要审批或行为未分类的工具不进入模型清单。少量工具直接暴露和大量工具的 `discover_tools` 均使用这份过滤后的清单；RAG、Skills 不因计算权限关闭而被移除。这只排除已知不可执行的能力，不能代替 Broker 对具体参数、资源及运行环境的实时准入检查，也不保证外部服务可用。
+
 宿主确认脚本未提交，或受限 Python 已结束且输出格式被拒绝、没有发布文件时，可把结构化错误交回下一次正常模型响应，由模型决定修正参数；每次调用仍计预算。当前文件契约将完整 stdout 保存为唯一产物，日志必须写 stderr。未知执行结果、权限拒绝及交付完整性未确认不能借此重试，见[CSV 输出契约与真实恢复验证](agent-v2-csv-output-fix.md)。
 
 已有代表的 `answerScope=owner_and_domain` 或 `knowledgePolicy=domain_only` 在旧 worker 中要求专项语义审核。当前 V2 在模型/工具开始前明确阻止这些受限配置，不默默丢掉审核要求，也不退回旧审核链。此限制适用于所有新请求，不会回退旧版本。
 
 ## 入口与文件
+
+新的[100条核心验收规格](../tests/agent-v2/README.md)统一列出用例、测试数据文件清单及需求映射。最新[2026-10-26执行登记](../reports/agent-v2/core-100/20261026-record-only/report.md)为39条完整执行（33 PASS、3 FAIL、3 REVIEW）、16条部分执行、45条阻塞。首批10条已有产品API/SSE自动断言及独立语义评审；其余部分使用受控测试和采证复核，不能宣称100条全自动或95%覆盖。20261027工具目录权限修复只通过本地机制回归，尚未部署或真实模型复测，历史报告保持原样。
 
 | 文件/目录 | 用途 |
 | --- | --- |
@@ -169,3 +173,21 @@ worker 将最小 `v2Task` 存入原有 `GenerationRun.contextSnapshot.agentTrace
 7. 初始版本只做有界上下文和按需工具发现，没有复杂缓存或新增规划服务。超大任务可明确因 context/budget limit 停止。
 
 上线部署及回退边界见[清理与切换说明](agent-v2-cleanup.md)。本次仅修改代码，不自动部署、不修改数据库或代表配置。
+
+## 2026-10-22 本地修复保留状态
+
+[修复、验证与待验收报告](../reports/agent-v2/core-100/20261022-remediation/report.md)记录额度准入、PG冲突、Web交付/匿名重放、空截断收尾及只读HTTP错误分类。仍由主模型作正常决策；无新增业务路由或固定核验链。仅思考达到输出上限且无答案/工具时，允许一次受预算约束的PI原生无工具收尾。
+
+最新源码未全部部署：3002未动，13002运行r3；HTTP分类修复仅构建至未应用的r4，最后状态提示词更新未构建。长URL完整性和失败任务误标completed仍未解决。最终离线Agent专项228通过，不能代替100条完整验收或性能通过。
+
+按用户决定保留本地修复/报告，暂停新增云沙盒测试，暂不推送或创建PR。共享腾讯沙盒凭据尚待轮换，详见[凭据事件报告](../reports/agent-v2/core-100/20261022-remediation/credential-routing-incident.md)。
+
+## 独立测试评审器（2026-10-23）
+
+新增测试命令 `test:agent:v2:semantic`、`typecheck:agent:v2:semantic`、`eval:agent:v2:semantic`。实现位于 `packages/model-runtime/evaluation/semantic/`，没有从生产入口导出，也没有被服务源代码导入。具体执行和结果协议见[测试评审器文档](../packages/model-runtime/evaluation/semantic/README.md)。
+
+它在Agent结束后独立评分，不修改Agent回答或状态。当前仅三类合成场景；业务架构、13002/3002部署、权限和历史100条验收登记均不因此改变。当前评审模型复用了Qwen连接，相关性风险在报告中明确标注。
+
+## 首批真实产品验收入口
+
+新增独立命令 `eval:agent:v2:product`，对固定13002/15432隔离环境执行10条用例的18个变体，读取实际发布版本、知识授权/注入记录和MCP回执后评审。专用合成代表明确禁止浏览器和代码执行，不修改正常服务链路。详见[运行说明](../packages/model-runtime/evaluation/product/README.md)和[实际验收结果](../reports/agent-v2/product10/report-20261023.md)。本批存在失败和待复核，未达到发布门槛；100条覆盖矩阵不自动继承通过。

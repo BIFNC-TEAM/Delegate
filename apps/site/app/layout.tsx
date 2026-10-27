@@ -2,14 +2,19 @@ import type { ReactNode } from "react";
 import type { Metadata } from "next";
 import { cookies, headers } from "next/headers";
 
-import "@delegate/web-ui/styles.css";
 import "./marketing.css";
-import { extractCountryHint, formatHtmlLang, getCookieLocale, localeCookieName, resolveLocale } from "@delegate/web-ui";
+import {
+  extractCountryHint,
+  formatHtmlLang,
+  getCookieLocale,
+  localeCookieName,
+  resolveLocale,
+} from "@delegate/web-ui";
 
 export const metadata: Metadata = {
-  title: "Delegate — 公开对外代理与 AI 接待前台",
+  title: "Delegate · 你的对外代理",
   description:
-    "为创始人、顾问和创作者创建公开对外代理：回答公开问题、筛选需求、收取服务费，并把高价值事项带着上下文交给你。",
+    "创建你的对外代理，接待咨询、提供服务，并连接一个可以为彼此充值的专业服务网络。",
 };
 
 export default async function RootLayout({

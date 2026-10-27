@@ -1,16 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useRef } from "react";
 
 import { LanguageSwitcher, type Locale } from "@delegate/web-ui";
 
-type SiteSession = {
-  authenticated: true;
-  account: {
-    displayName: string;
-    email: string | null;
-  };
-};
+import { useSiteSession } from "./site-session";
+import type { SiteAccount } from "./site-session-client";
 
 type SiteAccountNavigationProps = {
   activeLocale: Locale;
@@ -18,12 +13,17 @@ type SiteAccountNavigationProps = {
   loginHref: string;
   registerHref: string;
   registerLabel: string;
+  signupHref: string | null;
   siteReturnTo: string;
   menu: ReadonlyArray<{ href: string; label: string }>;
   copy: {
     languageAriaLabel: string;
     menuLabel: string;
     login: string;
+    signup: string;
+    checking: string;
+    unavailable: string;
+    retry: string;
     accountFallback: string;
     accountMenuLabel: string;
     console: string;
@@ -36,33 +36,57 @@ type SiteAccountNavigationProps = {
 };
 
 export function SiteAccountNavigation(props: SiteAccountNavigationProps) {
-  const [session, setSession] = useState<SiteSession | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch(new URL("/api/auth/site-session", props.dashboardBaseUrl), {
-      cache: "no-store",
-      credentials: "include",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        const payload = await response.json() as SiteSession | { authenticated: false };
-        return payload.authenticated ? payload : null;
-      })
-      .then((payload) => setSession(payload))
-      .catch(() => {
-        if (!controller.signal.aborted) setSession(null);
-      });
-
-    return () => controller.abort();
-  }, [props.dashboardBaseUrl]);
+  const mobileMenu = useRef<HTMLDetailsElement>(null);
+  const { state, retry } = useSiteSession();
+  const session = state.status === "authenticated" ? state : null;
+  const isAnonymous = state.status === "anonymous";
+  const sessionFeedback = (
+    <div className="site-session-feedback" role="status">
+      {state.status === "loading" ? (
+        <>
+          <span className="site-session-js-only" aria-busy="true">
+            {props.copy.checking}
+          </span>
+          <noscript>
+            <a href={props.loginHref}>{props.copy.login}</a>
+            {props.signupHref && (
+              <>
+                {" "}
+                · <a href={props.signupHref}>{props.copy.signup}</a>
+              </>
+            )}
+          </noscript>
+        </>
+      ) : (
+        <>
+          <span>{props.copy.unavailable}</span>
+          <button type="button" onClick={retry}>
+            {props.copy.retry}
+          </button>
+        </>
+      )}
+    </div>
+  );
 
   const languageItems = [
-    { locale: "zh" as const, href: "/?lang=zh", label: props.copy.zh, shortLabel: "ZH" },
-    { locale: "en" as const, href: "/?lang=en", label: props.copy.en, shortLabel: "EN" },
+    {
+      locale: "zh" as const,
+      href: "/?lang=zh",
+      label: props.copy.zh,
+      shortLabel: "ZH",
+    },
+    {
+      locale: "en" as const,
+      href: "/?lang=en",
+      label: props.copy.en,
+      shortLabel: "EN",
+    },
   ];
-  const consoleHref = localizedDashboardHref(props.dashboardBaseUrl, "overview", props.activeLocale);
+  const consoleHref = localizedDashboardHref(
+    props.dashboardBaseUrl,
+    "overview",
+    props.activeLocale,
+  );
   const representativesHref = localizedDashboardHref(
     props.dashboardBaseUrl,
     "representatives",
@@ -97,27 +121,65 @@ export function SiteAccountNavigation(props: SiteAccountNavigationProps) {
             settingsLabel={props.copy.settings}
             signOutLabel={props.copy.signOut}
           />
-        ) : (
+        ) : isAnonymous ? (
           <>
             <LanguageSwitcher
               activeLocale={props.activeLocale}
               ariaLabel={props.copy.languageAriaLabel}
               items={languageItems}
             />
-            <a className="site-text-link site-header-login" href={props.loginHref}>
+            <a
+              className="site-text-link site-header-login"
+              href={props.loginHref}
+            >
               {props.copy.login}
             </a>
-            <a className="site-button site-button-primary site-header-cta" href={props.registerHref}>
+            {props.signupHref && (
+              <a
+                className="site-text-link site-header-signup"
+                href={props.signupHref}
+              >
+                {props.copy.signup}
+              </a>
+            )}
+            <a
+              className="site-button site-button-primary site-header-cta"
+              href={props.registerHref}
+            >
               {props.registerLabel}
             </a>
           </>
+        ) : (
+          sessionFeedback
         )}
       </div>
 
-      <details className="site-mobile-menu">
+      <details
+        className="site-mobile-menu"
+        ref={mobileMenu}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && mobileMenu.current) {
+            mobileMenu.current.open = false;
+            mobileMenu.current.querySelector("summary")?.focus();
+          }
+        }}
+      >
         <summary>{props.copy.menuLabel}</summary>
-        <nav aria-label={props.copy.menuLabel}>
-          {props.menu.map((item) => <a href={item.href} key={item.href}>{item.label}</a>)}
+        <nav
+          aria-label={props.copy.menuLabel}
+          onClick={(event) => {
+            if (
+              (event.target as HTMLElement).closest("a") &&
+              mobileMenu.current
+            )
+              mobileMenu.current.open = false;
+          }}
+        >
+          {props.menu.map((item) => (
+            <a href={item.href} key={item.href}>
+              {item.label}
+            </a>
+          ))}
           {session ? (
             <>
               <div className="site-mobile-account">
@@ -133,15 +195,33 @@ export function SiteAccountNavigation(props: SiteAccountNavigationProps) {
                 <button type="submit">{props.copy.signOut}</button>
               </form>
             </>
-          ) : (
+          ) : isAnonymous ? (
             <>
-              <a className="site-mobile-login" href={props.loginHref}>{props.copy.login}</a>
-              <a className="site-mobile-register" href={props.registerHref}>{props.registerLabel}</a>
+              <a className="site-mobile-login" href={props.loginHref}>
+                {props.copy.login}
+              </a>
+              {props.signupHref && (
+                <a href={props.signupHref}>{props.copy.signup}</a>
+              )}
+              <a className="site-mobile-register" href={props.registerHref}>
+                {props.registerLabel}
+              </a>
             </>
+          ) : (
+            sessionFeedback
           )}
-          <div className="site-mobile-language" aria-label={props.copy.languageAriaLabel}>
+          <div
+            className="site-mobile-language"
+            aria-label={props.copy.languageAriaLabel}
+          >
             {languageItems.map((item) => (
-              <a aria-current={item.locale === props.activeLocale ? "page" : undefined} href={item.href} key={item.locale}>
+              <a
+                aria-current={
+                  item.locale === props.activeLocale ? "page" : undefined
+                }
+                href={item.href}
+                key={item.locale}
+              >
                 {item.shortLabel} · {item.label}
               </a>
             ))}
@@ -153,13 +233,18 @@ export function SiteAccountNavigation(props: SiteAccountNavigationProps) {
 }
 
 function AccountMenu(props: {
-  account: SiteSession["account"];
+  account: SiteAccount;
   accountFallback: string;
   accountMenuLabel: string;
   consoleHref: string;
   consoleLabel: string;
   languageAriaLabel: string;
-  languageItems: Array<{ locale: Locale; href: string; label: string; shortLabel: string }>;
+  languageItems: Array<{
+    locale: Locale;
+    href: string;
+    label: string;
+    shortLabel: string;
+  }>;
   locale: Locale;
   logoutAction: string;
   representativesHref: string;
@@ -171,20 +256,44 @@ function AccountMenu(props: {
   const label = accountLabel(props.account, props.accountFallback);
 
   return (
-    <details className="site-account-menu">
+    <details
+      className="site-account-menu"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector("summary")?.focus();
+        }
+      }}
+    >
       <summary aria-label={props.accountMenuLabel}>
-        <span className="site-account-avatar" aria-hidden="true">{accountInitial(label)}</span>
+        <span className="site-account-avatar" aria-hidden="true">
+          {accountInitial(label)}
+        </span>
         <span className="site-account-trigger-label">{label}</span>
-        <span className="site-account-chevron" aria-hidden="true">⌄</span>
+        <span className="site-account-chevron" aria-hidden="true">
+          ⌄
+        </span>
       </summary>
       <div className="site-account-popover">
         <div className="site-account-identity">
-          <AccountIdentity account={props.account} fallback={props.accountFallback} />
+          <AccountIdentity
+            account={props.account}
+            fallback={props.accountFallback}
+          />
         </div>
         <div className="site-account-links">
-          <a href={props.consoleHref}><span aria-hidden="true">↗</span>{props.consoleLabel}</a>
-          <a href={props.representativesHref}><span aria-hidden="true">◇</span>{props.representativesLabel}</a>
-          <a href={props.settingsHref}><span aria-hidden="true">⚙</span>{props.settingsLabel}</a>
+          <a href={props.consoleHref}>
+            <span aria-hidden="true">↗</span>
+            {props.consoleLabel}
+          </a>
+          <a href={props.representativesHref}>
+            <span aria-hidden="true">◇</span>
+            {props.representativesLabel}
+          </a>
+          <a href={props.settingsHref}>
+            <span aria-hidden="true">⚙</span>
+            {props.settingsLabel}
+          </a>
         </div>
         <div className="site-account-language">
           <span>{props.languageAriaLabel}</span>
@@ -194,7 +303,11 @@ function AccountMenu(props: {
             items={props.languageItems}
           />
         </div>
-        <form action={props.logoutAction} className="site-account-logout" method="post">
+        <form
+          action={props.logoutAction}
+          className="site-account-logout"
+          method="post"
+        >
           <button type="submit">{props.signOutLabel}</button>
         </form>
       </div>
@@ -206,22 +319,26 @@ function AccountIdentity({
   account,
   fallback,
 }: {
-  account: SiteSession["account"];
+  account: SiteAccount;
   fallback: string;
 }) {
   const label = accountLabel(account, fallback);
   return (
     <>
-      <span className="site-account-avatar" aria-hidden="true">{accountInitial(label)}</span>
+      <span className="site-account-avatar" aria-hidden="true">
+        {accountInitial(label)}
+      </span>
       <span className="site-account-identity-copy">
         <strong>{label}</strong>
-        {account.email && account.email !== label ? <small>{account.email}</small> : null}
+        {account.email && account.email !== label ? (
+          <small>{account.email}</small>
+        ) : null}
       </span>
     </>
   );
 }
 
-function accountLabel(account: SiteSession["account"], fallback: string): string {
+function accountLabel(account: SiteAccount, fallback: string): string {
   return account.displayName.trim() || account.email?.trim() || fallback;
 }
 

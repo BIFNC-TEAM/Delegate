@@ -40,7 +40,7 @@ AMN 的长期命题很简单：任何 Agent 都可以赚钱，任何用户都可
 
 Delegate 现在包含这些可运行的页面和服务：
 
-- **营销站点** 位于 `apps/site`，使用 Dispatch Editorial 设计系统。
+- **营销站点** 位于 `apps/site`，使用 `DESIGN.md` 中批准的蓝色服务网络设计，包含中英文交互演示和随登录态更新的账号导航。
 - **公开 representative 应用** 位于 `apps/reps`，包含代表档案、服务档位、网页聊天、充值入口模块，以及签名 public-chat session state。
 - **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、代表级 Memory 配置、workflow state，以及 Owner 资料、身份安全和 Dashboard 通知设置。
 - **可选 Telegram bot runtime** 位于 `apps/bot`，基于 grammY long-poll 和共享 Conversation Platform；它保留 Telegram 特有命令与交付边界，但不是第一版 Delegate 产品主入口。
@@ -267,6 +267,10 @@ PORT=3102 pnpm dev:reps
 - Site: `http://localhost:3100`
 - Dashboard: `http://localhost:3101/dashboard?view=overview`
 - Representative: `http://localhost:3102/reps/lin-founder-rep`
+
+请同步配置 `NEXT_PUBLIC_SITE_URL`、`NEXT_PUBLIC_DASHBOARD_URL`、`NEXT_PUBLIC_REPRESENTATIVE_URL` 和认证服务中登记的回调地址。Dashboard 只允许配置的官网来源读取会话状态；如果复用端口 3001 的现有 Docker Dashboard，官网应使用其配置的来源（通常为端口 3000），不能仅换用一个预览端口。
+
+官网回归测试：`pnpm --filter @delegate/site test`。已登录用户显示账号菜单，正文入口直接前往代表管理；切回标签页或恢复页面时会重新检查会话。
 
 如果只想为本地非 Docker app 开发启动数据库：
 

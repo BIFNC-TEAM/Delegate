@@ -31,6 +31,7 @@ command -v docker >/dev/null 2>&1 ||
 psql_fixture() {
   docker exec -i "$FIXTURE_CONTAINER" \
     psql \
+    -h 127.0.0.1 \
     -U postgres \
     -d "$FIXTURE_DATABASE" \
     -X \
@@ -73,6 +74,9 @@ assert_metric() {
     fail "expected backfill metric ${metric}=${expected}."
 }
 
+# The image starts a Unix-socket-only server before creating POSTGRES_DB.
+# pg_isready can report success there even when the requested DB is absent.
+# Require a real query over TCP so initialization and the final server are ready.
 docker run \
   --rm \
   --detach \
@@ -80,7 +84,7 @@ docker run \
   --env POSTGRES_PASSWORD=logto_issuer_fixture_only \
   --env "POSTGRES_DB=${FIXTURE_DATABASE}" \
   --publish 127.0.0.1::5432 \
-  --health-cmd="pg_isready -U postgres -d ${FIXTURE_DATABASE}" \
+  --health-cmd="psql -h 127.0.0.1 -U postgres -d ${FIXTURE_DATABASE} -X --set ON_ERROR_STOP=1 --command 'SELECT 1' >/dev/null" \
   --health-interval=1s \
   --health-timeout=2s \
   --health-retries=30 \

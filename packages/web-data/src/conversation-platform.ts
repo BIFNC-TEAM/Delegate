@@ -1810,10 +1810,10 @@ export async function acceptInboundConversationMessage(
     });
     if (existingRun) {
       if (
-        existingRun.inputMessage.sourceIdentityLinkId
-          !== ingressIdentityProvenance?.sourceIdentityLinkId
-        || existingRun.inputMessage.sourceIdentityConnectionProofId
-          !== ingressIdentityProvenance?.sourceIdentityConnectionProofId
+        (existingRun.inputMessage.sourceIdentityLinkId ?? null)
+          !== (ingressIdentityProvenance?.sourceIdentityLinkId ?? null)
+        || (existingRun.inputMessage.sourceIdentityConnectionProofId ?? null)
+          !== (ingressIdentityProvenance?.sourceIdentityConnectionProofId ?? null)
       ) {
         throw new ChannelUnavailableError(
           "identity_provenance_invalid",
@@ -2110,10 +2110,10 @@ export async function acceptInboundConversationMessage(
           reservedUsage = reservation.usageCharge;
         } catch (error) {
           if (error instanceof InsufficientAgentUsageCreditsError) {
-            // Capability selection happens in the worker. Queue an unreserved
-            // run so an MCP-only turn can be admitted as no-charge; every
-            // other turn must still acquire a reservation before answering.
-            billingMode = "service_credit_pending";
+            // V2 requires service admission before any model/tool selection.
+            // Throw inside the transaction so neither the run nor its outbox
+            // survives an exhausted-credit request.
+            throw new ServiceCreditRequiredError(effectiveFreeRepliesUsed);
           } else {
             throw error;
           }
@@ -2386,6 +2386,9 @@ export async function authorizeGenerationRunFreeUsage(input: {
       );
     }
     const billingMode = snapshot["billingMode"];
+    // Older ingress persisted these unreserved runs. They may acquire paid
+    // credits below the worker's admission gate, but can never become free.
+    if (billingMode === "service_credit_pending") return false;
     if (
       typeof billingMode === "string"
       && billingMode !== "free"
@@ -4646,7 +4649,8 @@ export async function claimNextGenerationWorkItem(
         }
         return null;
       }
-      if (run.outputMessage.externalMessageId) {
+      if (run.outputMessage.externalMessageId
+        || (channel === "web" && run.outputMessage.deliveryStatus === MessageDeliveryStatus.SENT)) {
         const acceptedAt = new Date();
         const acceptedMessage = await tx.message.updateMany({
           where: {

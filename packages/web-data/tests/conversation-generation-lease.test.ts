@@ -304,6 +304,18 @@ describe("conversation generation work leases", () => {
     });
   });
 
+  it("closes a requeued already-sent web answer without dispatching delivery again", async () => {
+    mocks.tx.$queryRaw.mockResolvedValue([{ id: "outbox-stale", aggregateId: "run-stale", conversationId: "conversation-1", status: "PENDING", attemptCount: 2 }]);
+    mocks.tx.generationRun.findUnique.mockResolvedValue({ ...validRun, status: "COMPLETED",
+      outputMessage: { id: "message-attempt-b", text: "persisted reply", externalMessageId: null, deliveryStatus: "SENT" } });
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "outbox-stale", status: "PROCESSING", attemptCount: 3 }),
+      data: expect.objectContaining({ status: "PROCESSED", processedAt: currentTime }),
+    }));
+    expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
+  });
+
   it("retries an expired pre-call delivery but never classifies it as provider-unknown", async () => {
     const candidate = {
       id: "outbox-stale",

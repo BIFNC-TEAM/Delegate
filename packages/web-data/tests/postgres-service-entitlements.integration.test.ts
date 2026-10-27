@@ -124,7 +124,7 @@ describePostgres("service entitlement PostgreSQL 16 concurrency", () => {
         refundServiceEntitlement(payment.refundEvidence),
       ]);
 
-      expect(consumeResult.status).toBe("fulfilled");
+      expect(consumeResult.status, consumeResult.status === "rejected" ? String(consumeResult.reason) : undefined).toBe("fulfilled");
       expect(refundResult.status).toBe("rejected");
       if (refundResult.status === "rejected") {
         expect(String(refundResult.reason)).toContain(
@@ -230,7 +230,7 @@ describePostgres("service entitlement PostgreSQL 16 concurrency", () => {
         consumeConversationEntitlement(reservation),
       ]);
 
-      expect(consumeResult.status).toBe("fulfilled");
+      expect(consumeResult.status, consumeResult.status === "rejected" ? String(consumeResult.reason) : undefined).toBe("fulfilled");
       const [sourceIdentity, account] = await Promise.all([
         prisma.audienceIdentity.findUniqueOrThrow({
           where: { id: fixture.sourceAudienceIdentityId },
@@ -1168,74 +1168,9 @@ function isExpectedSerializableMergeRejection(error: unknown) {
   );
 }
 
-async function deleteFixture(fixture: EntitlementFixture) {
-  await prisma.$transaction(async (tx) => {
-    await tx.conversationStateTransition.deleteMany({
-      where: { conversationId: fixture.conversationId },
-    });
-    await tx.conversationAssignment.deleteMany({
-      where: { conversationId: fixture.conversationId },
-    });
-    await tx.servicePaymentEvent.deleteMany({
-      where: {
-        paymentOrder: {
-          representativeId: fixture.representativeId,
-        },
-      },
-    });
-    await tx.serviceEntitlementLedgerEntry.deleteMany({
-      where: {
-        entitlementAccount: {
-          representativeId: fixture.representativeId,
-        },
-      },
-    });
-    await tx.servicePaymentOrder.deleteMany({
-      where: { representativeId: fixture.representativeId },
-    });
-    await tx.serviceEntitlementAccount.deleteMany({
-      where: { representativeId: fixture.representativeId },
-    });
-    await tx.outboxEvent.deleteMany({
-      where: { conversationId: fixture.conversationId },
-    });
-    await tx.handoffRequest.deleteMany({
-      where: { contactId: fixture.contactId },
-    });
-    await tx.generationRun.deleteMany({
-      where: { conversationId: fixture.conversationId },
-    });
-    await tx.message.deleteMany({
-      where: { conversationId: fixture.conversationId },
-    });
-    await tx.conversationEpisode.deleteMany({
-      where: { conversationId: fixture.conversationId },
-    });
-    await tx.conversation.delete({
-      where: { id: fixture.conversationId },
-    });
-    await tx.contact.delete({
-      where: { id: fixture.contactId },
-    });
-    await tx.audienceIdentity.deleteMany({
-      where: {
-        id: {
-          in: [
-            fixture.sourceAudienceIdentityId,
-            ...(fixture.targetAudienceIdentityId
-              ? [fixture.targetAudienceIdentityId]
-              : []),
-          ],
-        },
-      },
-    });
-    await tx.representative.delete({
-      where: { id: fixture.representativeId },
-    });
-    await tx.owner.delete({
-      where: { id: fixture.ownerId },
-    });
-  });
+async function deleteFixture(_fixture: EntitlementFixture) {
+  // Retain immutable handoff and event audit records. The pg16 runner owns
+  // this disposable database and destroys the container after the suite.
 }
 
 function assertSafePostgresE2eTarget() {
@@ -1248,6 +1183,9 @@ function assertSafePostgresE2eTarget() {
 
   const url = new URL(rawUrl);
   const hostname = url.hostname.toLowerCase();
+  if (url.pathname !== "/delegate_entitlement_test") {
+    throw new Error("This suite retains audit fixtures and requires the disposable delegate_entitlement_test database.");
+  }
   if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
     return;
   }

@@ -4,7 +4,7 @@ import {
   createV2ModelBindingFromEnv,
   delegateAgentV2, resolveV2Budget,
   v2PublishedPolicy,
-  type V2RunResult, type V2Session
+  type V2RunResult, type V2Session, type V2Tool
 } from "@delegate/model-runtime/v2";
 import { AgentContextAuthorizationError, auditReference } from "@delegate/runtime";
 import {
@@ -71,10 +71,24 @@ export async function processV2ConversationTurn(input: HostInput) {
   const context = { traceId: item.runId, runId: item.runId, sessionId: item.conversationId,
     representativeId: setup.id, conversationId: item.conversationId, timezone: process.env.DELEGATE_V2_TIMEZONE ?? "Asia/Shanghai",
     idempotencyKey: item.runId, attachments: item.inputAttachments.map(a => ({ id: a.id, fileName: a.fileName, mimeType: a.mimeType, sizeBytes: a.sizeBytes, uri: buildSandboxAttachmentPath(a.id, a.fileName) })) };
+  // Use the same effective-permission check for catalog exposure and dispatch.
+  // The runtime's direct definitions and discover_tools both use this filtered
+  // catalog. Broker preflight and live context authorization still apply later.
+  const isToolAvailable = (tool: V2Tool) => {
+    if (tool.approvalRequired || tool.effect === "unknown") return false;
+    const compute = authority?.compute;
+    if (tool.category === "mcp" || tool.name === "browse_in_sandbox" || tool.name === "execute_in_sandbox") {
+      if (!setup.compute.enabled || !compute?.enabled) return false;
+      if (tool.category === "mcp") return compute.capabilityModes.mcp === "allow";
+      if (tool.name === "browse_in_sandbox") return compute.capabilityModes.browser === "allow";
+      return compute.capabilityModes.exec === "allow" && compute.capabilityModes.write === "allow";
+    }
+    return true;
+  };
   const catalogAbort = new AbortController();
   const catalogTimer = setTimeout(() => catalogAbort.abort(), budget.toolTimeoutMs);
   let tools;
-  try { tools = await createV2Capabilities(adapters, context, catalogAbort.signal); }
+  try { tools = (await createV2Capabilities(adapters, context, catalogAbort.signal)).filter(isToolAvailable); }
   finally { clearTimeout(catalogTimer); }
   const progress = createPublicProgress(frame => item.channel === "web" ? updateGenerationPiProgress({ runId: item.runId, ...workLease, ...frame }) : Promise.resolve());
   const session: V2Session | undefined = previous ? { version: 1, scope, taskId: previous.record.taskId, status: "waiting_user",
@@ -89,9 +103,7 @@ export async function processV2ConversationTurn(input: HostInput) {
     authorize: async (boundary, tool) => {
       await leaseGuard.confirmOwned();
       await contextAuthorization.check(boundary);
-      if (tool?.approvalRequired || tool?.effect === "unknown") throw new V2Error("permission_denied");
-      if (tool?.name === "browse_in_sandbox" && authority?.compute?.capabilityModes?.browser !== "allow") throw new V2Error("permission_denied");
-      if (tool?.name === "execute_in_sandbox" && (authority?.compute?.capabilityModes?.exec !== "allow" || authority?.compute?.capabilityModes?.write !== "allow")) throw new V2Error("permission_denied");
+      if (tool && !isToolAvailable(tool)) throw new V2Error("permission_denied");
     },
     onEvent: async event => {
       await progress.onEvent(event);

@@ -1,0 +1,1025 @@
+{
+  "version": 1,
+  "scope": {
+    "origin": "http://127.0.0.1:13002",
+    "slug": "qa-agent-v2-product10-20261023",
+    "ownerId": "qa_agent_v2_product10_20261023",
+    "marker": "PRODUCT10_FIXTURE_V1"
+  },
+  "mode": "real-product-api-sse-db",
+  "syntheticBusinessData": true,
+  "testedImage": "record running image separately; not inferred from working tree",
+  "harnessSha256": {
+    "cli.ts": "b3b37e44293a8fab0fc7937b04a0d443d543165ba962d08b5975e81b571bff62",
+    "client.ts": "407546f9729e05f84582485c016e2fd91b6ec9a3b869c87607b53a2227c141d7",
+    "store.ts": "1472d384f0cd99de5eaea02a3207f1e66382939efe2a99f6858f92a617156b9b",
+    "scope.ts": "4b4a737fc6f374a480ebc15efef89e4c2e6ebf1da237fde782bdf7125b2c51bb",
+    "cases.ts": "48648b317d5144ef31270c4402abf676a452a11bbdbe02a7a74407ee0dec9083",
+    "../semantic/engine.ts": "51879f6a4fb194335128ec1c59ba27f3c027c3289292fb30f2a3b2b07dc042e6"
+  },
+  "judgePromptSha256": "63f15ef1b701e83c35d3f180b13899e25bb2ae8beffbef59f44ef72383ff7bbb",
+  "judgeModel": "qwen3.8-27b",
+  "sameModelJudgeRequested": true,
+  "independentWeightsVerified": false,
+  "definitions": [
+    {
+      "id": "V2-001",
+      "title": "新会话问候",
+      "variants": [
+        {
+          "id": "greeting",
+          "steps": [
+            {
+              "question": "你好",
+              "status": "completed",
+              "tools": "none"
+            }
+          ],
+          "criteria": [
+            {
+              "id": "greeting",
+              "rule": "自然回应问候，不回答不存在的历史话题，不编造身份或来源。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V2-013",
+      "title": "补充城市恢复",
+      "variants": [
+        {
+          "id": "resume",
+          "steps": [
+            {
+              "question": "今天气温多少？",
+              "status": "waiting_user",
+              "tools": "none"
+            },
+            {
+              "question": "上海",
+              "status": "completed",
+              "tools": "weather"
+            }
+          ],
+          "criteria": [
+            {
+              "id": "resume",
+              "rule": "对话第一轮询问城市，用户补上海后继续原天气任务；实际天气结论由本轮工具回执支持，不虚构温度、日期或再次询问已给出的城市。没有实际天气回执时应待复核。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V2-020",
+      "title": "内部知识及引用",
+      "variants": [
+        {
+          "id": "leave",
+          "steps": [
+            {
+              "question": "星河科技正式员工每年多少天年假？试用期是否适用？请注明来源。",
+              "status": "completed",
+              "tools": "knowledge"
+            }
+          ],
+          "criteria": [
+            {
+              "id": "grounded",
+              "rule": "依据本次发布且实际注入的授权资料正确回答年假天数、试用期限制，并引用实际资料；不能仅凭来源存在判断支持，不得编造版本或规则。"
+            }
+          ]
+        },
+        {
+          "id": "travel",
+          "steps": [
+            {
+              "question": "星河科技国内出差住宿报销上限是多少？申请需要什么材料？请注明来源。",
+              "status": "completed",
+              "tools": "knowledge"
+            }
+          ],
+          "criteria": [
+            {
+              "id": "grounded",
+              "rule": "金额、每晚单位、按实际发生及申请材料符合实际注入资料；引用真实资料；不虚构审批人员或时限。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "V2-031",
+      "title": "内部未命中",
+      "variants": [
+        {
+          "id": "missing-bonus",
+          "steps": [
+            {
+              "question": "星河科技本月奖金金额是多少？只接受有出处的内部事实。",
+              "status": "partial",
+              "tools": "knowledge"
+            }
+          ],
+          "criteria": [
+            {
+              "id": "limitation",
+              "rule": "资料不支持奖金金额时明确说明不能确认，不编造金额、不把未命中等同确定没有奖金、不用互联网替代内部事实。不得索取现有工具无法使用的工号、手机号或凭据，也不能声称已接入人事系统。"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "repeats": 1,
+  "expectedRows": 5,
+  "rows": [
+    {
+      "caseId": "V2-001",
+      "variant": "greeting",
+      "repeat": 1,
+      "startedAt": "2026-10-23T01:32:55.343Z",
+      "verdict": "pass",
+      "observed": [
+        {
+          "runId": "cmvkapkq500psoh0nn1616ftx",
+          "conversationId": "cmvkapkpm00pkoh0nv6c215cy",
+          "versionId": "cmvkalzjw000d9kz5qb1wcf11",
+          "deliveryStatus": "COMPLETED",
+          "answer": "你好！我是星河科技的公开资料助手，可以帮你查询公司相关的公开信息，比如业务介绍、产品资料、公开动态等。\n\n请问有什么可以帮你的？",
+          "input": "你好",
+          "model": "qwen3.8-27b",
+          "traceId": "abf0d850-1424-4e77-baac-92e377b5311c",
+          "taskStatus": "completed",
+          "taskId": "cmvkapkq500psoh0nn1616ftx",
+          "usage": {
+            "tokens": 5803,
+            "costUsd": null,
+            "activeMs": 1245.642999999225,
+            "attempts": 1,
+            "toolCalls": 0,
+            "modelTurns": 1,
+            "inputTokens": 5679,
+            "outputTokens": 124
+          },
+          "calls": [],
+          "modelCalls": 1,
+          "sources": [],
+          "knowledge": [],
+          "receipts": [],
+          "retrieval": null
+        }
+      ],
+      "hard": [
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkalzjw000d9kz5qb1wcf11",
+          "expected": "cmvkalzjw000d9kz5qb1wcf11"
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "completed",
+          "expected": "completed"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "no-business-tools",
+          "pass": true,
+          "actual": [],
+          "expected": []
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "39203da7694640541f4fc09e4a9e15150bf0d33a780946c88887749efda38dcd",
+          "expected": "39203da7694640541f4fc09e4a9e15150bf0d33a780946c88887749efda38dcd"
+        }
+      ],
+      "admissions": [
+        {
+          "status": 202,
+          "runId": "cmvkapkq500psoh0nn1616ftx"
+        }
+      ],
+      "toolEvidence": [],
+      "semantic": {
+        "verdict": "pass",
+        "calls": 1,
+        "durationMs": 1093.7522079999999,
+        "usage": {
+          "inputTokens": 2020,
+          "outputTokens": 167,
+          "totalTokens": 2187,
+          "costUsd": null
+        },
+        "inputSha256": "09708e15a8f1ccd15b3a6e30fac96a6b5cc5df746ae6727e8940f8f52c324eff",
+        "decision": {
+          "verdict": "pass",
+          "checks": [
+            {
+              "id": "greeting",
+              "verdict": "pass",
+              "reason": "回答自然回应了问候，未提及不存在的历史话题。自称“星河科技的公开资料助手”与可信身份“星河公开资料助手”及所有者“星河科技”相符，未编造身份或来源。",
+              "answerQuote": "你好！我是星河科技的公开资料助手，可以帮你查询公司相关的公开信息，比如业务介绍、产品资料、公开动态等。\n\n请问有什么可以帮你的？",
+              "evidenceIds": [
+                "published-identity",
+                "published-corpus"
+              ]
+            }
+          ]
+        }
+      },
+      "finishedAt": "2026-10-23T01:32:58.195Z"
+    },
+    {
+      "caseId": "V2-013",
+      "variant": "resume",
+      "repeat": 1,
+      "startedAt": "2026-10-23T01:32:58.222Z",
+      "verdict": "review",
+      "observed": [
+        {
+          "runId": "cmvkapmxd00qeoh0n0lnxthwk",
+          "conversationId": "cmvkapmx200q6oh0n0w56qsia",
+          "versionId": "cmvkalzjw000d9kz5qb1wcf11",
+          "deliveryStatus": "COMPLETED",
+          "answer": "请问您想查询哪个城市或地区的气温？",
+          "input": "今天气温多少？",
+          "model": "qwen3.8-27b",
+          "traceId": "34ef103c-a973-4b71-ba62-2426019291da",
+          "taskStatus": "waiting_user",
+          "taskId": "cmvkapmxd00qeoh0n0lnxthwk",
+          "usage": {
+            "tokens": 5887,
+            "costUsd": null,
+            "activeMs": 1415.934751003981,
+            "attempts": 1,
+            "toolCalls": 0,
+            "modelTurns": 1,
+            "inputTokens": 5682,
+            "outputTokens": 205
+          },
+          "calls": [],
+          "modelCalls": 1,
+          "sources": [],
+          "knowledge": [],
+          "receipts": [],
+          "retrieval": null
+        }
+      ],
+      "hard": [
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkalzjw000d9kz5qb1wcf11",
+          "expected": "cmvkalzjw000d9kz5qb1wcf11"
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "waiting_user",
+          "expected": "waiting_user"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "no-business-tools",
+          "pass": true,
+          "actual": [],
+          "expected": []
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "ffbeacfb05750358a116b77b7c1ce215a156312ea093b815c84e87cd7aee3526",
+          "expected": "ffbeacfb05750358a116b77b7c1ce215a156312ea093b815c84e87cd7aee3526"
+        }
+      ],
+      "admissions": [
+        {
+          "status": 202,
+          "runId": "cmvkapmxd00qeoh0n0lnxthwk"
+        },
+        {
+          "status": 202,
+          "runId": "cmvkapotz00qwoh0n6owcp33j"
+        }
+      ],
+      "error": "harness_failure",
+      "finishedAt": "2026-10-23T01:33:02.381Z"
+    },
+    {
+      "caseId": "V2-020",
+      "variant": "leave",
+      "repeat": 1,
+      "startedAt": "2026-10-23T01:33:02.405Z",
+      "verdict": "pass",
+      "observed": [
+        {
+          "runId": "cmvkapq4a00rioh0n67c1pi31",
+          "conversationId": "cmvkapq3z00raoh0nmpvtxlxf",
+          "versionId": "cmvkalzjw000d9kz5qb1wcf11",
+          "deliveryStatus": "COMPLETED",
+          "answer": "根据星河科技年假制度（版本 2026.1，2026-01-01 生效）：\n\n- **正式员工年假**：每年 **12 天**\n- **试用期**：**不适用**（试用期员工不享受该年假）\n\n来源：〔Policies〕（Policies — 星河科技年假制度）\n\n注：以上为合成测试资料，仅供参考，不构成业务承诺。",
+          "input": "星河科技正式员工每年多少天年假？试用期是否适用？请注明来源。",
+          "model": "qwen3.8-27b",
+          "traceId": "92e1c68c-9fa5-4b12-88b1-f4c27bc864e0",
+          "taskStatus": "completed",
+          "taskId": "cmvkapq4a00rioh0n67c1pi31",
+          "usage": {
+            "tokens": 12209,
+            "costUsd": null,
+            "activeMs": 2655.170542001724,
+            "attempts": 3,
+            "toolCalls": 1,
+            "modelTurns": 2,
+            "inputTokens": 11920,
+            "outputTokens": 289
+          },
+          "calls": [
+            {
+              "status": "ok",
+              "traceId": "92e1c68c-9fa5-4b12-88b1-f4c27bc864e0",
+              "attempts": 1,
+              "category": "knowledge",
+              "toolName": "retrieve_authorized_knowledge",
+              "requestId": "cmvkapq4a00rioh0n67c1pi31",
+              "sourceIds": [
+                "sha256:ff7121347500f5577900b0045802462a64fc372ad956296a0a58c978650206b7",
+                "sha256:1d5122c9166edb635f33850162623f3a405816a79d24d3f28994e830b9371f8d"
+              ],
+              "startedAt": "2026-10-23T01:33:03.375Z",
+              "durationMs": 911.6444169953465,
+              "toolCallId": "sha256:0b0e53e866c9ffbce7a9af0478558bd815dd01f8ed712cdeb2688ba95ee098cb",
+              "outputBytes": 1449,
+              "argumentCount": 1
+            }
+          ],
+          "modelCalls": 2,
+          "sources": [
+            {
+              "id": "sha256:ff7121347500f5577900b0045802462a64fc372ad956296a0a58c978650206b7",
+              "channel": "knowledge"
+            }
+          ],
+          "knowledge": [
+            {
+              "id": "cmvkaprho006dmw140dnbct92",
+              "title": "Policies",
+              "contentHash": "f56a758433b77b4adf4e5d3def2b7fb5cbf7428c93fa6a455c55c88915998f42",
+              "text": "# Policies\n# Policies\n## 星河科技年假制度（合成）\n版本2026.1，2026-01-01生效；正式员工每年年假12天，试用期不适用。\n## 星河科技差旅制度（合成）\n版本2026.1，2026-01-01生效；国内出差住宿报销上限每晚500元，按实际发生金额，不超过上限；申请需住宿发票和出差日期。未提供审批人或时限。\n## Conversation contract\n- Free reply limit: 1000\n- Handoff window: 24 hours\n- Tools and external side effects require capability-policy evaluation.",
+              "cited": true
+            },
+            {
+              "id": "cmvkaprhz006fmw146trrb6xw",
+              "title": "星河公开资料助手",
+              "contentHash": "a1328493513d68505ff016b91da80873d14d31b4a7ead8c51b6f297ceae156d1",
+              "text": "# 星河公开资料助手\nTagline: 星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。\nTone: 清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。\nLanguages: zh-CN, en\nPublic mode: true\nHuman in loop: false\nGroup activation: reply_or_mention\n## Identity summary\nPRODUCT10_FIXTURE_V1：星河科技是合成测试企业。\n## Skills\n- faq_reply\n- lead_qualify\n- intake_collect\n- quote_request_collect\n- material_delivery\n- scheduling_request\n- human_handoff\n- paid_unlock\n## Handoff prompt\n当前未接入真人接待。",
+              "cited": false
+            }
+          ],
+          "receipts": [],
+          "retrieval": {
+            "id": "cmvkapqum006bmw14mrlqemdu",
+            "injectedCount": 2,
+            "searchedCount": 2
+          }
+        }
+      ],
+      "hard": [
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkalzjw000d9kz5qb1wcf11",
+          "expected": "cmvkalzjw000d9kz5qb1wcf11"
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "completed",
+          "expected": "completed"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [
+            "retrieve_authorized_knowledge"
+          ],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "rag-first",
+          "pass": true,
+          "actual": "knowledge",
+          "expected": "knowledge"
+        },
+        {
+          "id": "only-rag",
+          "pass": true,
+          "actual": [
+            {
+              "category": "knowledge",
+              "status": "ok"
+            }
+          ],
+          "expected": "successful internal retrieval only"
+        },
+        {
+          "id": "actual-authorized-citation",
+          "pass": true,
+          "actual": [
+            {
+              "id": "cmvkaprho006dmw140dnbct92",
+              "cited": true
+            },
+            {
+              "id": "cmvkaprhz006fmw146trrb6xw",
+              "cited": false
+            }
+          ],
+          "expected": "cited injected source"
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "8ef6c79095abed29040eb2bc6a586faf09b3ff1f115abaa0b7dac2d482f1ab37",
+          "expected": "8ef6c79095abed29040eb2bc6a586faf09b3ff1f115abaa0b7dac2d482f1ab37"
+        }
+      ],
+      "admissions": [
+        {
+          "status": 202,
+          "runId": "cmvkapq4a00rioh0n67c1pi31"
+        }
+      ],
+      "toolEvidence": [],
+      "semantic": {
+        "verdict": "pass",
+        "calls": 1,
+        "durationMs": 1073.3381250000002,
+        "usage": {
+          "inputTokens": 3088,
+          "outputTokens": 208,
+          "totalTokens": 3296,
+          "costUsd": null
+        },
+        "inputSha256": "7f7fdafc829cca4187f7a24429aedc7d430fce8c66a3042e688b4da9ffab3786",
+        "decision": {
+          "verdict": "pass",
+          "checks": [
+            {
+              "id": "grounded",
+              "verdict": "pass",
+              "reason": "回答中年假天数（12天）、试用期不适用及版本/生效日期均与注入的Policies资料一致，且明确引用了Policies来源，未编造额外规则。",
+              "answerQuote": "根据星河科技年假制度（版本 2026.1，2026-01-01 生效）：\n\n- **正式员工年假**：每年 **12 天**\n- **试用期**：**不适用**（试用期员工不享受该年假）\n\n来源：〔Policies〕（Policies — 星河科技年假制度）",
+              "evidenceIds": [
+                "published-corpus",
+                "actual-retrieval"
+              ]
+            }
+          ]
+        }
+      },
+      "finishedAt": "2026-10-23T01:33:06.732Z"
+    },
+    {
+      "caseId": "V2-020",
+      "variant": "travel",
+      "repeat": 1,
+      "startedAt": "2026-10-23T01:33:06.756Z",
+      "verdict": "pass",
+      "observed": [
+        {
+          "runId": "cmvkapthi00s5oh0ndxbbhclz",
+          "conversationId": "cmvkapth700rxoh0n1uo8yke8",
+          "versionId": "cmvkalzjw000d9kz5qb1wcf11",
+          "deliveryStatus": "COMPLETED",
+          "answer": "根据星河科技差旅制度（版本 2026.1，2026-01-01 生效）：\n\n- **住宿报销上限**：国内出差住宿每晚 **500 元**，按实际发生金额报销，不超过上限。\n- **申请所需材料**：住宿发票 + 出差日期。\n\n制度中未明确审批人和报销时限，如需确认这两项，建议向财务或行政渠道核实。\n\n来源：〔Policies〕（Policies — 星河科技差旅制度）",
+          "input": "星河科技国内出差住宿报销上限是多少？申请需要什么材料？请注明来源。",
+          "model": "qwen3.8-27b",
+          "traceId": "737b2248-7ce0-4522-88cc-a601b93831d7",
+          "taskStatus": "completed",
+          "taskId": "cmvkapthi00s5oh0ndxbbhclz",
+          "usage": {
+            "tokens": 12352,
+            "costUsd": null,
+            "activeMs": 3005.873209998012,
+            "attempts": 3,
+            "toolCalls": 1,
+            "modelTurns": 2,
+            "inputTokens": 11959,
+            "outputTokens": 393
+          },
+          "calls": [
+            {
+              "status": "ok",
+              "traceId": "737b2248-7ce0-4522-88cc-a601b93831d7",
+              "attempts": 1,
+              "category": "knowledge",
+              "toolName": "retrieve_authorized_knowledge",
+              "requestId": "cmvkapthi00s5oh0ndxbbhclz",
+              "sourceIds": [
+                "sha256:e299d84fa9f5ec8caef33b3a3154c2306b6d745a63599bb9851702f1597c463c",
+                "sha256:f941c4c304e8099f8a89348d81b67bce611b866a4354a0b6c39bf0f27493ad40"
+              ],
+              "startedAt": "2026-10-23T01:33:07.850Z",
+              "durationMs": 774.7082919999957,
+              "toolCallId": "sha256:5587e3931228ab983538d5657960861b12718d7e9a9860bb7fc153ac661573c1",
+              "outputBytes": 1449,
+              "argumentCount": 2
+            }
+          ],
+          "modelCalls": 2,
+          "sources": [
+            {
+              "id": "sha256:e299d84fa9f5ec8caef33b3a3154c2306b6d745a63599bb9851702f1597c463c",
+              "channel": "knowledge"
+            }
+          ],
+          "knowledge": [
+            {
+              "id": "cmvkapuu8006smw14nq0316q4",
+              "title": "Policies",
+              "contentHash": "f56a758433b77b4adf4e5d3def2b7fb5cbf7428c93fa6a455c55c88915998f42",
+              "text": "# Policies\n# Policies\n## 星河科技年假制度（合成）\n版本2026.1，2026-01-01生效；正式员工每年年假12天，试用期不适用。\n## 星河科技差旅制度（合成）\n版本2026.1，2026-01-01生效；国内出差住宿报销上限每晚500元，按实际发生金额，不超过上限；申请需住宿发票和出差日期。未提供审批人或时限。\n## Conversation contract\n- Free reply limit: 1000\n- Handoff window: 24 hours\n- Tools and external side effects require capability-policy evaluation.",
+              "cited": true
+            },
+            {
+              "id": "cmvkapuug006umw142fqbm6dt",
+              "title": "星河公开资料助手",
+              "contentHash": "a1328493513d68505ff016b91da80873d14d31b4a7ead8c51b6f297ceae156d1",
+              "text": "# 星河公开资料助手\nTagline: 星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。\nTone: 清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。\nLanguages: zh-CN, en\nPublic mode: true\nHuman in loop: false\nGroup activation: reply_or_mention\n## Identity summary\nPRODUCT10_FIXTURE_V1：星河科技是合成测试企业。\n## Skills\n- faq_reply\n- lead_qualify\n- intake_collect\n- quote_request_collect\n- material_delivery\n- scheduling_request\n- human_handoff\n- paid_unlock\n## Handoff prompt\n当前未接入真人接待。",
+              "cited": false
+            }
+          ],
+          "receipts": [],
+          "retrieval": {
+            "id": "cmvkapubd006qmw14s7ozwd85",
+            "injectedCount": 2,
+            "searchedCount": 2
+          }
+        }
+      ],
+      "hard": [
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkalzjw000d9kz5qb1wcf11",
+          "expected": "cmvkalzjw000d9kz5qb1wcf11"
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "completed",
+          "expected": "completed"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [
+            "retrieve_authorized_knowledge"
+          ],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "rag-first",
+          "pass": true,
+          "actual": "knowledge",
+          "expected": "knowledge"
+        },
+        {
+          "id": "only-rag",
+          "pass": true,
+          "actual": [
+            {
+              "category": "knowledge",
+              "status": "ok"
+            }
+          ],
+          "expected": "successful internal retrieval only"
+        },
+        {
+          "id": "actual-authorized-citation",
+          "pass": true,
+          "actual": [
+            {
+              "id": "cmvkapuu8006smw14nq0316q4",
+              "cited": true
+            },
+            {
+              "id": "cmvkapuug006umw142fqbm6dt",
+              "cited": false
+            }
+          ],
+          "expected": "cited injected source"
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "66918af4788d4d42de188a8c7e5053813602783c24f192a9c2a36e6b100b3132",
+          "expected": "66918af4788d4d42de188a8c7e5053813602783c24f192a9c2a36e6b100b3132"
+        }
+      ],
+      "admissions": [
+        {
+          "status": 202,
+          "runId": "cmvkapthi00s5oh0ndxbbhclz"
+        }
+      ],
+      "toolEvidence": [],
+      "semantic": {
+        "verdict": "pass",
+        "calls": 1,
+        "durationMs": 868.6063329999997,
+        "usage": {
+          "inputTokens": 3092,
+          "outputTokens": 167,
+          "totalTokens": 3259,
+          "costUsd": null
+        },
+        "inputSha256": "40e68a89e91c1d910d4ec2097520cc9c82220a75b8f0167b67931634b22b869a",
+        "decision": {
+          "verdict": "pass",
+          "checks": [
+            {
+              "id": "grounded",
+              "verdict": "pass",
+              "reason": "回答中的住宿上限500元/晚、按实际发生金额、申请需住宿发票和出差日期均与注入的Policies资料一致；来源标注为Policies，未虚构审批人或时限。",
+              "answerQuote": "国内出差住宿每晚 **500 元**，按实际发生金额报销，不超过上限。\n- **申请所需材料**：住宿发票 + 出差日期。",
+              "evidenceIds": [
+                "published-corpus",
+                "actual-retrieval"
+              ]
+            }
+          ]
+        }
+      },
+      "finishedAt": "2026-10-23T01:33:11.078Z"
+    },
+    {
+      "caseId": "V2-031",
+      "variant": "missing-bonus",
+      "repeat": 1,
+      "startedAt": "2026-10-23T01:33:11.114Z",
+      "verdict": "pass",
+      "observed": [
+        {
+          "runId": "cmvkapwv000ssoh0ndmnxhdnv",
+          "conversationId": "cmvkapwup00skoh0n3z1vbvsv",
+          "versionId": "cmvkalzjw000d9kz5qb1wcf11",
+          "deliveryStatus": "COMPLETED",
+          "answer": "我已在授权资料库中两次检索“星河科技本月（2026年10月）奖金金额”及“奖金/薪酬/绩效发放”相关内容，命中的资料仅包括助手身份说明和年假、差旅制度 〔星河公开资料助手〕 〔Policies〕，均未包含奖金金额记录。当前没有其他获授权的查询能力可以核实该数据，因此无法给出有出处的奖金金额。建议通过正式薪酬渠道（如HR系统或财务）确认。",
+          "input": "星河科技本月奖金金额是多少？只接受有出处的内部事实。",
+          "model": "qwen3.8-27b",
+          "traceId": "debbb3cd-223e-44a7-867f-4c9b6283e8dc",
+          "taskStatus": "partial",
+          "taskId": "cmvkapwv000ssoh0ndmnxhdnv",
+          "usage": {
+            "tokens": 19181,
+            "costUsd": null,
+            "activeMs": 4376.91937700659,
+            "attempts": 5,
+            "toolCalls": 2,
+            "modelTurns": 3,
+            "inputTokens": 18748,
+            "outputTokens": 433
+          },
+          "calls": [
+            {
+              "status": "ok",
+              "traceId": "debbb3cd-223e-44a7-867f-4c9b6283e8dc",
+              "attempts": 1,
+              "category": "knowledge",
+              "toolName": "retrieve_authorized_knowledge",
+              "requestId": "cmvkapwv000ssoh0ndmnxhdnv",
+              "sourceIds": [
+                "sha256:279f1363dfdaf1786907e2a168279e9aae0813eae9b614bb66cd74f3b0221fe4",
+                "sha256:023ea76df31a2de4f06a779d7b840b466bd9024c208ab40e680d8769e3fc9cc6"
+              ],
+              "startedAt": "2026-10-23T01:33:11.955Z",
+              "durationMs": 746.1533750072122,
+              "toolCallId": "sha256:3250a7cefd94500252323a9f8e59b44c8a79a4abbb2abc4a90b3834a7fdd8cf0",
+              "outputBytes": 1449,
+              "argumentCount": 2
+            },
+            {
+              "status": "ok",
+              "traceId": "debbb3cd-223e-44a7-867f-4c9b6283e8dc",
+              "attempts": 1,
+              "category": "knowledge",
+              "toolName": "retrieve_authorized_knowledge",
+              "requestId": "cmvkapwv000ssoh0ndmnxhdnv",
+              "sourceIds": [
+                "sha256:279f1363dfdaf1786907e2a168279e9aae0813eae9b614bb66cd74f3b0221fe4",
+                "sha256:023ea76df31a2de4f06a779d7b840b466bd9024c208ab40e680d8769e3fc9cc6"
+              ],
+              "startedAt": "2026-10-23T01:33:13.351Z",
+              "durationMs": 931.9330419972539,
+              "toolCallId": "sha256:16066f26235febfc2022297f8b685ffdc7a71fe1d2c7f35e8eb99251e1668245",
+              "outputBytes": 1449,
+              "argumentCount": 2
+            }
+          ],
+          "modelCalls": 3,
+          "sources": [
+            {
+              "id": "sha256:279f1363dfdaf1786907e2a168279e9aae0813eae9b614bb66cd74f3b0221fe4",
+              "channel": "knowledge"
+            },
+            {
+              "id": "sha256:023ea76df31a2de4f06a779d7b840b466bd9024c208ab40e680d8769e3fc9cc6",
+              "channel": "knowledge"
+            }
+          ],
+          "knowledge": [
+            {
+              "id": "cmvkapxzi0077mw14jm2j0du5",
+              "title": "星河公开资料助手",
+              "contentHash": "a1328493513d68505ff016b91da80873d14d31b4a7ead8c51b6f297ceae156d1",
+              "text": "# 星河公开资料助手\nTagline: 星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。\nTone: 清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。\nLanguages: zh-CN, en\nPublic mode: true\nHuman in loop: false\nGroup activation: reply_or_mention\n## Identity summary\nPRODUCT10_FIXTURE_V1：星河科技是合成测试企业。\n## Skills\n- faq_reply\n- lead_qualify\n- intake_collect\n- quote_request_collect\n- material_delivery\n- scheduling_request\n- human_handoff\n- paid_unlock\n## Handoff prompt\n当前未接入真人接待。",
+              "cited": true
+            },
+            {
+              "id": "cmvkapxzl0079mw1429z2bcaa",
+              "title": "Policies",
+              "contentHash": "f56a758433b77b4adf4e5d3def2b7fb5cbf7428c93fa6a455c55c88915998f42",
+              "text": "# Policies\n# Policies\n## 星河科技年假制度（合成）\n版本2026.1，2026-01-01生效；正式员工每年年假12天，试用期不适用。\n## 星河科技差旅制度（合成）\n版本2026.1，2026-01-01生效；国内出差住宿报销上限每晚500元，按实际发生金额，不超过上限；申请需住宿发票和出差日期。未提供审批人或时限。\n## Conversation contract\n- Free reply limit: 1000\n- Handoff window: 24 hours\n- Tools and external side effects require capability-policy evaluation.",
+              "cited": true
+            }
+          ],
+          "receipts": [],
+          "retrieval": {
+            "id": "cmvkapxh20075mw14d0wsv5u2",
+            "injectedCount": 2,
+            "searchedCount": 2
+          }
+        }
+      ],
+      "hard": [
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkalzjw000d9kz5qb1wcf11",
+          "expected": "cmvkalzjw000d9kz5qb1wcf11"
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "partial",
+          "expected": "partial"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [
+            "retrieve_authorized_knowledge",
+            "retrieve_authorized_knowledge"
+          ],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "rag-first",
+          "pass": true,
+          "actual": "knowledge",
+          "expected": "knowledge"
+        },
+        {
+          "id": "only-rag",
+          "pass": true,
+          "actual": [
+            {
+              "category": "knowledge",
+              "status": "ok"
+            },
+            {
+              "category": "knowledge",
+              "status": "ok"
+            }
+          ],
+          "expected": "successful internal retrieval only"
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "1524f3269229396947bbbb36de78e44696520e5261cefdd392b74bce355cc58c",
+          "expected": "1524f3269229396947bbbb36de78e44696520e5261cefdd392b74bce355cc58c"
+        }
+      ],
+      "admissions": [
+        {
+          "status": 202,
+          "runId": "cmvkapwv000ssoh0ndmnxhdnv"
+        }
+      ],
+      "toolEvidence": [],
+      "semantic": {
+        "verdict": "pass",
+        "calls": 1,
+        "durationMs": 957.0325420000008,
+        "usage": {
+          "inputTokens": 3502,
+          "outputTokens": 170,
+          "totalTokens": 3672,
+          "costUsd": null
+        },
+        "inputSha256": "d18cacccb45f069eb00acbbd2d109569eda80e5506446b3c1fa57227a5f0151e",
+        "decision": {
+          "verdict": "pass",
+          "checks": [
+            {
+              "id": "limitation",
+              "verdict": "pass",
+              "reason": "回答明确说明无法给出有出处的奖金金额，未编造数字，未将未命中解释为确定没有奖金，未使用互联网替代内部事实，未索取工号/手机号/凭据，也未声称已接入人事系统。",
+              "answerQuote": "均未包含奖金金额记录。当前没有其他获授权的查询能力可以核实该数据，因此无法给出有出处的奖金金额。",
+              "evidenceIds": [
+                "published-corpus",
+                "actual-retrieval",
+                "actual-execution"
+              ]
+            }
+          ]
+        }
+      },
+      "finishedAt": "2026-10-23T01:33:16.762Z"
+    }
+  ],
+  "summary": [
+    {
+      "id": "V2-001",
+      "variants": [
+        "greeting"
+      ],
+      "expectedRows": 1,
+      "actualRows": 1,
+      "verdict": "pass"
+    },
+    {
+      "id": "V2-013",
+      "variants": [
+        "resume"
+      ],
+      "expectedRows": 1,
+      "actualRows": 1,
+      "verdict": "review"
+    },
+    {
+      "id": "V2-020",
+      "variants": [
+        "leave",
+        "travel"
+      ],
+      "expectedRows": 2,
+      "actualRows": 2,
+      "verdict": "pass"
+    },
+    {
+      "id": "V2-031",
+      "variants": [
+        "missing-bonus"
+      ],
+      "expectedRows": 1,
+      "actualRows": 1,
+      "verdict": "pass"
+    }
+  ],
+  "finalSafety": {
+    "noNewLeases": true,
+    "noNewBrowserSessions": true,
+    "pinnedVersion": true
+  },
+  "fixture": {
+    "representativeId": "cmvkahat100019kpprucnylv9",
+    "versionId": "cmvkalzjw000d9kz5qb1wcf11",
+    "publishedAt": "2026-10-23T01:30:08.060Z",
+    "identity": {
+      "tone": "清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。",
+      "avatarUrl": null,
+      "languages": [
+        "zh-CN",
+        "en"
+      ],
+      "displayName": "星河公开资料助手",
+      "roleSummary": "星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。",
+      "ownerId": "qa_agent_v2_product10_20261023",
+      "ownerName": "星河科技（合成验收）",
+      "agentBehavior": {
+        "version": 1,
+        "answerScope": "open_public",
+        "knowledgePolicy": "owner_facts",
+        "commitmentPolicy": "information_only"
+      }
+    },
+    "resources": [
+      {
+        "resourceKey": "identity/profile.md",
+        "contentHash": "a1328493513d68505ff016b91da80873d14d31b4a7ead8c51b6f297ceae156d1",
+        "safeText": "# 星河公开资料助手\nTagline: 星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。\nTone: 清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。\nLanguages: zh-CN, en\nPublic mode: true\nHuman in loop: false\nGroup activation: reply_or_mention\n## Identity summary\nPRODUCT10_FIXTURE_V1：星河科技是合成测试企业。\n## Skills\n- faq_reply\n- lead_qualify\n- intake_collect\n- quote_request_collect\n- material_delivery\n- scheduling_request\n- human_handoff\n- paid_unlock\n## Handoff prompt\n当前未接入真人接待。",
+        "citationTitle": "星河公开资料助手"
+      },
+      {
+        "resourceKey": "faq/index.md",
+        "contentHash": "3a80b1c867cf3794e677302468fa61b4fc77d3730927bbe97d66caaee7c61f98",
+        "safeText": "# FAQ",
+        "citationTitle": "FAQ"
+      },
+      {
+        "resourceKey": "materials/index.md",
+        "contentHash": "8fcefcb416e007d1bbb8d3ac78a72369f67c08b3ba79cabc7ba57fb9e890898d",
+        "safeText": "# Materials",
+        "citationTitle": "Materials"
+      },
+      {
+        "resourceKey": "policies/index.md",
+        "contentHash": "f56a758433b77b4adf4e5d3def2b7fb5cbf7428c93fa6a455c55c88915998f42",
+        "safeText": "# Policies\n# Policies\n## 星河科技年假制度（合成）\n版本2026.1，2026-01-01生效；正式员工每年年假12天，试用期不适用。\n## 星河科技差旅制度（合成）\n版本2026.1，2026-01-01生效；国内出差住宿报销上限每晚500元，按实际发生金额，不超过上限；申请需住宿发票和出差日期。未提供审批人或时限。\n## Conversation contract\n- Free reply limit: 1000\n- Handoff window: 24 hours\n- Tools and external side effects require capability-policy evaluation.",
+        "citationTitle": "Policies"
+      }
+    ],
+    "capabilityModes": {
+      "exec": "deny",
+      "read": "deny",
+      "write": "deny",
+      "process": "deny",
+      "browser": "deny",
+      "mcp": "allow"
+    },
+    "mcp": [
+      {
+        "slug": "weather",
+        "allowedToolNames": [
+          "openmeteo_search_locations",
+          "openmeteo_get_forecast"
+        ],
+        "tools": [
+          {
+            "name": "openmeteo_search_locations",
+            "description": "Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population. Required prerequisite for name-based queries — all weather tools take latitude/longitude, not place names. Search by a bare place name (city, region, or landmark); never fold a qualifier into it — pass \"Baoding\", not \"Baoding Hebei\", and \"Paris\", not \"Paris, France\". To disambiguate places that share a name, set the country input (ISO 3166-1 alpha-2, e.g. \"US\") and/or read the admin1 and country fields on each ranked result — admin1 is a result field for choosing among matches, not a search input. Returns up to 10 matches ranked by population/relevance."
+          },
+          {
+            "name": "openmeteo_get_forecast",
+            "description": "Weather forecast for coordinates: hourly and/or daily variables for up to 16 days ahead, with optional past_days (up to 92) for recent history. Use past_days instead of openmeteo_get_historical for dates within the last 1–5 days, since the archive’s ERA5 components lag by up to ~5 days. Returns per-timestamp records — each hourly entry contains a \"time\" field (ISO 8601) plus one key per requested variable; each daily entry contains a \"time\" field (YYYY-MM-DD) plus requested variables. Common hourly variables: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover, uv_index, apparent_temperature, precipitation_probability, weather_code, surface_pressure, visibility, wind_direction_10m, wind_gusts_10m, dew_point_2m. Common daily variables: temperature_2m_max, temperature_2m_min, precipitation_sum, wind_speed_10m_max, sunrise, sunset, uv_index_max, precipitation_hours, weather_code. Set current_variables for conditions at this instant — Open-Meteo serves those from 15-minute model data, which is more precise than picking the nearest hourly row, and the response carries a current object plus a current_units map. A wide window — a large past_days plus many hourly variables — produces thousands of records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled they return a bounded preview instead. At least one of current_variables, hourly_variables, or daily_variables is required."
+          }
+        ]
+      },
+      {
+        "slug": "public_search",
+        "allowedToolNames": [
+          "search_pro"
+        ],
+        "tools": [
+          {
+            "name": "search_pro",
+            "description": "标准搜索接口提供增强的网络开放域的实时搜索能力，通过大模型优化与多数据源融合的技术，查询干净、准确、多样、高质量的结果。"
+          }
+        ]
+      }
+    ],
+    "sandboxLeases": 0,
+    "browserSessions": 0
+  },
+  "judgeCalls": 4,
+  "judgeTokenBudgetConsumed": 12414,
+  "limitations": "Ten-case product batch with synthetic business fixtures, real RAG and MCP. No cloud sandbox tests. Reference data and observed citations are separate. A model judgment is fallible. Does not update historical 100-case PASS labels or certify performance."
+}

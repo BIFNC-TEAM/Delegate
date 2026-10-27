@@ -258,18 +258,17 @@ suite("isolated Python: real Broker / isolated PostgreSQL / controlled provider 
     process.env.COMPUTE_BROKER_URL = `http://127.0.0.1:${(bridge.address() as { port: number }).port}`;
     let passed = false;
     try {
-      const { buildPiAdapters } = await import("../../../apps/conversation-worker/src/processor-pi");
+      const { buildAgentCapabilities } = await import("../../../apps/conversation-worker/src/agent-capabilities");
       const storedSession = await prisma.computeSession.findUniqueOrThrow({ where: { id: f.sessionId } });
       const attachments = [{ id: a.id, fileName: "input.csv", mimeType: "text/csv", sizeBytes: bytes.length }];
-      const capabilities = buildPiAdapters({
+      const capabilities = buildAgentCapabilities({
         config: {} as never,
         item: { representativeSlug: f.slug, runId: f.runId, conversationId: storedSession.conversationId, contactId: storedSession.contactId,
           audienceIdentityId: f.audienceId, channel: "web", userText: "读取 CSV，在沙盒计算总和加1009，交付 result.txt", inputAttachments: attachments } as never,
         setup: { id: f.repId, compute: { enabled: true, baseImage: storedSession.baseImage }, skillPacks: [], humanInLoop: false } as never,
         authority: { mcpBindings: [], compute: { capabilityModes: { browser: "deny" } } } as never,
         leaseGuard: { confirmOwned: async () => undefined } as never, workLease: { outboxId: f.outboxId, leaseAttempt: 1 },
-        computeAttachments: [], onMemoryUse: () => undefined, onHandoff: () => undefined, onPendingApproval: () => undefined,
-        onCompute: () => undefined, onSandboxExecutor: () => undefined,
+        computeAttachments: [], onMemoryUse: () => undefined, onPendingApproval: () => undefined,
       });
       const result = await capabilities.sandbox!.execute({ language: "python", code: `import csv\nrows=list(csv.reader(open('/workspace/inputs/${fileName}')))\nprint(sum(int(v) for v in rows[1])+1009)`,
         attachmentIds: [a.id], expectedOutputs: ["result.txt"], timeoutMs: 5000,
@@ -324,10 +323,10 @@ suite("isolated Python: real Broker / isolated PostgreSQL / controlled provider 
     expect(await prisma.artifact.count({ where: { toolExecutionId: stored.id, kind: "FILE" } })).toBe(1);
     const continuation = transport.finalize.mock.calls.at(-1)![0];
     expect(continuation).toMatchObject({ outcome: "completed", artifacts: expect.arrayContaining([expect.objectContaining({ kind: "file", fileName: "result.txt" })]) });
-    const { loadApprovedToolResult } = await import("../../../apps/conversation-worker/src/processor-pi");
-    const delivered = await loadApprovedToolResult({ generationRunId: f.runId, representativeSlug: f.slug, audienceIdentityId: f.audienceId, approvalId: approval.id,
-      resultStatus: "completed", artifacts: continuation.artifacts, computeAttachments: [] });
-    expect(delivered.artifacts).toEqual(expect.arrayContaining([expect.objectContaining({ fileName: "result.txt" })]));
+    const deliveredArtifact = continuation.artifacts.find((artifact: { kind: string }) => artifact.kind === "file")!;
+    const delivered = await getPublicConversationArtifactDownload({ representativeSlug: f.slug, audienceIdentityId: f.audienceId, artifactId: deliveredArtifact.id });
+    expect(delivered).not.toBeNull();
+    expect(delivered!.fileName).toBe("result.txt");
   });
 
   it("honors separate write approval for an otherwise allowed Python action", async () => {

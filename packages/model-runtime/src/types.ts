@@ -1,30 +1,3 @@
-import type { Representative } from "@delegate/domain";
-import type { OpenVikingRecallItem } from "@delegate/openviking";
-import type {
-  ConversationPlan,
-  ResolvedSubagentRoute,
-  StructuredCollectorState,
-} from "@delegate/runtime";
-import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
-
-/**
- * Recall input accepted by the model runtime.
- *
- * `memoryUseItemId` is an opaque Postgres identifier used to correlate the
- * final prompt selection with the governed memory-use ledger. The identifier
- * is required at the type boundary and is never rendered into the model
- * prompt. Runtime validation still filters empty IDs fail closed.
- */
-export type RepresentativeRecallItem = OpenVikingRecallItem & {
-  memoryUseItemId: string;
-  /** Server-classified source family used for subagent scope enforcement. */
-  internalSource: {
-    sourceKind:
-      | "PUBLIC_KNOWLEDGE"
-      | "CONTACT_MEMORY"
-      | "REPRESENTATIVE_EXPERIENCE";
-  };
-};
 
 export type ModelProvider = "agicto" | "openai" | "bailian" | "anthropic";
 
@@ -119,17 +92,6 @@ export type ConversationOperationalContext = {
   };
 };
 
-export type RepresentativeReplyInput = {
-  representative: Representative;
-  plan: ConversationPlan;
-  subagent: ResolvedSubagentRoute;
-  userText: string;
-  recalled: RepresentativeRecallItem[];
-  recentTurns: ModelRuntimeRecentTurn[];
-  collectorState?: StructuredCollectorState | null;
-  operationalContext?: ConversationOperationalContext | null;
-};
-
 export type RepresentativeReplyPrompt = {
   instructions: string;
   input: string;
@@ -139,14 +101,6 @@ export type RepresentativeReplyPrompt = {
     description?: string;
     schema: Record<string, unknown>;
   };
-};
-
-export type RepresentativeReplyContextTrace = {
-  estimatedInputTokens: number;
-  segments: ModelContextSegmentTrace[];
-  selectedKnowledgeTitles: string[];
-  /** Opaque ledger identifiers for only the sources included in the prompt. */
-  selectedMemoryUseItemIds: string[];
 };
 
 export type ModelUsageSnapshot = {
@@ -159,25 +113,3 @@ export type ModelUsageSnapshot = {
   costCents?: number;
   estimatedCostUsd?: number;
 };
-
-export type RepresentativeReplyResult =
-  | {
-      ok: true;
-      replyText: string;
-      /** Opaque ledger IDs for sources the model explicitly cited in its reply. */
-      citedMemoryUseItemIds: string[];
-      provider: ModelProvider;
-      model: string;
-      contextTrace: RepresentativeReplyContextTrace;
-      usage?: ModelUsageSnapshot;
-    }
-  | {
-      ok: false;
-      reason: string;
-      state: ModelRuntimeState;
-      /** Always empty when generation or citation parsing did not succeed. */
-      citedMemoryUseItemIds: string[];
-      contextTrace?: RepresentativeReplyContextTrace;
-      provider?: string;
-      model?: string;
-    };

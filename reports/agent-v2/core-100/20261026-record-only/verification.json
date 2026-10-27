@@ -1,0 +1,111 @@
+{
+  "date": "2026-10-26",
+  "branch": "codex/agent-v2-cleanup",
+  "head": "7588e1911dcad3885c96535d23f7ae7afa5ee0f2",
+  "baselineSha256": "343d41955483a85762ba7db4c62b8d91c88cff9b0827b93d5354121af2f835d2",
+  "protectedFiles": 1124,
+  "changedProtectedFiles": [],
+  "addedProtectedFiles": [],
+  "containersUnchanged": true,
+  "containers": {
+    "delegate-reps-1": "688e65a7f880455a9045ecc971ce1acaffa192fb435503eaa4f2f1c3cd8268d7",
+    "delegate-conversation-worker-1": "aeee7eb8bf4c8a7e11fe9f635ef01b0730e8554f35ca54e8f8810e4f0c0bfa4c",
+    "delegate-compute-broker-1": "63c6e90648b7065f4296d5f7dc68bd9e84b7f5e9fae5cfef7edb0581e1c774c7",
+    "delegate-bot-1": "fe05a5f3508bee7fb7fc3a3dd666daac019a483ae415e3f80769792abc3fcc7d",
+    "delegate-agent-test-reps-1": "9cf76878bc061b40d2dcba34317cd914d88098502b62a40b5f505cf593df9185",
+    "delegate-agent-test-conversation-worker-1": "239953b5cb9423a90250e589f1e0d4e574f645137db68ee53f5f760007e9910b",
+    "delegate-agent-test-compute-broker-1": "a7369226dbe9df05cad7e56b1df65bbf6151af2611e1243ae1191d49730aaac9"
+  },
+  "activeTestRuns": 0,
+  "product10Report": "reports/agent-v2/product10/2026-10-26T02-17-48-809Z-5e8792fa-4197-47fe-be3d-a01bd9475b28.json",
+  "product10Sha256": "40920b6a60a79a713dcac147bf66e446463a058b1c9afbcab1b92fa0a334288b",
+  "product10Safety": {
+    "noNewLeases": true,
+    "noNewBrowserSessions": true,
+    "pinnedVersion": true
+  },
+  "otherSafetyChecks": [
+    {
+      "versionSame": true,
+      "noCloudLeases": true,
+      "noBrowserSessions": true
+    },
+    {
+      "noCloudLeases": true,
+      "noBrowserSessions": true,
+      "versionSame": true
+    }
+  ],
+  "deployment": [
+    {
+      "name": "delegate-agent-test-reps-1",
+      "id": "9cf76878bc061b40d2dcba34317cd914d88098502b62a40b5f505cf593df9185",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-conversation-worker-1",
+      "id": "239953b5cb9423a90250e589f1e0d4e574f645137db68ee53f5f760007e9910b",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-compute-broker-1",
+      "id": "a7369226dbe9df05cad7e56b1df65bbf6151af2611e1243ae1191d49730aaac9",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    }
+  ],
+  "sourceAndDeployedImageDiffer": true,
+  "logs": {
+    "workspace.log": {
+      "sha256": "7cd64ba902a586ddfa2430e02e40bfce565c52f53776dbe301ede663b6c693fa",
+      "passed": 3519,
+      "failed": 0,
+      "skipped": 295
+    },
+    "cutover.log": {
+      "sha256": "74ce609df0960911baf32144d5c52e25b048af29ad5b232229da679704f8e67b",
+      "passed": 64,
+      "failed": 0,
+      "skipped": 1
+    },
+    "wallet.log": {
+      "sha256": "98bfc49dba9b9dc9e60cb3368f435ae98a1d0fb5d28e0f399002ad89baa3217c",
+      "passed": 32,
+      "failed": 0,
+      "skipped": 0
+    },
+    "entitlements.log": {
+      "sha256": "0482e1a62c4b43792e944764851ca1c0cc1a826abdcde10952bfc0473484b8ec",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    "skills-pg.log": {
+      "sha256": "df783840ff5e917470fb0f5ea767b786352658cc964156fd1f03ad45ee98a21d",
+      "passed": 1,
+      "failed": 4,
+      "skipped": 0
+    },
+    "skills-pg-seeded.log": {
+      "sha256": "2acf1d4468418b75d916e5dbb98a3e9fc8a24109169054bb13746183d326a8cc",
+      "passed": 4,
+      "failed": 1,
+      "skipped": 0
+    }
+  },
+  "workspaceCacheHits": 0,
+  "cloudSandboxTestsRun": false,
+  "performanceSloAssessed": false,
+  "knownCostsUsd": null,
+  "note": "No source, prompt, scorer, assertions or deployment changed. Dedicated test quota was temporarily varied then restored to FREE/1000; mock ledger and conversations retained. Disposable DBs alone received seed data. Partial modes never count as full-case pass.",
+  "billingSafety": {
+    "restoredAccessMode": "FREE",
+    "restoredFreeReplyLimit": 1000,
+    "versionSame": true,
+    "noCloudLeases": true,
+    "noBrowserSessions": true
+  },
+  "recordOnlyVerified": true,
+  "knownSecretsAbsent": true,
+  "reportLinksValid": true,
+  "restoredQuotaObserved": "FREE|1000"
+}

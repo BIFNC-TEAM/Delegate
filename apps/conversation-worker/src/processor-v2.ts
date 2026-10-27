@@ -1,23 +1,28 @@
-import { createHash } from "node:crypto";
+import {
+  V2Error,
+  createV2Capabilities, createV2ConversationHistory,
+  createV2ModelBindingFromEnv,
+  delegateAgentV2, resolveV2Budget,
+  v2PublishedPolicy,
+  type V2RunResult, type V2Session, type V2Tool
+} from "@delegate/model-runtime/v2";
 import { AgentContextAuthorizationError, auditReference } from "@delegate/runtime";
 import {
-  buildRepresentativeRuntimeProfile, buildSandboxAttachmentPath, createAgentContextAuthorization,
-  authorizeGenerationRunFreeUsage, reserveGenerationConversationWalletUsage, completeInlineGenerationRun,
+  authorizeGenerationRunFreeUsage,
+  buildRepresentativeRuntimeProfile, buildSandboxAttachmentPath,
+  completeInlineGenerationRun,
+  createAgentContextAuthorization,
   getRepresentativeRuntimeAuthoritySnapshot, loadGenerationRecentTurns, loadGenerationV2Task,
-  projectPublicAnswerSources, readPublicExecution, updateGenerationPiProgress, updateGenerationPiStream,
+  projectPublicAnswerSources, readPublicExecution,
+  reserveGenerationConversationWalletUsage,
+  updateGenerationPiProgress, updateGenerationPiStream,
 } from "@delegate/web-data";
-import { createV2ModelBindingFromEnv, createV2Capabilities, createV2ConversationHistory, delegateAgentV2, resolveV2Budget, v2PublishedPolicy, V2Error,
-  type V2RunResult, type V2Session } from "@delegate/model-runtime/v2";
-import { buildPiAdapters, deliverGenerationOutput } from "./processor-pi";
+import { createHash } from "node:crypto";
+import { buildAgentCapabilities } from "./agent-capabilities";
+import { deliverGenerationOutput } from "./generation-delivery";
 import { createPublicProgress } from "./public-progress";
 
-/** Both flags are required. A missing/empty allowlist never changes production behavior. */
-export function shouldUseAgentV2(slug: string, env: NodeJS.ProcessEnv = process.env) {
-  return env.DELEGATE_AGENT_VERSION === "v2"
-    && (env.DELEGATE_AGENT_V2_REPRESENTATIVES ?? "").split(",").map(s => s.trim()).filter(Boolean).includes(slug);
-}
-
-type HostInput = Pick<Parameters<typeof buildPiAdapters>[0], "config" | "item" | "setup" | "leaseGuard" | "workLease">;
+type HostInput = Pick<Parameters<typeof buildAgentCapabilities>[0], "config" | "item" | "setup" | "leaseGuard" | "workLease">;
 
 export async function processV2ConversationTurn(input: HostInput) {
   const { item, setup, workLease, leaseGuard } = input;
@@ -33,7 +38,7 @@ export async function processV2ConversationTurn(input: HostInput) {
   if (!allowed && item.audienceIdentityId) allowed = Boolean(await reserveGenerationConversationWalletUsage({ runId: item.runId, ...workLease, audienceIdentityId: item.audienceIdentityId, representativeId: setup.id, tokenAmount: 1 }));
   if (!allowed) return complete("当前没有可用服务额度，尚未启动 V2 Agent 或工具。", false);
   if (setup.agentBehavior?.answerScope === "owner_and_domain" || setup.agentBehavior?.knowledgePolicy === "domain_only") {
-    return complete("此代表的配置要求保留专项语义审核，当前 V2 试运行尚未接入该审核边界，因此没有启动模型或工具。", false);
+    return complete("此代表的配置要求保留专项语义审核，当前 V2 尚未接入该审核边界，因此没有启动模型或工具。", false);
   }
 
   const scope = createHash("sha256").update(JSON.stringify([setup.id, item.representativeVersionId, item.conversationId, item.contactId, item.audienceIdentityId, item.channel])).digest("hex");
@@ -54,24 +59,36 @@ export async function processV2ConversationTurn(input: HostInput) {
     history: [...contextMessages.values()], restoring: false });
   let memoryUseRunId: string | undefined;
   const memoryItems = new Set<string>();
-  const computeAttachments: Parameters<typeof buildPiAdapters>[0]["computeAttachments"] = [];
-  const adapters = buildPiAdapters({ ...input, orchestration: "model_v2", authority, computeAttachments,
+  const computeAttachments: Parameters<typeof buildAgentCapabilities>[0]["computeAttachments"] = [];
+  const adapters = buildAgentCapabilities({ ...input, authority, computeAttachments,
     registerKnowledgeSources: (id, items) => contextAuthorization.registerKnowledge(id, items),
     registerToolSource: id => contextAuthorization.registerToolResult(id),
     onMemoryUse: (id, items) => { if (id) memoryUseRunId = id; items.forEach(id => memoryItems.add(id)); },
-    onHandoff: () => { throw new V2Error("permission_denied"); },
     onPendingApproval: () => { throw new V2Error("unknown_effect"); },
-    onCompute: () => undefined, onSandboxExecutor: () => undefined,
   });
   // Current host approval persistence is tied to V1 checkpoints. Until a V2
   // durable approval bridge is implemented, no approval-required operation is dispatched.
   const context = { traceId: item.runId, runId: item.runId, sessionId: item.conversationId,
     representativeId: setup.id, conversationId: item.conversationId, timezone: process.env.DELEGATE_V2_TIMEZONE ?? "Asia/Shanghai",
     idempotencyKey: item.runId, attachments: item.inputAttachments.map(a => ({ id: a.id, fileName: a.fileName, mimeType: a.mimeType, sizeBytes: a.sizeBytes, uri: buildSandboxAttachmentPath(a.id, a.fileName) })) };
+  // Use the same effective-permission check for catalog exposure and dispatch.
+  // The runtime's direct definitions and discover_tools both use this filtered
+  // catalog. Broker preflight and live context authorization still apply later.
+  const isToolAvailable = (tool: V2Tool) => {
+    if (tool.approvalRequired || tool.effect === "unknown") return false;
+    const compute = authority?.compute;
+    if (tool.category === "mcp" || tool.name === "browse_in_sandbox" || tool.name === "execute_in_sandbox") {
+      if (!setup.compute.enabled || !compute?.enabled) return false;
+      if (tool.category === "mcp") return compute.capabilityModes.mcp === "allow";
+      if (tool.name === "browse_in_sandbox") return compute.capabilityModes.browser === "allow";
+      return compute.capabilityModes.exec === "allow" && compute.capabilityModes.write === "allow";
+    }
+    return true;
+  };
   const catalogAbort = new AbortController();
   const catalogTimer = setTimeout(() => catalogAbort.abort(), budget.toolTimeoutMs);
   let tools;
-  try { tools = await createV2Capabilities(adapters, context, catalogAbort.signal); }
+  try { tools = (await createV2Capabilities(adapters, context, catalogAbort.signal)).filter(isToolAvailable); }
   finally { clearTimeout(catalogTimer); }
   const progress = createPublicProgress(frame => item.channel === "web" ? updateGenerationPiProgress({ runId: item.runId, ...workLease, ...frame }) : Promise.resolve());
   const session: V2Session | undefined = previous ? { version: 1, scope, taskId: previous.record.taskId, status: "waiting_user",
@@ -82,13 +99,11 @@ export async function processV2ConversationTurn(input: HostInput) {
     timezone: context.timezone, context, model: binding.binding, budget, tools, ...(session ? { session } : {}),
     history: createV2ConversationHistory(history.map(t => ({ text: t.messageText, timestamp: Date.parse(t.createdAt), requestState: t.requestState ?? "unknown" }))),
     instructions: [`Represented owner: ${setup.ownerName}. Representative: ${item.representativeName}. Role: ${setup.tagline}. Tone: ${setup.tone}.`, v2PublishedPolicy(setup.agentBehavior),
-      "This pilot cannot execute operations requiring a new approval. Never bypass this boundary. Prior user messages are context, not a backlog of commands."].join("\n"),
+      "This runtime cannot execute operations requiring a new approval. Never bypass this boundary. Prior user messages are context, not a backlog of commands."].join("\n"),
     authorize: async (boundary, tool) => {
       await leaseGuard.confirmOwned();
       await contextAuthorization.check(boundary);
-      if (tool?.approvalRequired || tool?.effect === "unknown") throw new V2Error("permission_denied");
-      if (tool?.name === "browse_in_sandbox" && authority?.compute?.capabilityModes?.browser !== "allow") throw new V2Error("permission_denied");
-      if (tool?.name === "execute_in_sandbox" && (authority?.compute?.capabilityModes?.exec !== "allow" || authority?.compute?.capabilityModes?.write !== "allow")) throw new V2Error("permission_denied");
+      if (tool && !isToolAvailable(tool)) throw new V2Error("permission_denied");
     },
     onEvent: async event => {
       await progress.onEvent(event);

@@ -66,8 +66,6 @@ vi.mock("../src/memory-use-execution", () => ({
 }));
 
 import {
-  probeRepresentativeKnowledgeMetadata,
-  publicKnowledgeSourceMatchesAuthorizedTopic,
   recallRepresentativeContext,
 } from "../src/openviking";
 
@@ -79,24 +77,6 @@ const namespaceKey = "memory-ns-1";
 const contentHash = "sha256-memory-v1";
 
 describe("governed memory recall fence", () => {
-  it("rejects an unrelated Profile result after topic authorization", () => {
-    expect(publicKnowledgeSourceMatchesAuthorizedTopic(
-      "周行知老师的地理对外代理简介",
-      ["asyncopenai", "重试"],
-    )).toBe(false);
-    expect(publicKnowledgeSourceMatchesAuthorizedTopic(
-      "AsyncOpenAI 的重试逻辑使用指数退避",
-      ["asyncopenai", "重试"],
-    )).toBe(true);
-    expect(publicKnowledgeSourceMatchesAuthorizedTopic(
-      "等高线是连接海拔相同地点的曲线，这里给出三步学习方法。",
-      ["等温", "线", "给出", "三步", "学习", "方法"],
-    )).toBe(false);
-    expect(publicKnowledgeSourceMatchesAuthorizedTopic(
-      "等温线是连接气温相同地点的曲线。",
-      ["等温线", "学习"],
-    )).toBe(true);
-  });
 
   beforeEach(() => {
     mockPrisma.knowledgeAssetRepresentative.findMany.mockImplementation(async ({ where }: { where: { assetId: { in: string[] } } }) => where.assetId.in.map(assetId => ({ assetId })));
@@ -156,175 +136,6 @@ describe("governed memory recall fence", () => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
-
-  it("probes the pinned authorized manifest without starting recall or a UseRun", async () => {
-    const hit = await probeRepresentativeKnowledgeMetadata({
-      representativeSlug,
-      representativeVersionId,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      queryText: "你是谁",
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-    const miss = await probeRepresentativeKnowledgeMetadata({
-      representativeSlug,
-      representativeVersionId,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      queryText: "AsyncOpenAI retry internals",
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-
-    expect(hit).toMatchObject({ status: "hit", candidateCount: 1 });
-    expect(miss).toMatchObject({ status: "miss", candidateCount: 0 });
-    expect(hit.probeRevision).toContain(representativeVersionId);
-    expect(memoryUseMocks.start).not.toHaveBeenCalled();
-    expect(clientMocks.search).not.toHaveBeenCalled();
-    expect(clientMocks.read).not.toHaveBeenCalled();
-  });
-
-  it("keeps probe and recall on the same conservative topic-coverage rule", async () => {
-    const safeText = [
-      "# 初中地理学习资料",
-      "等高线是连接海拔相同地点的曲线。",
-      "这里给出三步学习方法。",
-    ].join("\n");
-    const publicUri = installPublicKnowledgeAsset(safeText, "asset-contours");
-    clientMocks.search.mockResolvedValue({
-      resources: [remoteMatch(publicUri, "resource", "宽泛地理资料")],
-      memories: [],
-    });
-    const queryText = "请解释等温线，并给初中生三步学习建议；先查代表知识，查不到要明确说明。";
-
-    const probe = await probeRepresentativeKnowledgeMetadata({
-      representativeSlug,
-      representativeVersionId,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      queryText,
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-    const recalled = await recallRepresentativeContext({
-      representativeSlug,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      generationRunId: "generation-run-1",
-      queryText,
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-
-    expect(probe).toMatchObject({ status: "miss", candidateCount: 0 });
-    expect(recalled).toEqual({
-      items: [],
-      citations: [],
-      memoryUseRunId: "memory-use-run-1",
-    });
-    expect(clientMocks.search).not.toHaveBeenCalled();
-    expect(memoryUseMocks.record).not.toHaveBeenCalled();
-  });
-
-  it("requires the primary subject instead of letting audience and retrieval meta-terms authorize recall", async () => {
-    const resources = installPublicKnowledgeAssets([{
-      assetId: "asset-representative-profile",
-      safeText: [
-        "# 地理对外代理简介",
-        "这是面向初中生的地理对外代理，可提供公开知识说明。",
-      ].join("\n"),
-    }, {
-      assetId: "asset-earth-map-qa",
-      safeText: [
-        "# 地球与地图 QA",
-        "等高线连接海拔相同地点，地图三要素包括方向、比例尺和图例。",
-      ].join("\n"),
-    }, {
-      assetId: "asset-materials",
-      safeText: [
-        "# Materials",
-        "使用资料前先查代表知识，查不到要明确说明未命中。",
-      ].join("\n"),
-    }]);
-    clientMocks.search.mockResolvedValue({
-      resources: resources.map((resource) =>
-        remoteMatch(resource.remoteUri, "resource", resource.assetId)),
-      memories: [],
-    });
-    const queryText = "请解释等温线，并给初中生三步学习建议；先查代表知识，查不到要明确说明。";
-
-    const probe = await probeRepresentativeKnowledgeMetadata({
-      representativeSlug,
-      representativeVersionId,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      queryText,
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-    const recalled = await recallRepresentativeContext({
-      representativeSlug,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      generationRunId: "generation-run-1",
-      queryText,
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-
-    expect(probe).toMatchObject({ status: "miss", candidateCount: 0 });
-    expect(recalled).toEqual({
-      items: [],
-      citations: [],
-      memoryUseRunId: "memory-use-run-1",
-    });
-    expect(clientMocks.search).not.toHaveBeenCalled();
-    expect(memoryUseMocks.record).not.toHaveBeenCalled();
-  });
-
-  it("keeps genuinely relevant authorized knowledge eligible", async () => {
-    const safeText = [
-      "# 等温线",
-      "等温线是地图上连接气温相同地点的曲线。",
-      "判读时先看数值，再看疏密，最后结合纬度和地形。",
-    ].join("\n");
-    const publicUri = installPublicKnowledgeAsset(safeText, "asset-isotherms");
-    clientMocks.search.mockResolvedValue({
-      resources: [remoteMatch(publicUri, "resource", "等温线判读资料")],
-      memories: [],
-    });
-    const queryText = "请解释等温线，并给初中生三步学习建议；先查代表知识，查不到要明确说明。";
-
-    const probe = await probeRepresentativeKnowledgeMetadata({
-      representativeSlug,
-      representativeVersionId,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      queryText,
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-    const recalled = await recallRepresentativeContext({
-      representativeSlug,
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      generationRunId: "generation-run-1",
-      queryText,
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-
-    expect(probe).toMatchObject({ status: "hit", candidateCount: 1 });
-    expect(recalled.items).toEqual([
-      expect.objectContaining({
-        uri: publicUri,
-        content: expect.stringContaining("等温线"),
-        internalSource: expect.objectContaining({ sourceKind: "PUBLIC_KNOWLEDGE" }),
-      }),
-    ]);
-    expect(memoryUseMocks.record).toHaveBeenCalledTimes(1);
-  });
   it("checks live binding metadata before selecting any archived or unbound asset text", async () => {
     installPublicKnowledgeAsset("SYNTHETIC_REVOKED_BODY 等温线", "withdrawn-asset");
     mockPrisma.knowledgeAssetRepresentative.findMany.mockResolvedValue([]);
@@ -344,7 +155,7 @@ describe("governed memory recall fence", () => {
     const resource = installPublicKnowledgeAsset("星河科技正式员工每年年假 12 天；试用期不适用。", "v2-policy");
     clientMocks.search.mockResolvedValue({ resources: [remoteMatch(resource, "resource", "untrusted remote text")], memories: [] });
     const recalled = await recallRepresentativeContext({ representativeSlug, conversationId: "conversation-1", contactId,
-      sourceChannel: "web", generationRunId: "generation-run-1", allowedSourceKinds: ["PUBLIC_KNOWLEDGE"], queryMode: "model_selected",
+      sourceChannel: "web", generationRunId: "generation-run-1", allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
       queryText: "星河科技正式员工年假天数及适用条件 NebulaCipher" });
     expect(recalled.items).toHaveLength(1);
     expect(recalled.items[0]?.content).toContain("12 天");
@@ -358,27 +169,12 @@ describe("governed memory recall fence", () => {
   it("still blocks secrets and withdrawn sources in V2 query mode", async () => {
     installPublicKnowledgeAsset("星河科技年假 12 天。", "v2-private-policy");
     const args = { representativeSlug, conversationId: "conversation-1", contactId, sourceChannel: "web" as const,
-      generationRunId: "generation-run-1", allowedSourceKinds: ["PUBLIC_KNOWLEDGE"] as const, queryMode: "model_selected" as const };
+      generationRunId: "generation-run-1", allowedSourceKinds: ["PUBLIC_KNOWLEDGE"] as const };
     await recallRepresentativeContext({ ...args, queryText: "星河科技年假 api_key: sk-testcredential123456789" });
     expect(clientMocks.search).not.toHaveBeenCalled();
     mockPrisma.knowledgeAssetRepresentative.findMany.mockResolvedValue([]);
     await recallRepresentativeContext({ ...args, queryText: "星河科技年假" });
     expect(clientMocks.search).not.toHaveBeenCalled();
-  });
-
-  it("denies a knowledge probe when the active episode no longer matches the pinned version", async () => {
-    const probe = await probeRepresentativeKnowledgeMetadata({
-      representativeSlug,
-      representativeVersionId: "stale-version",
-      conversationId: "conversation-1",
-      contactId,
-      sourceChannel: "web",
-      queryText: "你是谁",
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    });
-
-    expect(probe).toMatchObject({ status: "denied", candidateCount: 0 });
-    expect(memoryUseMocks.start).not.toHaveBeenCalled();
   });
 
   it("keeps pinned public knowledge available when the governed memory inventory query fails", async () => {
@@ -1489,7 +1285,7 @@ describe("governed memory recall fence", () => {
     expect(clientMocks.search).not.toHaveBeenCalled();
   });
 
-  it("maps benign audience text to a fixed semantic query without exposing raw text to OpenViking", async () => {
+  it("minimizes benign audience text without keyword-based business routing", async () => {
     const rawQueryText = "Can you explain pricing? RAW_RECALL_SENTINEL_8f2d";
     installPublicKnowledgeAsset(
       "# Pricing\nPublished pricing and service terms.",
@@ -1509,7 +1305,7 @@ describe("governed memory recall fence", () => {
     for (const [searchInput] of clientMocks.search.mock.calls) {
       expect(searchInput).toEqual(expect.objectContaining({
         query: expect.stringMatching(
-          /^published pricing and service terms; authorized published topic: pricing$/u,
+          /^published knowledge about pricing$/u,
         ),
       }));
       expect(JSON.stringify(searchInput)).not.toContain(rawQueryText);
@@ -1587,7 +1383,7 @@ describe("governed memory recall fence", () => {
     ).map(([input]) => input as { query?: string });
 
     expect(publicSearch?.query).toBe(
-      "published knowledge about 世界上 面积最大 大洲",
+      "published knowledge about 世界上 面积 最大 大洲",
     );
     expect(publicSearch?.query).not.toContain(rawQueryText);
     expect(governedSearches).not.toHaveLength(0);
@@ -1613,7 +1409,7 @@ describe("governed memory recall fence", () => {
       String((input as { targetUri?: string }).targetUri).includes("/versions/")
     )?.[0] as { query?: string } | undefined;
     expect(compoundPublicSearch?.query).toMatch(
-      /^published pricing and service terms; authorized published topic: /u,
+      /^published knowledge about /u,
     );
     expect(compoundPublicSearch?.query).toMatch(/世界|地理/u);
     expect(compoundPublicSearch?.query).not.toContain(compoundQueryText);

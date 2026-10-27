@@ -215,3 +215,14 @@ describe("conversation worker model readiness", () => {
     expect(JSON.stringify(readiness)).not.toContain("another-private-provider");
   });
 });
+
+describe("V2 cutover configuration", () => {
+  it("rejects a request to run the retired loop", () => {
+    expect(() => resolveConversationWorkerConfig({ DELEGATE_AGENT_VERSION: "pi" })).toThrow("legacy runtime is retired");
+    expect(() => resolveConversationWorkerConfig({ DELEGATE_AGENT_VERSION: "v2" })).not.toThrow();
+  });
+  it("checks readiness against the same explicit V2 endpoint used by generation", () => {
+    const readiness = resolveConversationWorkerModelReadiness({ DELEGATE_MODEL_PROVIDER: "openai", DELEGATE_V2_MODEL_BASE_URL: "https://fixture.invalid/v1", DELEGATE_V2_MODEL_ID: "fixture-model", DELEGATE_V2_MODEL_API_KEY: "synthetic-test-key" });
+    expect(readiness).toMatchObject({ state: "ready", configuredProvider: "agicto", readyProviders: ["agicto"] });
+  });
+});

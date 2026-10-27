@@ -1,0 +1,88 @@
+{
+  "batch": "20261021-smoke",
+  "sourceCommit": "7588e19",
+  "image": "delegate-agent-v2:cleanup-20261020-664905c",
+  "piVersion": "0.85.1",
+  "model": "qwen3.8-27b",
+  "profile": "qwen-chat-template",
+  "promptSha256": "7e1cbe7e1ea85756656499625816d5dbee9d30f08d97704be5247ca5cbc022d9",
+  "promptHashScope": "entire prompt.ts source file",
+  "fixtureIndexSha256": "c8ad44fb45ada262c9e3915e44c0b1fca1d1a01f13b6e1743880745aeb1f3633",
+  "timezone": "Asia/Shanghai",
+  "environment": {
+    "baseUrl": "http://127.0.0.1:13002",
+    "databasePort": 15432,
+    "project": "delegate-agent-test",
+    "mainServicesUnchanged": true
+  },
+  "representatives": [
+    {
+      "id": "cmvhwi47r00019knoj0rm5fq3",
+      "slug": "qa-agent-v2-20261021-a",
+      "accessMode": "FREE",
+      "syncStatus": "succeeded",
+      "humanInLoop": false,
+      "activeVersionId": "cmvhwi4b1000w9knokjkpzp3n"
+    },
+    {
+      "id": "cmvhwkev500019ku2cu3p224c",
+      "slug": "qa-agent-v2-20261021-b",
+      "accessMode": "FREE",
+      "syncStatus": "succeeded",
+      "humanInLoop": false,
+      "activeVersionId": "cmvhwkeyp000s9ku2eqpzkgh6"
+    },
+    {
+      "id": "cmvhwmohq00019k1d7cbaes2d",
+      "slug": "qa-agent-v2-20261021-c",
+      "accessMode": "FREE",
+      "syncStatus": "succeeded",
+      "humanInLoop": false,
+      "activeVersionId": "cmvhwmoks000w9k1d0dgabxz9"
+    }
+  ],
+  "uniqueRecordedRealModelTurns": 76,
+  "caseStatus": {
+    "V2-001": "PASS",
+    "V2-002": "PASS",
+    "V2-007": "PASS",
+    "V2-008": "PASS",
+    "V2-013": "PASS",
+    "V2-015": "PASS",
+    "V2-020": "PASS",
+    "V2-023": "PASS",
+    "V2-056": "PASS",
+    "V2-065": "PASS",
+    "V2-068": "PASS",
+    "V2-080": "PASS",
+    "V2-094": "PASS",
+    "V2-031": "BLOCKED",
+    "V2-087": "FAIL"
+  },
+  "requirementsComplete": [
+    "R01"
+  ],
+  "requirementsDenominator": 63,
+  "codeCoverageMeasured": false,
+  "costMeasured": false,
+  "tests": {
+    "unit": {
+      "pass": 209
+    },
+    "cutoverPostgresControlledProvider": {
+      "pass": 64,
+      "skipped": 1
+    },
+    "walletPostgres": {
+      "pass": 32
+    },
+    "serviceEntitlementsPostgres": {
+      "pass": 10,
+      "fail": 3,
+      "computeBillingStage": "not run because prior stage failed"
+    },
+    "scopeUnit": {
+      "pass": 67
+    }
+  }
+}

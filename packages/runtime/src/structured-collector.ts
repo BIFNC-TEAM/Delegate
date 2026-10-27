@@ -1,14 +1,10 @@
 import {
   channelSchema,
   inquiryIntentSchema,
-  planTierSchema,
-  type Channel,
-  type InquiryIntent,
-  type PlanTier,
+  planTierSchema
 } from "@delegate/domain";
 import { z } from "zod";
 
-import type { ConversationPlan } from "./inquiry-routing";
 
 const requestDescriptionCollectorField = {
   field: "description",
@@ -51,26 +47,6 @@ type StructuredCollectorQuestion = {
   prompt: string;
 };
 
-export function shouldStartStructuredCollector(plan: ConversationPlan): boolean {
-  return plan.disposition === "collect";
-}
-
-export function beginStructuredCollector(params: {
-  plan: ConversationPlan;
-  channel: Channel;
-}): StructuredCollectorState {
-  return {
-    kind: "service_request",
-    intent: params.plan.intent,
-    stepIndex: 0,
-    sourceChannel: params.channel,
-    ...(params.plan.suggestedPlan ? { suggestedPlan: params.plan.suggestedPlan } : {}),
-    startedAt: new Date().toISOString(),
-    answers: {},
-    questionFields: [requestDescriptionCollectorField.field],
-  };
-}
-
 export function readStructuredCollectorState(value: unknown): StructuredCollectorState | null {
   const parsed = structuredCollectorStateSchema.safeParse(value);
   if (!parsed.success) return null;
@@ -101,47 +77,6 @@ export function getStructuredCollectorQuestion(
     ...question,
     index: state.stepIndex + 1,
     total: questions.length,
-  };
-}
-
-export function advanceStructuredCollector(
-  state: StructuredCollectorState,
-  answer: string,
-): {
-  completed: boolean;
-  state?: StructuredCollectorState;
-} {
-  const currentQuestion = getStructuredCollectorQuestion(state);
-  if (!currentQuestion) {
-    return { completed: true };
-  }
-
-  const nextAnswers = {
-    ...state.answers,
-    [currentQuestion.field]: answer.trim(),
-  };
-
-  const nextStepIndex = state.stepIndex + 1;
-  const questions = getQuestionsForState(state);
-
-  if (nextStepIndex >= questions.length) {
-    return {
-      completed: true,
-      state: {
-        ...state,
-        stepIndex: nextStepIndex,
-        answers: nextAnswers,
-      },
-    };
-  }
-
-  return {
-    completed: false,
-    state: {
-      ...state,
-      stepIndex: nextStepIndex,
-      answers: nextAnswers,
-    },
   };
 }
 

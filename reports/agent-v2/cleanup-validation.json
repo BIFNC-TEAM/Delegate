@@ -1,0 +1,120 @@
+{
+  "date": "2026-10-19",
+  "branch": "codex/agent-v2-cleanup",
+  "base": "d8818c66a1441342fc2cb38e7e41d7fddc7a6c3f",
+  "deploymentPerformed": false,
+  "businessDataMigrated": false,
+  "workspace": {
+    "command": "COMPUTE_BROKER_INTERNAL_TOKEN=<synthetic test token> pnpm exec turbo run typecheck test --concurrency=1",
+    "successfulTasks": 36,
+    "totalTasks": 36,
+    "testPackages": {
+      "@delegate/lifecycle-hooks": {
+        "passed": 2,
+        "skipped": 0
+      },
+      "@delegate/auth-experience": {
+        "passed": 49,
+        "skipped": 0
+      },
+      "@delegate/workflows": {
+        "passed": 11,
+        "skipped": 0
+      },
+      "@delegate/openviking": {
+        "passed": 68,
+        "skipped": 0
+      },
+      "@delegate/capability-policy": {
+        "passed": 19,
+        "skipped": 0
+      },
+      "@delegate/registry": {
+        "passed": 28,
+        "skipped": 0
+      },
+      "@delegate/runtime": {
+        "passed": 82,
+        "skipped": 0
+      },
+      "@delegate/model-runtime": {
+        "passed": 93,
+        "skipped": 0
+      },
+      "@delegate/web-data": {
+        "passed": 1731,
+        "skipped": 288
+      },
+      "@delegate/compute-broker": {
+        "passed": 378,
+        "skipped": 4
+      },
+      "@delegate/matrix-bridge": {
+        "passed": 64,
+        "skipped": 0
+      },
+      "@delegate/reps": {
+        "passed": 312,
+        "skipped": 0
+      },
+      "@delegate/bot": {
+        "passed": 78,
+        "skipped": 0
+      },
+      "@delegate/workflow-runner": {
+        "passed": 40,
+        "skipped": 0
+      },
+      "@delegate/dashboard": {
+        "passed": 367,
+        "skipped": 0
+      },
+      "@delegate/conversation-worker": {
+        "passed": 111,
+        "skipped": 0
+      }
+    },
+    "passed": 3433,
+    "skipped": 292
+  },
+  "focused": {
+    "command": "pnpm test:agent:v2",
+    "passed": 202
+  },
+  "ragPrivacyAndAuthorization": {
+    "passed": 61
+  },
+  "postgres": {
+    "command": "pnpm test:agent:v2:pg16",
+    "passed": 64,
+    "skipped": 1,
+    "conditions": "Disposable local PostgreSQL 16; all migrations applied only to this fixture. Synthetic provider/object-store boundaries. Real cloud sandbox probe not enabled. Container stopped and removed afterward."
+  },
+  "build": {
+    "command": "pnpm --filter @delegate/reps build",
+    "passed": true
+  },
+  "manifestCleanup": {
+    "modelRuntimeAndBotTypecheckPassed": true,
+    "frozenLockfileValidationPassed": true
+  },
+  "liveModel": {
+    "model": "qwen3.8-27b",
+    "providerTransportSlot": "agicto",
+    "mode": "real-model-controlled-tools",
+    "repetitions": 3,
+    "requests": 36,
+    "fixtureChecksPassed": 36,
+    "modelCalls": 69,
+    "toolCalls": 39,
+    "report": "evaluation-2026-10-19T09-41-58-099Z-43ffb756-e190-405f-a715-e706f95d3d27.json",
+    "sha256": "07435feb0e29b07a18fbc80347ecd6e22b2c12d253ed140d7d6f6023a808acf3",
+    "conditions": "Real model, controlled internal knowledge/weather/calculation tools. No scripted tool sequence. Includes three clarification resumptions. Does not establish production RAG quality or a general performance improvement."
+  },
+  "limitations": [
+    "No deployment of this cleanup branch to port 3002 or a remote environment.",
+    "Production KB/MCP/browser/cloud sandbox end-to-end acceptance was not repeated in this cleanup.",
+    "New approval-required operations and mandatory semantic-review policies remain explicitly blocked; no permissive fallback.",
+    "Historical results remain, but the old execution loop cannot resume in this branch."
+  ]
+}

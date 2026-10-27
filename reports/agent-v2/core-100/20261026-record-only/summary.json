@@ -1,0 +1,24 @@
+{
+  "execution": {
+    "COMPLETE": 39,
+    "PARTIAL": 16,
+    "BLOCKED": 45
+  },
+  "assessment": {
+    "PASS": 33,
+    "FAIL": 5,
+    "REVIEW": 4,
+    "NOT_EVALUATED": 58
+  },
+  "completeAssessment": {
+    "PASS": 33,
+    "FAIL": 3,
+    "REVIEW": 3
+  },
+  "observations": 311,
+  "product10": {
+    "pass": 38,
+    "fail": 8,
+    "review": 8
+  }
+}

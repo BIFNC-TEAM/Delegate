@@ -1,0 +1,13 @@
+{
+  "groups": {
+    "A": 8,
+    "B": 5
+  },
+  "sum": 13,
+  "retainedRows": 3,
+  "edgeDiscarded": {
+    "duplicate": 1,
+    "cancelled": 1,
+    "emptyAmount": 1
+  }
+}

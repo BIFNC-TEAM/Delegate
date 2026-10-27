@@ -1,0 +1,531 @@
+[
+  {
+    "caseId": "V2-068",
+    "variant": "download-b",
+    "at": "2026-10-21T09:29:35.954Z",
+    "artifactId": "artifact_8a32bc61adde0407",
+    "guessedInOwnScope": 404,
+    "otherRepresentativePath": 404,
+    "phase": "edge-results.json"
+  },
+  {
+    "caseId": "V2-068",
+    "variant": "run-b",
+    "at": "2026-10-21T09:29:35.968Z",
+    "httpStatus": 200,
+    "phase": "edge-results.json"
+  },
+  {
+    "caseId": "V2-068",
+    "variant": "download-c",
+    "at": "2026-10-21T09:29:35.992Z",
+    "artifactId": "artifact_2c49130017f33a00",
+    "guessedInOwnScope": 404,
+    "otherRepresentativePath": 404,
+    "phase": "edge-results.json"
+  },
+  {
+    "caseId": "V2-068",
+    "variant": "run-c",
+    "at": "2026-10-21T09:29:36.002Z",
+    "httpStatus": 200,
+    "phase": "edge-results.json"
+  },
+  {
+    "caseId": "V2-068",
+    "variant": "query",
+    "at": "2026-10-21T09:29:36.004Z",
+    "runId": "cmvhwuptx018tmx0ng57cclqe",
+    "canaryLeak": false,
+    "phase": "edge-results.json",
+    "protectedRuns": [
+      {
+        "role": "b",
+        "knowledgeRunId": "cmvhwu8fz015vmx0n0n2eclgg",
+        "artifactRunId": "cmvhwubvo016jmx0nlm4alo4r",
+        "artifactIds": [
+          "artifact_8a32bc61adde0407"
+        ]
+      },
+      {
+        "role": "c",
+        "knowledgeRunId": "cmvhwuhjm017cmx0n5msp0ged",
+        "artifactRunId": "cmvhwuksy0180mx0ngfiatixf",
+        "artifactIds": [
+          "artifact_2c49130017f33a00"
+        ]
+      }
+    ]
+  },
+  {
+    "caseId": "V2-080",
+    "variant": "in-flight",
+    "at": "2026-10-21T09:29:44.101Z",
+    "runId": "cmvhwuvqj019qmx0nnk4vwl72",
+    "httpStatus": 200,
+    "dispatched": true,
+    "phase": "edge-results.json",
+    "after": {
+      "id": "cmvhwuvqj019qmx0nnk4vwl72",
+      "status": "CANCELED",
+      "errorCode": "audience_cancel_requested",
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhwuvqk019smx0n0x4gevut",
+          "status": "PROCESSED",
+          "attemptCount": 1,
+          "lastError": "audience_cancel_requested"
+        }
+      ],
+      "approvals": [],
+      "executions": [
+        {
+          "id": "pa_63b09d03c6bb2d89008f125eb3102781730f09f6532737d6",
+          "status": "CANCELED",
+          "capability": "EXEC",
+          "transportOutcome": "outcome_unknown",
+          "semanticOutcome": "unknown",
+          "exitCode": 1,
+          "finishedAt": "2026-10-21T09:29:41.975Z"
+        }
+      ],
+      "billing": {
+        "accessMode": "FREE",
+        "billingMode": "free",
+        "effectiveFreeReplyLimit": null
+      }
+    },
+    "control": {
+      "status": "completed",
+      "reply": {
+        "role": "assistant",
+        "text": "已记录停止请求；尚未派发的工作已停止。正在派发或已提交的外部操作不一定能撤销，仍需以实际回执为准。"
+      },
+      "taskControl": {
+        "outcome": "cancel_requested",
+        "tasks": [
+          {
+            "id": "cmvhwuvqj019qmx0nnk4vwl72",
+            "status": "canceled"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "caseId": "V2-080",
+    "variant": "pending-approval",
+    "at": "2026-10-21T09:29:46.209Z",
+    "runId": "cmvhwv33101aqmx0n8di63et0",
+    "httpStatus": 200,
+    "phase": "edge-results.json",
+    "before": {
+      "id": "cmvhwv33101aqmx0n8di63et0",
+      "status": "WAITING_APPROVAL",
+      "errorCode": null,
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhwv33101asmx0nvmoly675",
+          "status": "PENDING",
+          "attemptCount": 0,
+          "lastError": null
+        }
+      ],
+      "approvals": [
+        {
+          "id": "cmvhwv38o00019kjxwoxyc00l",
+          "status": "PENDING"
+        }
+      ],
+      "executions": [],
+      "billing": {
+        "accessMode": "FREE",
+        "billingMode": "free",
+        "effectiveFreeReplyLimit": null
+      }
+    },
+    "after": {
+      "id": "cmvhwv33101aqmx0n8di63et0",
+      "status": "CANCELED",
+      "errorCode": "audience_cancel_requested",
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhwv33101asmx0nvmoly675",
+          "status": "PROCESSED",
+          "attemptCount": 0,
+          "lastError": "audience_cancel_requested"
+        }
+      ],
+      "approvals": [
+        {
+          "id": "cmvhwv38o00019kjxwoxyc00l",
+          "status": "REJECTED"
+        }
+      ],
+      "executions": [],
+      "billing": {
+        "accessMode": "FREE",
+        "billingMode": "free",
+        "effectiveFreeReplyLimit": null
+      }
+    },
+    "control": {
+      "status": "completed",
+      "reply": {
+        "role": "assistant",
+        "text": "已记录停止请求；尚未派发的工作已停止。正在派发或已提交的外部操作不一定能撤销，仍需以实际回执为准。"
+      },
+      "taskControl": {
+        "outcome": "cancel_requested",
+        "tasks": [
+          {
+            "id": "cmvhwv33101aqmx0n8di63et0",
+            "status": "canceled"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "caseId": "V2-087",
+    "variant": "none-and-client-forgery",
+    "at": "2026-10-21T09:29:49.667Z",
+    "httpStatus": 202,
+    "countBefore": "1",
+    "countAfter": "2",
+    "phase": "edge-results.json",
+    "admission": {
+      "status": "queued",
+      "runId": "cmvhwv67e01ccmx0n1r614z5e",
+      "usage": {
+        "freeRepliesUsed": 1,
+        "freeRepliesRemaining": 0,
+        "serviceCreditsAvailable": 0,
+        "serviceCreditsReserved": 0,
+        "serviceCreditsPurchased": 0,
+        "passUnlocked": false,
+        "deepHelpUnlocked": false,
+        "accessMode": "TRIAL_THEN_CREDITS",
+        "unlimitedFreeAccess": false
+      }
+    }
+  },
+  {
+    "caseId": "V2-087",
+    "variant": "setup-or-execution-error",
+    "phase": "edge-results.json",
+    "status": "BLOCKED",
+    "note": "Fixture preparation looked up a not-yet-created wallet. Corrected to use mock recharge and purchase domain functions; original attempt retained privately."
+  },
+  {
+    "caseId": "V2-094",
+    "variant": "historical-delivery",
+    "at": "2026-10-21T09:29:53.671Z",
+    "runId": "cmvhwv4sy01bumx0nasa8j3tm",
+    "phase": "edge-results.json",
+    "before": {
+      "id": "cmvhwv4sy01bumx0nasa8j3tm",
+      "status": "COMPLETED",
+      "errorCode": null,
+      "model": "qwen3.8-27b",
+      "inputTokens": 5620,
+      "outputTokens": 146,
+      "outbox": [
+        {
+          "id": "cmvhwv4sz01bwmx0n5gm3nnnc",
+          "status": "PROCESSED",
+          "attemptCount": 1,
+          "lastError": null
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "FREE",
+        "billingMode": "free",
+        "effectiveFreeReplyLimit": null
+      }
+    },
+    "after": {
+      "id": "cmvhwv4sy01bumx0nasa8j3tm",
+      "status": "COMPLETED",
+      "errorCode": null,
+      "model": "qwen3.8-27b",
+      "inputTokens": 5620,
+      "outputTokens": 146,
+      "outbox": [
+        {
+          "id": "cmvhwv4sz01bwmx0n5gm3nnnc",
+          "status": "PROCESSING",
+          "attemptCount": 2,
+          "lastError": null
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "FREE",
+        "billingMode": "free",
+        "effectiveFreeReplyLimit": null
+      }
+    },
+    "output": {
+      "outputMessageId": "cmvhwv5ry00exob14gicsz7dv"
+    }
+  },
+  {
+    "caseId": "V2-087",
+    "variant": "none-and-client-forgery",
+    "at": "2026-10-21T09:32:46.939Z",
+    "httpStatus": 202,
+    "countBefore": "1",
+    "countAfter": "2",
+    "phase": "billing-retest-results.json",
+    "after": {
+      "id": "cmvhwyrym01dgmx0ncla894gd",
+      "status": "FAILED",
+      "errorCode": "pi_conversation_worker_failed",
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhwyryq01dimx0nxla7esbu",
+          "status": "DEAD_LETTER",
+          "attemptCount": 5,
+          "lastError": "Generation billing mode service_credit_pending cannot be changed to free."
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "TRIAL_THEN_CREDITS",
+        "billingMode": "service_credit_pending",
+        "effectiveFreeReplyLimit": 0
+      }
+    },
+    "admission": {
+      "status": "queued",
+      "runId": "cmvhwyrym01dgmx0ncla894gd",
+      "usage": {
+        "freeRepliesUsed": 1,
+        "freeRepliesRemaining": 0,
+        "serviceCreditsAvailable": 0,
+        "serviceCreditsReserved": 0,
+        "serviceCreditsPurchased": 0,
+        "passUnlocked": false,
+        "deepHelpUnlocked": false,
+        "accessMode": "TRIAL_THEN_CREDITS",
+        "unlimitedFreeAccess": false
+      }
+    }
+  },
+  {
+    "caseId": "V2-087",
+    "variant": "mock-credit-preparation",
+    "at": "2026-10-21T09:32:47.250Z",
+    "tokenAmount": 1000,
+    "phase": "billing-retest-results.json"
+  },
+  {
+    "caseId": "V2-087",
+    "variant": "wallet-ledger",
+    "at": "2026-10-21T09:32:48.896Z",
+    "runId": "cmvhwyzbe01e2mx0nnuax75gv",
+    "phase": "billing-retest-results.json",
+    "after": {
+      "id": "cmvhwyzbe01e2mx0nnuax75gv",
+      "status": "COMPLETED",
+      "errorCode": null,
+      "model": "qwen3.8-27b",
+      "inputTokens": 5712,
+      "outputTokens": 96,
+      "outbox": [
+        {
+          "id": "cmvhwyzc401ecmx0n26fo8wdq",
+          "status": "PROCESSED",
+          "attemptCount": 1,
+          "lastError": null
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "TRIAL_THEN_CREDITS",
+        "billingMode": "service_credit_settled",
+        "billingFinalizedAt": "2026-10-21T09:32:48.578Z",
+        "effectiveFreeReplyLimit": 0
+      }
+    }
+  },
+  {
+    "caseId": "V2-094",
+    "variant": "legacy-retirement",
+    "at": "2026-10-21T09:32:49.870Z",
+    "runId": "cmvhwz0lu01esmx0ncaiyqwql",
+    "phase": "billing-retest-results.json",
+    "before": {
+      "id": "cmvhwz0lu01esmx0ncaiyqwql",
+      "status": "QUEUED",
+      "errorCode": null,
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhwz0md01f2mx0nb4yi9rsg",
+          "status": "PENDING",
+          "attemptCount": 0,
+          "lastError": null
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "TRIAL_THEN_CREDITS",
+        "billingMode": "service_credit",
+        "walletReservation": {
+          "tokenAmount": 1,
+          "usageChargeId": "cmvhwz0m501ewmx0nyscfbgpb"
+        },
+        "effectiveFreeReplyLimit": 0
+      }
+    },
+    "after": {
+      "id": "cmvhwz0lu01esmx0ncaiyqwql",
+      "status": "FAILED",
+      "errorCode": "legacy_agent_runtime_retired",
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhwz0md01f2mx0nb4yi9rsg",
+          "status": "DEAD_LETTER",
+          "attemptCount": 1,
+          "lastError": "旧版任务已停止自动续跑，请先查看原执行回执；确认后可提交新请求。"
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "TRIAL_THEN_CREDITS",
+        "billingMode": "service_credit",
+        "walletReservation": {
+          "tokenAmount": 1,
+          "usageChargeId": "cmvhwz0m501ewmx0nyscfbgpb"
+        },
+        "effectiveFreeReplyLimit": 0
+      }
+    }
+  },
+  {
+    "caseId": "V2-094",
+    "variant": "pending-historical-delivery",
+    "at": "2026-10-21T09:34:39.696Z",
+    "runId": "cmvhx1bs101g6mx0n92lv5urs",
+    "phase": "history-results.json",
+    "before": {
+      "id": "cmvhx1bs101g6mx0n92lv5urs",
+      "status": "COMPLETED",
+      "errorCode": null,
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhx1bs201g8mx0nw5p6z2uu",
+          "status": "PENDING",
+          "attemptCount": 1,
+          "lastError": null
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "FREE",
+        "billingMode": "free",
+        "effectiveFreeReplyLimit": null
+      }
+    },
+    "after": {
+      "id": "cmvhx1bs101g6mx0n92lv5urs",
+      "status": "COMPLETED",
+      "errorCode": null,
+      "model": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "outbox": [
+        {
+          "id": "cmvhx1bs201g8mx0nw5p6z2uu",
+          "status": "PROCESSED",
+          "attemptCount": 2,
+          "lastError": null
+        }
+      ],
+      "approvals": [],
+      "executions": [],
+      "billing": {
+        "accessMode": "FREE",
+        "billingMode": "free",
+        "effectiveFreeReplyLimit": null
+      }
+    }
+  },
+  {
+    "caseId": "V2-068",
+    "variant": "unauthenticated-sse-b",
+    "httpStatus": 200,
+    "sseEvent": "error",
+    "sseError": "run_not_found",
+    "answerDisclosed": false
+  },
+  {
+    "caseId": "V2-068",
+    "variant": "unauthenticated-sse-c",
+    "httpStatus": 200,
+    "sseEvent": "error",
+    "sseError": "run_not_found",
+    "answerDisclosed": false
+  },
+  {
+    "caseId": "V2-094",
+    "variant": "unauthenticated-sse-a",
+    "httpStatus": 200,
+    "sseEvent": "error",
+    "sseError": "run_not_found",
+    "answerDisclosed": false
+  },
+  {
+    "caseId": "V2-094",
+    "variant": "legacy-reservation-release",
+    "status": "FAILED",
+    "settled": 0,
+    "released": 1,
+    "reserved": 1
+  },
+  {
+    "caseId": "V2-080",
+    "variant": "final-resource-audit",
+    "totalLeases": 12,
+    "allArchived": true,
+    "cleanupErrors": 0
+  },
+  {
+    "caseId": "V2-068",
+    "variant": "injected-source-hash-scope",
+    "authorizedRACount": 1,
+    "RBandRCCount": 4,
+    "crossScopeOverlap": 0,
+    "source": "MemoryUseItem.injectedAt/contentHash joined to actual generation runs"
+  }
+]

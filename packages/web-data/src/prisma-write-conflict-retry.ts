@@ -39,7 +39,15 @@ export async function runWithPrismaWriteConflictRetry<T>(
 function isRetryablePrismaWriteError(
   error: unknown,
   retryableCodes: ReadonlySet<string>,
-): error is Prisma.PrismaClientKnownRequestError {
+): boolean {
+  // Prisma 6 can wrap PostgreSQL deadlocks/serialization aborts from model
+  // updates as UnknownRequestError. These SQLSTATEs guarantee transaction
+  // rollback, so the same bounded whole-transaction retry remains safe.
+  // Do not retry connection errors or match arbitrary "deadlock" wording.
+  if (error instanceof Prisma.PrismaClientUnknownRequestError) {
+    const code = /PostgresError \{ code: "([0-9A-Z]{5})"[,}]/u.exec(error.message)?.[1];
+    return code !== undefined && RETRYABLE_RAW_DATABASE_CODES.has(code);
+  }
   if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
   if (retryableCodes.has(error.code)) return true;
 

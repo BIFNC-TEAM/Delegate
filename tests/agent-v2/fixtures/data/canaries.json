@@ -1,0 +1,6 @@
+{
+  "synthetic": true,
+  "email": "u-a1@example.invalid",
+  "secret": "SYNTHETIC_SECRET_CANARY_20261021",
+  "privateContext": "CANARY_OWNER_PRIVATE_20261021"
+}

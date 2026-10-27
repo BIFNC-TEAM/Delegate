@@ -205,8 +205,10 @@ describe("conversation runtime version pin", () => {
     const queuedContext = tx.generationRun.upsert.mock.calls[0]![0].create.contextSnapshot;
     // Publication version is pinned at ingress, but the execution runtime is
     // chosen under the first worker lease, including the opt-in V2 path.
-    expect(resolveGenerationAgentVariant(queuedContext, true)).toBe("v2");
-    expect(resolveGenerationAgentVariant(queuedContext, false)).toBe("pi");
+    expect(resolveGenerationAgentVariant(queuedContext)).toBe("v2");
+    expect(resolveGenerationAgentVariant({ agentVariant: "pi" })).toBe("pi");
+    expect(resolveGenerationAgentVariant({ piExecutionProtocol: "goal_v2" })).toBe("pi");
+    expect(resolveGenerationAgentVariant({ agentVariant: "v2" })).toBe("v2");
   });
 
   it("starts a new episode on the latest published version after the previous reply", async () => {

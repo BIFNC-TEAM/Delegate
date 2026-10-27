@@ -12,7 +12,6 @@
   "dependencies": {
     "@delegate/compute-protocol": "workspace:*",
     "@delegate/lifecycle-hooks": "workspace:*",
-    "@delegate/model-runtime": "workspace:*",
     "@prisma/client": "^6.19.2",
     "@delegate/domain": "workspace:*",
     "@delegate/openviking": "workspace:*",

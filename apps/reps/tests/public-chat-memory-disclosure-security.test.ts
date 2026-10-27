@@ -5,15 +5,12 @@ const mocks = vi.hoisted(() => ({
   buildRepresentativeRuntimeProfile: vi.fn(),
   buildWebAudienceExternalUserId: vi.fn(),
   cookies: vi.fn(),
-  createConversationPlan: vi.fn(),
   deleteArtifactObject: vi.fn(),
   enforcePublicChatNetworkAdmission: vi.fn(),
   enforcePublicChatPrincipalAdmission: vi.fn(),
-  generateRepresentativeReply: vi.fn(),
+  runAgent: vi.fn(),
   getPublicRepresentativeRuntime: vi.fn(),
   getUserAgentWalletBalance: vi.fn(),
-  renderReplyPreview: vi.fn(),
-  resolveConversationSubagent: vi.fn(),
   resolvePublicAudienceRequestPrincipal: vi.fn(),
   resolvePublicAudienceWalletExternalUserId: vi.fn(),
   resolveWebAudienceContact: vi.fn(),
@@ -35,15 +32,12 @@ vi.mock("next/headers", () => ({
   cookies: mocks.cookies,
 }));
 
-vi.mock("@delegate/model-runtime", () => ({
-  generateRepresentativeReply: mocks.generateRepresentativeReply,
+vi.mock("@delegate/model-runtime/v2", async original => ({
+  ...await original<typeof import("@delegate/model-runtime/v2")>(), delegateAgentV2: { run: mocks.runAgent },
 }));
 
 vi.mock("@delegate/runtime", async (original) => ({
   ...(await original<typeof import("@delegate/runtime")>()),
-  createConversationPlan: mocks.createConversationPlan,
-  renderReplyPreview: mocks.renderReplyPreview,
-  resolveConversationSubagent: mocks.resolveConversationSubagent,
 }));
 
 vi.mock("@delegate/web-data", () => ({
@@ -391,6 +385,5 @@ function expectNoPostDisclosureSideEffects() {
   expect(mocks.getUserAgentWalletBalance).not.toHaveBeenCalled();
   expect(mocks.acceptInboundConversationMessage).not.toHaveBeenCalled();
   expect(mocks.buildRepresentativeRuntimeProfile).not.toHaveBeenCalled();
-  expect(mocks.createConversationPlan).not.toHaveBeenCalled();
-  expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+  expect(mocks.runAgent).not.toHaveBeenCalled();
 }

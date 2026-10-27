@@ -1,0 +1,97 @@
+{
+  "date": "2026-10-23",
+  "branch": "codex/agent-v2-cleanup",
+  "sourceBase": "7588e1911dcad3885c96535d23f7ae7afa5ee0f2",
+  "uncommitted": true,
+  "scope": "three-category semantic testing pilot; not the full 100-case suite",
+  "model": "qwen3.8-27b",
+  "sameModelJudge": true,
+  "independentModelWeightsVerified": false,
+  "productionSourceUnchangedFromPriorSnapshot": {
+    "apps/conversation-worker/src/agent-capabilities.ts": true,
+    "packages/model-runtime/src/v2/prompt.ts": true,
+    "packages/model-runtime/src/v2/runtime.ts": true,
+    "packages/model-runtime/src/v2/types.ts": true,
+    "packages/web-data/src/conversation-platform.ts": true,
+    "packages/web-data/src/prisma-write-conflict-retry.ts": true
+  },
+  "mainContainersUnchanged": true,
+  "cloudSandboxTests": 0,
+  "testDbMutations": 0,
+  "runs": [
+    {
+      "file": "calibrate-2026-10-23T01-02-37-663Z-0e3070b5-d23e-4a54-9528-462a4e49cae4.json",
+      "sha256": "0b0d61bb6f4a0746543162a3ad605bc272c3a2079f51538ee6549c84c5033fc9",
+      "mode": "calibrate",
+      "rows": 30,
+      "summary": {
+        "pass": 30,
+        "fail": 0,
+        "review": 0,
+        "incomplete": false
+      },
+      "judgeCalls": 30,
+      "judgeTokens": 18920,
+      "subjectModelCalls": 0
+    },
+    {
+      "file": "subjects-2026-10-23T01-03-22-170Z-7e0198de-c1bd-41c1-9f79-4b34788b9b8a.json",
+      "sha256": "9d7753d6c5974af2acc5e39797bcf298076338809c09a803b23f27ada71a4b76",
+      "mode": "subjects",
+      "rows": 9,
+      "summary": {
+        "pass": 9,
+        "fail": 0,
+        "review": 0,
+        "incomplete": false
+      },
+      "judgeCalls": 9,
+      "judgeTokens": 6170,
+      "subjectModelCalls": 12
+    },
+    {
+      "file": "subjects-2026-10-23T01-04-53-600Z-c032cecd-a639-430c-a7d1-4f3b13caff9e.json",
+      "sha256": "a45c97019d13480099a22e89e95995459d0cb93e9d36834e1fe3ba66b0bb1857",
+      "mode": "subjects",
+      "rows": 3,
+      "summary": {
+        "pass": 3,
+        "fail": 0,
+        "review": 0,
+        "incomplete": false
+      },
+      "judgeCalls": 3,
+      "judgeTokens": 2084,
+      "subjectModelCalls": 4
+    },
+    {
+      "file": "subjects-2026-10-23T01-09-36-032Z-0155e30b-98be-45d3-a2df-36ed484767ac.json",
+      "sha256": "7651ab9ec503d5957af081036f740d90492e8b0d5926873e8bae0435f9d1b2bf",
+      "mode": "subjects",
+      "rows": 3,
+      "summary": {
+        "pass": 3,
+        "fail": 0,
+        "review": 0,
+        "incomplete": false
+      },
+      "judgeCalls": 3,
+      "judgeTokens": 2062,
+      "subjectModelCalls": 4
+    }
+  ],
+  "offlineTests": {
+    "semanticJudge": 31,
+    "agentRegression": 228,
+    "modelRuntimeModule": 136,
+    "note": "Overlapping suites; do not sum."
+  },
+  "sourceHashes": {
+    "packages/model-runtime/evaluation/semantic/cli.ts": "ec505333bff3e51004997fbba741b2489c84a0db8fcd8405682f737963e8c997",
+    "packages/model-runtime/evaluation/semantic/engine.ts": "51879f6a4fb194335128ec1c59ba27f3c027c3289292fb30f2a3b2b07dc042e6",
+    "packages/model-runtime/evaluation/semantic/cases.ts": "1542a2d50ef6aa45de0df1217f70cde6c3214f759b8773ee85afabf0f9072521",
+    "packages/model-runtime/evaluation/semantic/options.ts": "0ce18a67c744eb1e5ab882e7f2d7e6ce8353bb216ef9f35756370f1f9e776389"
+  },
+  "costUsd": null,
+  "documentedPnpmLiveCommandVerified": true
+}

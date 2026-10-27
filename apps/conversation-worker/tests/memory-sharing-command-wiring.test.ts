@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const processor = readFileSync(
-  new URL("../src/processor-pi.ts", import.meta.url),
+  new URL("../src/processor.ts", import.meta.url),
   "utf8",
 );
 const conversationPlatform = readFileSync(
@@ -31,7 +31,7 @@ describe("Matrix cross-channel memory command wiring", () => {
     expect(commandBlock).toContain("deliverGenerationOutput");
     expect(commandBlock).not.toContain("generateRepresentativeReply");
     expect(commandBlock.indexOf("const sharingCommand ="))
-      .toBeLessThan(commandBlock.indexOf("return await processPiConversationTurn"));
+      .toBeLessThan(commandBlock.indexOf("return await processV2ConversationTurn"));
   });
 
   it("carries only provider-verified source coordinates into the worker claim", () => {

@@ -1,0 +1,158 @@
+[
+  {
+    "file": "attachment-results.json",
+    "sha256": "56feb341cd1195fa5d7288f6c69080bc57741bb9000df05c3893c27b20e08dfb",
+    "rows": 21,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "billing-retest-results.json",
+    "sha256": "66f8344a7cb2696ac8412c9acb4f4934ad1a492f40503f7c5783ca97efc4c61d",
+    "rows": 4,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "catalog-results.json",
+    "sha256": "b4e898e78cfb454eeab7232f7cf0defa219b54a97dd32a9a724509587b8b3ac7",
+    "rows": 15,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "controlled-after-results.json",
+    "sha256": "cc8f4a81ee23e27079e4c067da75f7e68207f750c7c6d2140b15c82966d4c975",
+    "rows": 6,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "controlled-results.json",
+    "sha256": "be6c83ef31a2d49f813e737e06c69c8f778f12ab254d50f6e08db56a8b01d2f3",
+    "rows": 24,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "delivery-replay-verified-results.json",
+    "sha256": "ca8ca1fbdd85d32aee45c49a2e817a069e535fda64ab60ae41a2f1f6658138dd",
+    "rows": 1,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "expanded-results.json",
+    "sha256": "5b644547f474db05f8697e215d035fa00f5cf58f4fc8557220a5298674af882e",
+    "rows": 108,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "expanded-retry-results.json",
+    "sha256": "12535da1c13bc9ae6ee65a879e4c414265a3e93fadb3114ba0964bf2c746b709",
+    "rows": 81,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "http-repair-real-results.json",
+    "sha256": "0fa685611cb0c2f00c076a4bca2d80d08e73f3422e1685c12e24d0a0e9d7eb1f",
+    "rows": 3,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "http-repair-status-results.json",
+    "sha256": "3a187febddc1ccc0ba7f12987987632502465de586863aae9cbf4f34c6b4ea34",
+    "rows": 3,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "idempotency-fixed-results.json",
+    "sha256": "2666ef927eb2e284b47228214689f95657acb095fc982a4ab80798d215b92721",
+    "rows": 6,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "idempotency-rag-results.json",
+    "sha256": "302ebb374b1e81d15d10682b3b2ee872ccaf7648cb665fe123f45ed519f29dc2",
+    "rows": 6,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "legacy-pending-results.json",
+    "sha256": "d4cef12f7e4b145d1e3935c0ecf80f614add6f41629a2cabcc0ec299acdf7851",
+    "rows": 1,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "malformed-input-results.json",
+    "sha256": "3806622ced8d179fb6f049a6f57a3a15254f79fb50323a0e3dc43eda75d01a50",
+    "rows": 3,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "repair-eval-results.json",
+    "sha256": "06a9520e93b643030a1a6121c053ac0357eaafa7fd267045fcae3c7da46b8711",
+    "rows": 9,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "skills-eval-results.json",
+    "sha256": "920de031b6792091738275ab5d6f28bc62136c5029fed090ef2af2322cdda97f",
+    "rows": 6,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "skills-eval-verified-results.json",
+    "sha256": "02a3488c43a65aa705828db36fe8a647e6f5216265ca832f690f48f6a2097a0b",
+    "rows": 6,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "smoke-results.json",
+    "sha256": "2760711ed529ba07f3b4da740d6fb7ad91c2b872f2f93bea3067b53d05ffbd45",
+    "rows": 58,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "stateful-results.json",
+    "sha256": "0de97cfd03442981c1a74c87c63cf1b2d327f9dccba0ad0e16165632b1733cfe",
+    "rows": 13,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "truncation-real-results.json",
+    "sha256": "1b993517266abf82e54bdc15f1d29d61b086e6435427b3a3d0442beb1d50bc29",
+    "rows": 3,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "variant-results.json",
+    "sha256": "914333608596e4e012dfe9d96d575f3b3b4058587cfb96948b0da412c9621355",
+    "rows": 18,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "web-results.json",
+    "sha256": "75de53b4783819fc7c255fd1b6baa492a8b9e6c47eae5af784aa69a334e4084b",
+    "rows": 21,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "idempotency-rag-probes.json",
+    "sha256": "d8bfa9f90f9fdf994a5532188b00147784feb9c97fb8f5f6f3ec35720aedaa46",
+    "rows": 3,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "idempotency-fixed-probes.json",
+    "sha256": "3c6a7987b363225aaf86e4b46f0ee338bccdd32641ab1384aae78b9faf24da4f",
+    "rows": 3,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "stateful-probes.json",
+    "sha256": "b31ea1343c7e59b4d3b4e48a0d49ea94ab00752720436dcc762ec897bf89def3",
+    "rows": 2,
+    "storage": "git-ignored private evidence"
+  },
+  {
+    "file": "search-proof.json",
+    "sha256": "e3629fd5159cbac31792b5bd890637db2a14914ccd9ea16fc53e21d2c093f5b1",
+    "rows": 1,
+    "storage": "git-ignored private evidence"
+  }
+]

@@ -72,7 +72,7 @@ flowchart TD
 
 Delegate also ships a separate marketing `Site` service, but it sits outside the runtime loop and acts as the top-of-funnel surface that links into the dashboard and representative app.
 
-The active planning and capability-execution contract is documented in [Agent Runtime V3](./agent-runtime-v3.md). Broader tradeoffs remain in [docs/delegate-architecture-decisions.md](./delegate-architecture-decisions.md).
+The active planning and capability-execution contract is documented in [Agent Runtime V3](agent-v2-cleanup.md#历史实现). Broader tradeoffs remain in [docs/delegate-architecture-decisions.md](./delegate-architecture-decisions.md).
 
 ## Core runtime loop
 

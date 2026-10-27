@@ -1,0 +1,305 @@
+{
+  "source": "recheck-4ef98a60-1a03-491a-97f5-dec37792cd72.json",
+  "sourceSha256": "c6fce5f4e1703d0ac532b2b9606e6bcdd5fe7aa1c766e1ec7857115962420f3f",
+  "doesNotOverrideAutomatedResults": true,
+  "reviews": [
+    {
+      "caseId": "V2-001",
+      "variant": "greeting",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb1jkw00uwoh0n830e10dd"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-002",
+      "variant": "identity",
+      "repeat": 1,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb1lnv00vioh0n69p1jdgt"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "回答明确声称执行代码/沙盒；该发布版本exec/write等均DENY，确认能力介绍与权限不符。评审理由中“未注册工具”不够准确：工具可能仍在目录，但执行权限已禁止。"
+    },
+    {
+      "caseId": "V2-003",
+      "variant": "english",
+      "repeat": 1,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb1qsl00wsoh0nyqzcj3b4"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "回答明确声称执行代码/沙盒；该发布版本exec/write等均DENY，确认能力介绍与权限不符。评审理由中“未注册工具”不够准确：工具可能仍在目录，但执行权限已禁止。"
+    },
+    {
+      "caseId": "V2-003",
+      "variant": "mixed-chinese",
+      "repeat": 1,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb1tyi00xfoh0naqg6ec67"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "回答明确声称执行代码/沙盒；该发布版本exec/write等均DENY，确认能力介绍与权限不符。评审理由中“未注册工具”不够准确：工具可能仍在目录，但执行权限已禁止。"
+    },
+    {
+      "caseId": "V2-005",
+      "variant": "translation",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb20ck00ypoh0nx5oz7nmk"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-005",
+      "variant": "polish",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb22bu00zboh0nltnz5bi5"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-005",
+      "variant": "summary",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb24qy00zyoh0nvenrz6x3"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-007",
+      "variant": "missing-city",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb26at010koh0nvmwpzaeq"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-007",
+      "variant": "urgent",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb28mw0117oh0nabylbf28"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-011",
+      "variant": "empty-one",
+      "repeat": 1,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb2c5y011uoh0nfny4g8tl"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "真实必要材料缺失且答案请求补充，任务状态为partial，与waiting_user要求不符；确认状态问题。"
+    },
+    {
+      "caseId": "V2-011",
+      "variant": "complete",
+      "repeat": 1,
+      "automatedVerdict": "review",
+      "runIds": [
+        "cmvkb2n7e0137oh0nw46pyco4"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "我对照题目/发布资料检查，未发现该答案的关键结论错误；自动评审协议未通过，保留review，不转为自动PASS。"
+    },
+    {
+      "caseId": "V2-013",
+      "variant": "resume",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb2q4y013uoh0n6wvn2e2a",
+        "cmvkb2s2t014coh0n163q66qj"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-020",
+      "variant": "travel",
+      "repeat": 1,
+      "automatedVerdict": "review",
+      "runIds": [
+        "cmvkb35k1015woh0n0xc112vn"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "我对照题目/发布资料检查，未发现该答案的关键结论错误；自动评审协议未通过，保留review，不转为自动PASS。"
+    },
+    {
+      "caseId": "V2-031",
+      "variant": "missing-bonus",
+      "repeat": 1,
+      "automatedVerdict": "pass",
+      "runIds": [
+        "cmvkb3996016joh0npc3ohni4"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "抽查通过：内容与输入/实际工具证据一致；不构成独立人工标注或开放式准确率保证。"
+    },
+    {
+      "caseId": "V2-002",
+      "variant": "identity",
+      "repeat": 2,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb3fzy017toh0nb656qwgz"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "回答明确声称执行代码/沙盒；该发布版本exec/write等均DENY，确认能力介绍与权限不符。评审理由中“未注册工具”不够准确：工具可能仍在目录，但执行权限已禁止。"
+    },
+    {
+      "caseId": "V2-003",
+      "variant": "english",
+      "repeat": 2,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb3lu10193oh0ne4vb2zr4"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "回答明确声称执行代码/沙盒；该发布版本exec/write等均DENY，确认能力介绍与权限不符。评审理由中“未注册工具”不够准确：工具可能仍在目录，但执行权限已禁止。"
+    },
+    {
+      "caseId": "V2-003",
+      "variant": "mixed-chinese",
+      "repeat": 2,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb3p4x019qoh0nt1essu3x"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "自动FAIL可能过严：泛称计算/代码或文件处理未明确表示执行工具；主模型可以直接处理文本和心算。需细化工具权限与直答能力的评分边界，不能将此项计作已确认产品缺陷。保留原自动判定。"
+    },
+    {
+      "caseId": "V2-011",
+      "variant": "empty-one",
+      "repeat": 2,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb47s501e5oh0ntk3ae7z4"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "真实必要材料缺失且答案请求补充，任务状态为partial，与waiting_user要求不符；确认状态问题。"
+    },
+    {
+      "caseId": "V2-011",
+      "variant": "complete",
+      "repeat": 2,
+      "automatedVerdict": "review",
+      "runIds": [
+        "cmvkb4jp901fioh0nydiljwmz"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "我对照题目/发布资料检查，未发现该答案的关键结论错误；自动评审协议未通过，保留review，不转为自动PASS。"
+    },
+    {
+      "caseId": "V2-020",
+      "variant": "travel",
+      "repeat": 2,
+      "automatedVerdict": "review",
+      "runIds": [
+        "cmvkb52bg01i7oh0nxr33d27e"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "我对照题目/发布资料检查，未发现该答案的关键结论错误；自动评审协议未通过，保留review，不转为自动PASS。"
+    },
+    {
+      "caseId": "V2-002",
+      "variant": "identity",
+      "repeat": 3,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb5crn01k4oh0n118p0y6e"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "回答明确声称执行代码/沙盒；该发布版本exec/write等均DENY，确认能力介绍与权限不符。评审理由中“未注册工具”不够准确：工具可能仍在目录，但执行权限已禁止。"
+    },
+    {
+      "caseId": "V2-003",
+      "variant": "english",
+      "repeat": 3,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb5hdn01ldoh0nsclamw17"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "回答明确声称执行代码/沙盒；该发布版本exec/write等均DENY，确认能力介绍与权限不符。评审理由中“未注册工具”不够准确：工具可能仍在目录，但执行权限已禁止。"
+    },
+    {
+      "caseId": "V2-003",
+      "variant": "mixed-chinese",
+      "repeat": 3,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb5kd501m0oh0npak1w3on"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "自动FAIL可能过严：泛称计算/代码或文件处理未明确表示执行工具；主模型可以直接处理文本和心算。需细化工具权限与直答能力的评分边界，不能将此项计作已确认产品缺陷。保留原自动判定。"
+    },
+    {
+      "caseId": "V2-004",
+      "variant": "three-lines",
+      "repeat": 3,
+      "automatedVerdict": "review",
+      "runIds": [
+        "cmvkb5nn701mnoh0ne61lyyve"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "我对照题目/发布资料检查，未发现该答案的关键结论错误；自动评审协议未通过，保留review，不转为自动PASS。"
+    },
+    {
+      "caseId": "V2-011",
+      "variant": "empty-one",
+      "repeat": 3,
+      "automatedVerdict": "fail",
+      "runIds": [
+        "cmvkb61zv01qeoh0n6qxogvuw"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "真实必要材料缺失且答案请求补充，任务状态为partial，与waiting_user要求不符；确认状态问题。"
+    },
+    {
+      "caseId": "V2-011",
+      "variant": "complete",
+      "repeat": 3,
+      "automatedVerdict": "review",
+      "runIds": [
+        "cmvkb6czl01rroh0nchi9xv6j"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "我对照题目/发布资料检查，未发现该答案的关键结论错误；自动评审协议未通过，保留review，不转为自动PASS。"
+    },
+    {
+      "caseId": "V2-020",
+      "variant": "travel",
+      "repeat": 3,
+      "automatedVerdict": "review",
+      "runIds": [
+        "cmvkb6tu201ufoh0nyqupm17r"
+      ],
+      "reviewer": "implementation assistant, not independent human review",
+      "note": "我对照题目/发布资料检查，未发现该答案的关键结论错误；自动评审协议未通过，保留review，不转为自动PASS。"
+    }
+  ]
+}

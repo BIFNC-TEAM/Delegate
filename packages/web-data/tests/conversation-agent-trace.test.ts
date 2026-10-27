@@ -4,11 +4,11 @@ import { mergeGenerationCompletionContext, resolveGenerationAgentVariant } from 
 
 describe("generation Agent trace persistence", () => {
   it("pins running versions across configuration changes and keeps existing PI work on PI", () => {
-    expect(resolveGenerationAgentVariant({}, true)).toBe("v2");
-    expect(resolveGenerationAgentVariant({}, false)).toBe("pi");
-    expect(resolveGenerationAgentVariant({ agentVariant: "v2" }, false)).toBe("v2");
-    expect(resolveGenerationAgentVariant({ piExecutionProtocol: "goal_v2" }, true)).toBe("pi");
-    expect(resolveGenerationAgentVariant({ agentVariant: "pi" }, true)).toBe("pi");
+    expect(resolveGenerationAgentVariant({})).toBe("v2");
+    expect(resolveGenerationAgentVariant({})).toBe("v2");
+    expect(resolveGenerationAgentVariant({ agentVariant: "v2" })).toBe("v2");
+    expect(resolveGenerationAgentVariant({ piExecutionProtocol: "goal_v2" })).toBe("pi");
+    expect(resolveGenerationAgentVariant({ agentVariant: "pi" })).toBe("pi");
   });
   it("preserves Pi operational timing evidence alongside the runtime outcome", () => {
     const merged = mergeGenerationCompletionContext(

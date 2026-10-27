@@ -40,7 +40,7 @@ The current product wedge is intentionally narrow:
 
 Delegate currently includes these working surfaces and services:
 
-- **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
+- **Marketing site** in `apps/site`, using the approved blue service-network design in `DESIGN.md`, with bilingual interactive demos and session-aware account navigation.
 - **Public representative app** in `apps/reps`, including representative profiles, service packages, web chat, WeChat checkout, and signed public-chat session state.
 - **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, representative Memory configuration, workflow state, and Owner profile, identity-security, and Dashboard notification settings. Public knowledge authoring and publishing remain in Knowledge Library.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
@@ -349,6 +349,10 @@ Then open:
 - Site: `http://localhost:3100`
 - Dashboard: `http://localhost:3101/dashboard?view=overview`
 - Representative: `http://localhost:3102/reps/lin-founder-rep`
+
+Keep `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_DASHBOARD_URL`, `NEXT_PUBLIC_REPRESENTATIVE_URL`, and the registered authentication callback URLs aligned with these ports. The dashboard only exposes website session state to its configured site origin. When reusing the existing Docker dashboard on port 3001, use the configured site origin (normally port 3000), rather than an unrelated preview port.
+
+Run the website regression tests with `pnpm --filter @delegate/site test`. Signed-in visitors see their account menu and direct representative-management links; the page rechecks the session when they return from another tab or restore the page.
 
 For database-only local development:
 

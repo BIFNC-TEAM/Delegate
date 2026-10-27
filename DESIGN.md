@@ -251,6 +251,17 @@
 - **Trust disclosure:** Explain AI authorship, public knowledge use, privacy limits, and human-confirmation requirements in concise visitor language. Detailed policies may expand from a compact trust section rather than occupying the primary task flow.
 - **Public resources:** Show only actual visitor-ready FAQs, materials, policies, and deliverables. Hide empty categories and zero-count operational states; knowledge provenance belongs primarily on the answer that used it.
 
+## Marketing Website — October 2026 Reference
+- **Approved scope:** The owner explicitly approved matching `Delegate官网.html` on 2026-10-27. The following rules override the earlier shared visual rules **only for `apps/site`**; Dashboard and public representative pages retain their existing system.
+- **Direction:** White, blue-accented service network website. Centered editorial hero followed by a paired conversation/owner-decision product stage, a relationship diagram, interactive service journey, creation guide, and FAQ.
+- **Typography:** Inter, Microsoft YaHei, PingFang SC, Arial, sans-serif, using installed fonts with no remote font loading. Hero uses responsive 48–76px display type, section headings 34–48px, body 16px, supporting text 12–14px.
+- **Palette:** Ink `#15171C`, muted `#6E7480`, blue `#2463EB`, strong blue `#1249C7`, pale blue `#E4EFFF`, canvas `#FFFFFF`, secondary surface `#F5F7FA`, rules `#E5E7EC`. Main calls to action use dark ink; blue identifies service and decision interactions.
+- **Geometry:** Content width 1240px, navigation up to 1400px; desktop gutters 48px, mobile 20px. Pill CTAs, 14px product panels, 23–24px hero/journey modules. Desktop uses two-column demonstrations; mobile stacks them.
+- **Motion:** Directional network flow with an explicit pause control; short transitions and optional conversation replay. Honor reduced motion. Content must be visible without animation or JavaScript.
+- **Product truth:** Preserve real account/session, admission-mode, locale, and service URL routing. Marketing approvals, quotes, service delivery and configuration are local examples, labeled as such, with no business writes. Supplied policy texts remain clearly marked review drafts.
+- **Assets:** Use the reference's supplied AI role portraits as optimized local images, with illustrative labeling. Do not embed the original multi-megabyte data URLs or its prototype authentication scripts.
+- **Accessibility:** Keyboard-operable controls, visible focus, native disclosure/dialog behavior, text status, and mobile targets of at least 44px. All Chinese marketing interactions have English counterparts.
+
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
@@ -269,3 +280,5 @@
 | 2026-07-28 | Defined truthful Owner Settings | Limits Settings to real Owner profile, Logto security truth, and Dashboard reminder preferences; establishes independent saves, owner-scoped audit, idempotency, and honest unavailable states. |
 | 2026-08-03 | Replaced Representative Development with Memory System | Separates governed Contact Memory and Representative Experience from public knowledge, which remains owned by Knowledge Library; establishes isolation, candidate safety, staged recall, 60-second deletion, reconciliation, permissions, and public-disclosure boundaries. |
 | 2026-08-06 | Moved Memory into representative configuration and automated policy | Removes the standalone Memory System and human memory-approval workflow while retaining fail-closed candidate isolation, versioning, audit, deletion, usage, and reconciliation controls; keeps Knowledge Library and generic Approvals as separate products. |
+
+| 2026-10-27 | Approved reference-based marketing website | Owner approved the blue, centered `Delegate官网.html` direction for `apps/site`; Dashboard and representative UI remain unchanged. |

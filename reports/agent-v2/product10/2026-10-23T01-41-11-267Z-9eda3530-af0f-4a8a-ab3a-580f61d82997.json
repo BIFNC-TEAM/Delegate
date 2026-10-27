@@ -1,0 +1,521 @@
+{
+  "version": 1,
+  "scope": {
+    "origin": "http://127.0.0.1:13002",
+    "slug": "qa-agent-v2-product10-20261023",
+    "ownerId": "qa_agent_v2_product10_20261023",
+    "marker": "PRODUCT10_FIXTURE_V1"
+  },
+  "mode": "real-product-api-sse-db",
+  "syntheticBusinessData": true,
+  "deployment": [
+    {
+      "name": "delegate-agent-test-reps-1",
+      "id": "9cf76878bc061b40d2dcba34317cd914d88098502b62a40b5f505cf593df9185",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-conversation-worker-1",
+      "id": "239953b5cb9423a90250e589f1e0d4e574f645137db68ee53f5f760007e9910b",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-compute-broker-1",
+      "id": "a7369226dbe9df05cad7e56b1df65bbf6151af2611e1243ae1191d49730aaac9",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    }
+  ],
+  "harnessSha256": {
+    "cli.ts": "c76017dab20c992f7dc0e21ee63dbb5300aa5e21dd230c7229a6ecd4d2cd59db",
+    "client.ts": "407546f9729e05f84582485c016e2fd91b6ec9a3b869c87607b53a2227c141d7",
+    "store.ts": "a310cedbd058102504d1e37b7b3fa96dca1b4090b09512ec8775cec961a8b71a",
+    "scope.ts": "4b4a737fc6f374a480ebc15efef89e4c2e6ebf1da237fde782bdf7125b2c51bb",
+    "cases.ts": "5fa56b2394a98fee36e1b721bba86de2befe20bfa322fb06a507c5af20838fd3",
+    "deployment.ts": "76709c80af068169da688da5cb65d83a6ec6023e4ead75811801d71226510fd9",
+    "../semantic/engine.ts": "51879f6a4fb194335128ec1c59ba27f3c027c3289292fb30f2a3b2b07dc042e6"
+  },
+  "judgePromptSha256": "63f15ef1b701e83c35d3f180b13899e25bb2ae8beffbef59f44ef72383ff7bbb",
+  "judgeModel": "qwen3.8-27b",
+  "sameModelJudgeRequested": true,
+  "independentWeightsVerified": false,
+  "definitions": [
+    {
+      "id": "V2-013",
+      "title": "补充城市恢复",
+      "variants": [
+        {
+          "id": "resume",
+          "steps": [
+            {
+              "question": "今天气温多少？",
+              "status": "waiting_user",
+              "tools": "none"
+            },
+            {
+              "question": "上海",
+              "status": "completed",
+              "tools": "weather"
+            }
+          ],
+          "criteria": [
+            {
+              "id": "resume",
+              "rule": "对话第一轮询问城市，用户补上海后继续原天气任务；实际天气结论由本轮工具回执支持，不虚构温度、日期或再次询问已给出的城市。没有实际天气回执时应待复核。"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "repeats": 1,
+  "expectedRows": 1,
+  "rows": [
+    {
+      "caseId": "V2-013",
+      "variant": "resume",
+      "repeat": 1,
+      "startedAt": "2026-10-23T01:41:11.934Z",
+      "verdict": "pass",
+      "observed": [
+        {
+          "runId": "cmvkb07vu00tgoh0ndhd954kf",
+          "conversationId": "cmvkb07vb00t8oh0ngkpnxqbb",
+          "versionId": "cmvkawznt00019kgzz6l1glkh",
+          "deliveryStatus": "COMPLETED",
+          "answer": "请问您想查询哪个城市或地区的气温？",
+          "input": "今天气温多少？",
+          "model": "qwen3.8-27b",
+          "traceAvailable": true,
+          "traceId": "1cbb92ef-165e-4f30-a27c-103e90098106",
+          "taskStatus": "waiting_user",
+          "taskId": "cmvkb07vu00tgoh0ndhd954kf",
+          "usage": {
+            "tokens": 5887,
+            "costUsd": null,
+            "activeMs": 1505.061167001724,
+            "attempts": 1,
+            "toolCalls": 0,
+            "modelTurns": 1,
+            "inputTokens": 5682,
+            "outputTokens": 205
+          },
+          "calls": [],
+          "modelCalls": 1,
+          "sources": [],
+          "knowledge": [],
+          "receipts": [],
+          "retrieval": null
+        },
+        {
+          "runId": "cmvkb09su00tzoh0nu6hxtfe9",
+          "conversationId": "cmvkb07vb00t8oh0ngkpnxqbb",
+          "versionId": "cmvkawznt00019kgzz6l1glkh",
+          "deliveryStatus": "COMPLETED",
+          "answer": "上海今天（10月23日）气温情况：\n\n- **当前**（09:30）：21.8°C，体感 22.2°C，多云，湿度 68%，风速 10.3 km/h 〔weather/openmeteo_get_forecast〕\n- **全天**：最高 23°C，最低 16.5°C 〔weather/openmeteo_get_forecast〕\n\n提醒：今天预计有降雨（累计约 26.3 mm，小雨级别），出门建议带伞 〔weather/openmeteo_get_forecast〕。",
+          "input": "上海",
+          "model": "qwen3.8-27b",
+          "traceAvailable": true,
+          "traceId": "890f1772-f2d4-4e6e-ae72-341bd865ef9d",
+          "taskStatus": "completed",
+          "taskId": "cmvkb07vu00tgoh0ndhd954kf",
+          "usage": {
+            "tokens": 28010,
+            "costUsd": null,
+            "activeMs": 11741.30442199856,
+            "attempts": 6,
+            "toolCalls": 2,
+            "modelTurns": 4,
+            "inputTokens": 27098,
+            "outputTokens": 912
+          },
+          "calls": [
+            {
+              "status": "ok",
+              "traceId": "890f1772-f2d4-4e6e-ae72-341bd865ef9d",
+              "attempts": 1,
+              "category": "mcp",
+              "toolName": "mcp_openmeteo_search_locations_2189d46655",
+              "requestId": "cmvkb09su00tzoh0nu6hxtfe9",
+              "sourceIds": [
+                "sha256:b5e6e76aa5f3afd08046165cd9cc84ed34823be3014343d39e8e083977defb22"
+              ],
+              "startedAt": "2026-10-23T01:41:15.702Z",
+              "durationMs": 4107.381584994495,
+              "toolCallId": "sha256:06227e1813a05f15725cbee050e72db0b4914e5980f6086aaffdb057ada6c864",
+              "outputBytes": 3358,
+              "argumentCount": 3
+            },
+            {
+              "status": "ok",
+              "traceId": "890f1772-f2d4-4e6e-ae72-341bd865ef9d",
+              "attempts": 1,
+              "category": "mcp",
+              "toolName": "mcp_openmeteo_get_forecast_82eb8349a7",
+              "requestId": "cmvkb09su00tzoh0nu6hxtfe9",
+              "sourceIds": [
+                "sha256:6aecaad9d493b4bd8cf79720c451df8924137de4a3bb660765e8d6e0797ccfd3"
+              ],
+              "startedAt": "2026-10-23T01:41:21.078Z",
+              "durationMs": 2070.913792997599,
+              "toolCallId": "sha256:002912e1c385cbc309495eabad23aceb9660fb2cb9ec7833c7b16e85ce5aa78b",
+              "outputBytes": 4118,
+              "argumentCount": 6
+            }
+          ],
+          "modelCalls": 3,
+          "sources": [
+            {
+              "id": "sha256:6aecaad9d493b4bd8cf79720c451df8924137de4a3bb660765e8d6e0797ccfd3",
+              "channel": "mcp"
+            }
+          ],
+          "knowledge": [],
+          "receipts": [
+            {
+              "id": "pa_27edf31a8b049ea436cd3a5b77932a71f43c624a432b04ac",
+              "status": "SUCCEEDED",
+              "binding": "weather",
+              "transportOutcome": "response_received",
+              "semanticOutcome": "succeeded",
+              "finishedAt": "2026-10-23T01:41:19.747Z",
+              "artifacts": [
+                {
+                  "id": "artifact_3744e931c2a863ca",
+                  "mimeType": "application/json; charset=utf-8",
+                  "sizeBytes": 2790
+                }
+              ]
+            },
+            {
+              "id": "pa_2d937f47cb86688c14387b7143d066406e9a389f44c7298e",
+              "status": "SUCCEEDED",
+              "binding": "weather",
+              "transportOutcome": "response_received",
+              "semanticOutcome": "succeeded",
+              "finishedAt": "2026-10-23T01:41:23.063Z",
+              "artifacts": [
+                {
+                  "id": "artifact_190de1c4dadb0838",
+                  "mimeType": "application/json; charset=utf-8",
+                  "sizeBytes": 3523
+                }
+              ]
+            }
+          ],
+          "retrieval": null
+        }
+      ],
+      "hard": [
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkawznt00019kgzz6l1glkh",
+          "expected": "cmvkawznt00019kgzz6l1glkh"
+        },
+        {
+          "id": "real-v2-trace",
+          "pass": true,
+          "actual": true,
+          "expected": true
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "waiting_user",
+          "expected": "waiting_user"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "no-business-tools",
+          "pass": true,
+          "actual": [],
+          "expected": []
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "ffbeacfb05750358a116b77b7c1ce215a156312ea093b815c84e87cd7aee3526",
+          "expected": "ffbeacfb05750358a116b77b7c1ce215a156312ea093b815c84e87cd7aee3526"
+        },
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkawznt00019kgzz6l1glkh",
+          "expected": "cmvkawznt00019kgzz6l1glkh"
+        },
+        {
+          "id": "real-v2-trace",
+          "pass": true,
+          "actual": true,
+          "expected": true
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "completed",
+          "expected": "completed"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [
+            "mcp_openmeteo_search_locations_2189d46655",
+            "mcp_openmeteo_get_forecast_82eb8349a7"
+          ],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "forecast-executed",
+          "pass": true,
+          "actual": [
+            {
+              "status": "ok",
+              "traceId": "890f1772-f2d4-4e6e-ae72-341bd865ef9d",
+              "attempts": 1,
+              "category": "mcp",
+              "toolName": "mcp_openmeteo_search_locations_2189d46655",
+              "requestId": "cmvkb09su00tzoh0nu6hxtfe9",
+              "sourceIds": [
+                "sha256:b5e6e76aa5f3afd08046165cd9cc84ed34823be3014343d39e8e083977defb22"
+              ],
+              "startedAt": "2026-10-23T01:41:15.702Z",
+              "durationMs": 4107.381584994495,
+              "toolCallId": "sha256:06227e1813a05f15725cbee050e72db0b4914e5980f6086aaffdb057ada6c864",
+              "outputBytes": 3358,
+              "argumentCount": 3
+            },
+            {
+              "status": "ok",
+              "traceId": "890f1772-f2d4-4e6e-ae72-341bd865ef9d",
+              "attempts": 1,
+              "category": "mcp",
+              "toolName": "mcp_openmeteo_get_forecast_82eb8349a7",
+              "requestId": "cmvkb09su00tzoh0nu6hxtfe9",
+              "sourceIds": [
+                "sha256:6aecaad9d493b4bd8cf79720c451df8924137de4a3bb660765e8d6e0797ccfd3"
+              ],
+              "startedAt": "2026-10-23T01:41:21.078Z",
+              "durationMs": 2070.913792997599,
+              "toolCallId": "sha256:002912e1c385cbc309495eabad23aceb9660fb2cb9ec7833c7b16e85ce5aa78b",
+              "outputBytes": 4118,
+              "argumentCount": 6
+            }
+          ],
+          "expected": "successful forecast tool"
+        },
+        {
+          "id": "task-resumed",
+          "pass": true,
+          "actual": [
+            "cmvkb07vu00tgoh0ndhd954kf",
+            "cmvkb07vb00t8oh0ngkpnxqbb"
+          ],
+          "expected": [
+            "cmvkb07vu00tgoh0ndhd954kf",
+            "cmvkb07vb00t8oh0ngkpnxqbb"
+          ]
+        },
+        {
+          "id": "cumulative-budget",
+          "pass": true,
+          "actual": {
+            "tokens": 28010,
+            "costUsd": null,
+            "activeMs": 11741.30442199856,
+            "attempts": 6,
+            "toolCalls": 2,
+            "modelTurns": 4,
+            "inputTokens": 27098,
+            "outputTokens": 912
+          },
+          "expected": "cumulative usage increases"
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "3b1ec2b58a6c81f8fe85f6bf70d140e8ad0350ffa5aa65f595cbb1321f238fd5",
+          "expected": "3b1ec2b58a6c81f8fe85f6bf70d140e8ad0350ffa5aa65f595cbb1321f238fd5"
+        }
+      ],
+      "admissions": [
+        {
+          "status": 202,
+          "runId": "cmvkb07vu00tgoh0ndhd954kf"
+        },
+        {
+          "status": 202,
+          "runId": "cmvkb09su00tzoh0nu6hxtfe9"
+        }
+      ],
+      "toolEvidence": [
+        {
+          "executionId": "pa_27edf31a8b049ea436cd3a5b77932a71f43c624a432b04ac",
+          "id": "artifact_3744e931c2a863ca",
+          "sha256": "4cff4b5a1cdac489ae40864f3d9b61aafb5619c102482b6d55e1fd2608c06acc",
+          "excerpt": "{\n  \"binding\": {\n    \"id\": \"cmvkahawi000w9kppanu0qvuj\",\n    \"slug\": \"weather\",\n    \"displayName\": \"只读天气\",\n    \"serverUrl\": \"https://open-meteo.caseyjhand.com/mcp\",\n    \"transportKind\": \"streamable_http\",\n    \"toolName\": \"openmeteo_search_locations\",\n    \"allowedToolNames\": [\n      \"openmeteo_search_locations\",\n      \"openmeteo_get_forecast\"\n    ],\n    \"availableToolNames\": [\n      \"openmeteo_search_locations\",\n      \"openmeteo_get_elevation\",\n      \"openmeteo_get_forecast\",\n      \"openmeteo_get_historical\",\n      \"openmeteo_get_marine\",\n      \"openmeteo_get_air_quality\",\n      \"openmeteo_get_ensemble\",\n      \"openmeteo_get_flood\",\n      \"openmeteo_get_climate\",\n      \"openmeteo_dataframe_query\",\n      \"openmeteo_dataframe_describe\"\n    ],\n    \"maxRetries\": 0,\n    \"retryBackoffMs\": 0,\n    \"attempts\": 1\n  },\n  \"arguments\": {\n    \"name\": \"上海\",\n    \"language\": \"zh\",\n    \"count\": 3\n  },\n  \"result\": {\n    \"content\": [\n      {\n        \"type\": \"text\",\n        \"text\": \"## Geocoding results for search\\n**上海** (CN) — 中国, 上海市, 上海市 — 31.22222, [REDACTED_PII] | 12m | pop. 24,874,500\\n  id: 1796236 | timezone: Asia/Shanghai | feature: PPLA\\n**上海** (CN) — 中国, 浙江, 绍兴市 — 29.32955, [REDACTED_PII] | 321m\\n  id: 7072498 | timezone: Asia/Shanghai | feature: PPL\\n**上海** (CN) — 中国, 云南, 丽江市 — 27.0741, 100.107 | 2515m\\n  id: 10138757 | timezone: Asia/Shanghai | feature: PPL\\n\\n_3 results — Weather data by Open-Meteo.com_\"\n      }\n    ],\n    \"structuredContent\": {\n      \"results\": [\n        {\n          \"id\": 1796236,\n          \"name\": \"上海\",\n          \"latitude\": 31.22222,\n          \"longitude\": 121.45806,\n          \"elevation\": 12,\n          \"timezone\": \"Asia/Shanghai\",\n          \"country\": \"中国\",\n          \"country_code\": \"CN\",\n          \"admin1\": \"上海市\",\n          \"admin2\": \"上海市\",\n          \"population\": 24874500,\n          \"feature_code\": \"PPLA\"\n        },\n        {\n          \"id\": 7072498,\n          \"name\": \"上海\",\n          \"latitude\": 29.32955,\n          \"longitude\": 121.05804,\n          \"elevation\": 321,\n          \"timezone\": \"Asia/Shanghai\",\n          \"country\": \"中国\",\n          \"country_code\": \"CN\",\n          \"admin1\": \"浙江\",\n          \"admin2\": \"绍兴市\",\n          \"population\": null,\n          \"feature_code\": \"PPL\"\n        },\n        {\n          \"id\": 10138757,\n          \"name\": \"上海\",\n          \"latitude\": 27.0741,\n          \"longitude\": 100.107,\n          \"elevation\": 2515,\n          \"timezone\": \"Asia/Shanghai\",\n          \"country\": \"中国\",\n          \"country_code\": \"CN\",\n          \"admin1\": \"云南\",\n          \"admin2\": \"丽江市\",\n          \"population\": null,\n          \"feature_code\": \"PPL\"\n        }\n      ],\n      \"count\": 3\n    }\n  }\n}",
+          "truncated": false
+        },
+        {
+          "executionId": "pa_2d937f47cb86688c14387b7143d066406e9a389f44c7298e",
+          "id": "artifact_190de1c4dadb0838",
+          "sha256": "67a7fa2b24868eea1eb22027553f0cdbc9e57dd4cf64d937947c22a9a275f949",
+          "excerpt": "{\n  \"binding\": {\n    \"id\": \"cmvkahawi000w9kppanu0qvuj\",\n    \"slug\": \"weather\",\n    \"displayName\": \"只读天气\",\n    \"serverUrl\": \"https://open-meteo.caseyjhand.com/mcp\",\n    \"transportKind\": \"streamable_http\",\n    \"toolName\": \"openmeteo_get_forecast\",\n    \"allowedToolNames\": [\n      \"openmeteo_search_locations\",\n      \"openmeteo_get_forecast\"\n    ],\n    \"availableToolNames\": [\n      \"openmeteo_search_locations\",\n      \"openmeteo_get_elevation\",\n      \"openmeteo_get_forecast\",\n      \"openmeteo_get_historical\",\n      \"openmeteo_get_marine\",\n      \"openmeteo_get_air_quality\",\n      \"openmeteo_get_ensemble\",\n      \"openmeteo_get_flood\",\n      \"openmeteo_get_climate\",\n      \"openmeteo_dataframe_query\",\n      \"openmeteo_dataframe_describe\"\n    ],\n    \"maxRetries\": 0,\n    \"retryBackoffMs\": 0,\n    \"attempts\": 1\n  },\n  \"arguments\": {\n    \"latitude\": 31.22222,\n    \"longitude\": 121.45806,\n    \"timezone\": \"Asia/Shanghai\",\n    \"current_variables\": [\n      \"temperature_2m\",\n      \"apparent_temperature\",\n      \"weather_code\",\n      \"precipitation\",\n      \"wind_speed_10m\",\n      \"relative_humidity_2m\"\n    ],\n    \"daily_variables\": [\n      \"temperature_2m_max\",\n      \"temperature_2m_min\",\n      \"precipitation_sum\",\n      \"weather_code\"\n    ],\n    \"forecast_days\": 1\n  },\n  \"result\": {\n    \"content\": [\n      {\n        \"type\": \"text\",\n        \"text\": \"## Weather forecast\\n**Location:** [REDACTED_PII], [REDACTED_PII] | **Elevation:** 7m\\n**Timezone:** Asia/Shanghai | **utc_offset_seconds:** 28800\\n**Records:** 1 | **Truncated:** false\\n\\n**Current units:** time: iso8601 | interval: seconds | temperature_2m: °C | apparent_temperature: °C | weather_code: wmo code | precipitation: mm | wind_speed_10m: km/h | relative_humidity_2m: %\\n**Daily units:** time: iso8601 | temperature_2m_max: °C | temperature_2m_min: °C | precipitation_sum: mm | weather_code: wmo code\\n\\n### Current conditions\\n**2026-10-23T09:30** (interval: 900s) — temperature_2m: 21.8 | apparent_temperature: 22.2 | weather_code: 2 | precipitation: 0 | wind_speed_10m: 10.3 | relative_humidity_2m: 68\\n\\n### Daily summary (1 records)\\n**2026-10-23** — temperature_2m_max: 23 | temperature_2m_min: 16.5 | precipitation_sum: 26.3 | weather_code: 81\\n\\n_Weather data by Open-Meteo.com_\"\n      }\n    ],\n    \"structuredContent\": {\n      \"latitude\": 31.177504,\n      \"longitude\": 121.46255,\n      \"elevation\": 7,\n      \"timezone\": \"Asia/Shanghai\",\n      \"utc_offset_seconds\": 28800,\n      \"record_count\": 1,\n      \"current\": {\n        \"time\": \"2026-10-23T09:30\",\n        \"interval\": 900,\n        \"temperature_2m\": 21.8,\n        \"apparent_temperature\": 22.2,\n        \"weather_code\": 2,\n        \"precipitation\": 0,\n        \"wind_speed_10m\": 10.3,\n        \"relative_humidity_2m\": 68\n      },\n      \"daily\": [\n        {\n          \"time\": \"2026-10-23\",\n          \"temperature_2m_max\": 23,\n          \"temperature_2m_min\": 16.5,\n          \"precipitation_sum\": 26.3,\n          \"weather_code\": 81\n        }\n      ],\n      \"current_units\": {\n        \"time\": \"iso8601\",\n        \"interval\": \"seconds\",\n        \"temperature_2m\": \"°C\",\n        \"apparent_temperature\": \"°C\",\n        \"weather_code\": \"wmo code\",\n        \"precipitation\": \"mm\",\n        \"wind_speed_10m\": \"km/h\",\n        \"relative_humidity_2m\": \"%\"\n      },\n      \"daily_units\": {\n        \"time\": \"iso8601\",\n        \"temperature_2m_max\": \"°C\",\n        \"temperature_2m_min\": \"°C\",\n        \"precipitation_sum\": \"mm\",\n        \"weather_code\": \"wmo code\"\n      },\n      \"truncated\": false\n    }\n  }\n}",
+          "truncated": false
+        }
+      ],
+      "semantic": {
+        "verdict": "pass",
+        "calls": 1,
+        "durationMs": 1666.5979580000003,
+        "usage": {
+          "inputTokens": 6354,
+          "outputTokens": 249,
+          "totalTokens": 6603,
+          "costUsd": null
+        },
+        "inputSha256": "8d034f66def036cd9ef0263de2911f119a7daf8fe330bbce045ed14677ffd5a8",
+        "decision": {
+          "verdict": "pass",
+          "checks": [
+            {
+              "id": "resume",
+              "verdict": "pass",
+              "reason": "回答先询问城市，用户补充上海后继续天气任务；给出的当前与全天温度、日期、降雨量均与工具回执一致，未虚构或再次询问城市。",
+              "answerQuote": "上海今天（10月23日）气温情况：\n\n- **当前**（09:30）：21.8°C，体感 22.2°C，多云，湿度 68%，风速 10.3 km/h 〔weather/openmeteo_get_forecast〕\n- **全天**：最高 23°C，最低 16.5°C 〔weather/openmeteo_get_forecast〕\n\n提醒：今天预计有降雨（累计约 26.3 mm，小雨级别），出门建议带伞 〔weather/openmeteo_get_forecast〕。",
+              "evidenceIds": [
+                "actual-execution"
+              ]
+            }
+          ]
+        }
+      },
+      "finishedAt": "2026-10-23T01:41:26.878Z"
+    }
+  ],
+  "summary": [
+    {
+      "id": "V2-013",
+      "variants": [
+        "resume"
+      ],
+      "expectedRows": 1,
+      "actualRows": 1,
+      "verdict": "pass"
+    }
+  ],
+  "finalSafety": {
+    "noNewLeases": true,
+    "noNewBrowserSessions": true,
+    "pinnedVersion": true
+  },
+  "fixture": {
+    "representativeId": "cmvkahat100019kpprucnylv9",
+    "versionId": "cmvkawznt00019kgzz6l1glkh",
+    "publishedAt": "2026-10-23T01:38:41.417Z",
+    "identity": {
+      "tone": "清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。",
+      "avatarUrl": null,
+      "languages": [
+        "zh-CN",
+        "en"
+      ],
+      "displayName": "星河公开资料助手",
+      "roleSummary": "星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。",
+      "ownerId": "qa_agent_v2_product10_20261023",
+      "ownerName": "星河科技（合成验收）",
+      "agentBehavior": {
+        "version": 1,
+        "answerScope": "open_public",
+        "knowledgePolicy": "owner_facts",
+        "commitmentPolicy": "information_only"
+      }
+    },
+    "resources": [
+      {
+        "resourceKey": "identity/profile.md",
+        "contentHash": "a1328493513d68505ff016b91da80873d14d31b4a7ead8c51b6f297ceae156d1",
+        "safeText": "# 星河公开资料助手\nTagline: 星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。\nTone: 清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。\nLanguages: zh-CN, en\nPublic mode: true\nHuman in loop: false\nGroup activation: reply_or_mention\n## Identity summary\nPRODUCT10_FIXTURE_V1：星河科技是合成测试企业。\n## Skills\n- faq_reply\n- lead_qualify\n- intake_collect\n- quote_request_collect\n- material_delivery\n- scheduling_request\n- human_handoff\n- paid_unlock\n## Handoff prompt\n当前未接入真人接待。",
+        "citationTitle": "星河公开资料助手"
+      },
+      {
+        "resourceKey": "faq/index.md",
+        "contentHash": "3a80b1c867cf3794e677302468fa61b4fc77d3730927bbe97d66caaee7c61f98",
+        "safeText": "# FAQ",
+        "citationTitle": "FAQ"
+      },
+      {
+        "resourceKey": "materials/index.md",
+        "contentHash": "8fcefcb416e007d1bbb8d3ac78a72369f67c08b3ba79cabc7ba57fb9e890898d",
+        "safeText": "# Materials",
+        "citationTitle": "Materials"
+      },
+      {
+        "resourceKey": "policies/index.md",
+        "contentHash": "f56a758433b77b4adf4e5d3def2b7fb5cbf7428c93fa6a455c55c88915998f42",
+        "safeText": "# Policies\n# Policies\n## 星河科技年假制度（合成）\n版本2026.1，2026-01-01生效；正式员工每年年假12天，试用期不适用。\n## 星河科技差旅制度（合成）\n版本2026.1，2026-01-01生效；国内出差住宿报销上限每晚500元，按实际发生金额，不超过上限；申请需住宿发票和出差日期。未提供审批人或时限。\n## Conversation contract\n- Free reply limit: 1000\n- Handoff window: 24 hours\n- Tools and external side effects require capability-policy evaluation.",
+        "citationTitle": "Policies"
+      }
+    ],
+    "capabilityModes": {
+      "exec": "deny",
+      "read": "deny",
+      "write": "deny",
+      "process": "deny",
+      "browser": "deny",
+      "mcp": "allow"
+    },
+    "mcp": [
+      {
+        "slug": "weather",
+        "allowedToolNames": [
+          "openmeteo_search_locations",
+          "openmeteo_get_forecast"
+        ],
+        "tools": [
+          {
+            "name": "openmeteo_search_locations",
+            "description": "Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population. Required prerequisite for name-based queries — all weather tools take latitude/longitude, not place names. Search by a bare place name (city, region, or landmark); never fold a qualifier into it — pass \"Baoding\", not \"Baoding Hebei\", and \"Paris\", not \"Paris, France\". To disambiguate places that share a name, set the country input (ISO 3166-1 alpha-2, e.g. \"US\") and/or read the admin1 and country fields on each ranked result — admin1 is a result field for choosing among matches, not a search input. Returns up to 10 matches ranked by population/relevance."
+          },
+          {
+            "name": "openmeteo_get_forecast",
+            "description": "Weather forecast for coordinates: hourly and/or daily variables for up to 16 days ahead, with optional past_days (up to 92) for recent history. Use past_days instead of openmeteo_get_historical for dates within the last 1–5 days, since the archive’s ERA5 components lag by up to ~5 days. Returns per-timestamp records — each hourly entry contains a \"time\" field (ISO 8601) plus one key per requested variable; each daily entry contains a \"time\" field (YYYY-MM-DD) plus requested variables. Common hourly variables: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover, uv_index, apparent_temperature, precipitation_probability, weather_code, surface_pressure, visibility, wind_direction_10m, wind_gusts_10m, dew_point_2m. Common daily variables: temperature_2m_max, temperature_2m_min, precipitation_sum, wind_speed_10m_max, sunrise, sunset, uv_index_max, precipitation_hours, weather_code. Set current_variables for conditions at this instant — Open-Meteo serves those from 15-minute model data, which is more precise than picking the nearest hourly row, and the response carries a current object plus a current_units map. A wide window — a large past_days plus many hourly variables — produces thousands of records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled they return a bounded preview instead. At least one of current_variables, hourly_variables, or daily_variables is required."
+          }
+        ]
+      },
+      {
+        "slug": "public_search",
+        "allowedToolNames": [
+          "search_pro"
+        ],
+        "tools": [
+          {
+            "name": "search_pro",
+            "description": "标准搜索接口提供增强的网络开放域的实时搜索能力，通过大模型优化与多数据源融合的技术，查询干净、准确、多样、高质量的结果。"
+          }
+        ]
+      }
+    ],
+    "sandboxLeases": 0,
+    "browserSessions": 0
+  },
+  "judgeCalls": 1,
+  "judgeTokenBudgetConsumed": 6603,
+  "limitations": "Ten-case product batch with synthetic business fixtures, real RAG and MCP. No cloud sandbox tests. Reference data and observed citations are separate. A model judgment is fallible. Does not update historical 100-case PASS labels or certify performance."
+}

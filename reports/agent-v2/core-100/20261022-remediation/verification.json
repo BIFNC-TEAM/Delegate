@@ -1,0 +1,87 @@
+{
+  "batch": "20261022-remediation",
+  "branch": "codex/agent-v2-cleanup",
+  "baseCommit": "7588e19",
+  "workingTreeUncommitted": true,
+  "model": "qwen3.8-27b",
+  "piVersion": "0.85.1",
+  "mainImage": "delegate-agent-v2:cleanup-20261020-664905c",
+  "isolatedRunningImage": "delegate-agent-v2:remediation-20261022-r3",
+  "builtNotAppliedImage": "delegate-agent-v2:remediation-20261022-r4",
+  "lastPromptChangeBuilt": false,
+  "mainState": {
+    "mainContainerIdsUnchanged": true,
+    "mainContainers": {
+      "delegate-reps-1": "688e65a7f880455a9045ecc971ce1acaffa192fb435503eaa4f2f1c3cd8268d7",
+      "delegate-conversation-worker-1": "aeee7eb8bf4c8a7e11fe9f635ef01b0730e8554f35ca54e8f8810e4f0c0bfa4c",
+      "delegate-compute-broker-1": "63c6e90648b7065f4296d5f7dc68bd9e84b7f5e9fae5cfef7edb0581e1c774c7",
+      "delegate-bot-1": "fe05a5f3508bee7fb7fc3a3dd666daac019a483ae415e3f80769792abc3fcc7d"
+    },
+    "activeRunCheck": {
+      "exitCode": 0,
+      "count": 0
+    }
+  },
+  "logs": {
+    "agent-preserved-final.log": {
+      "sha256": "638d64917647bc9002636c5eafd64d99a48af000d14cce3ff456a019000cdc6e",
+      "passed": 228,
+      "skipped": 0
+    },
+    "workspace-preserved-final.log": {
+      "sha256": "0ad06a6f99ed6afafd1ad225c8a94e3d5226fc9bc39a68421fa5349f08e786c1",
+      "passed": 3469,
+      "skipped": 295
+    },
+    "entitlements-final.log": {
+      "sha256": "d70da3ee5494ff99c1d4b2f0ed6dce46387a80f76e22888ae988a1a457ccac56",
+      "passed": 16,
+      "skipped": 0
+    },
+    "cutover-pg16.log": {
+      "sha256": "38198b0bfaef47e7eef86204660fd187a83cc28f516ec70813137edbd82fc675",
+      "passed": 64,
+      "skipped": 1
+    },
+    "http-classification-tests.log": {
+      "sha256": "f05082ac25a92ecf552ce3f6f843b650b114127ae0e947406fb051612aea78a9",
+      "passed": 107,
+      "skipped": 0
+    }
+  },
+  "workspaceTasks": {
+    "successful": 27,
+    "total": 27,
+    "cacheHits": 23
+  },
+  "sourceSha256": {
+    "apps/conversation-worker/src/agent-capabilities.ts": "bebb79a175779bec2f2448cf63c9b4c8a049d774a2cb7f8b0316bdc99737056d",
+    "apps/conversation-worker/tests/agent-capabilities.test.ts": "7e5461e47743d35d0dc93f7b8f74a8b2a29c3652e88f6793cfbad5ab0e861e80",
+    "packages/model-runtime/src/v2/prompt.ts": "124b51e258633e809d63828949b55e9136b1be5c87ad10a5742d27fd735d80d0",
+    "packages/model-runtime/src/v2/runtime.ts": "e85a40c22343d80292567e8c8dd475e486c148e5c43c8a7bbe855f724bda75fc",
+    "packages/model-runtime/src/v2/types.ts": "d7e997fd8ba41623343e08a152cc68e9169858fd04b62ac9bee924c3543c0076",
+    "packages/model-runtime/tests/v2-runtime.test.ts": "f1db7a6f0d42845d4d85fc4a5cde470f4b90f29ae78786966f288eb4d64699a2",
+    "packages/web-data/src/conversation-platform.ts": "dfaff4a187db39797724065d4e939134ed35c67960691bbf93995709efe7151c",
+    "packages/web-data/src/prisma-write-conflict-retry.ts": "c8931e4f8656ce4078e642ba9b58f765a93548e565b0999ae0a9b7ef9ea1c0d7",
+    "packages/web-data/tests/conversation-generation-lease.test.ts": "db768a1d99f1a9b51ea09e56e201439c630279f7ead431041228736d7f0056ca",
+    "packages/web-data/tests/conversation-wallet-reservation.test.ts": "d271f52dfbd074d439b13c30135c0fbacd07623236c15abfa359a4369f37c4f9",
+    "packages/web-data/tests/postgres-service-entitlements.integration.test.ts": "23b9ee29883ebaa5dbc91564a6fb8b32992f84b741a3ab3a5421350d2cb29472",
+    "packages/web-data/tests/prisma-write-conflict-retry.test.ts": "77e4a4c5eac5c4dbc4e25e82532ecf195b98d08406989c3078c77e2bb0629a4b",
+    "apps/compute-broker/tests/billing-postgres.integration.test.ts": "61f013c23530600c177eb98bee82ac1da57301b3ef07e6030b983d5b1169cc1c"
+  },
+  "fixtureIndexSha256": "05f03819b9ae7e205aabebedf932b71268841f6d6c36837a96170dd893b3614e",
+  "costUsd": null,
+  "newCloudTestsPaused": true,
+  "credentialRotated": false,
+  "pushed": false,
+  "prCreated": false,
+  "reportValidation": {
+    "caseIds": 100,
+    "requirements": 63,
+    "observations": 425,
+    "fixtureHashesVerified": 24,
+    "relativeLinksValid": true,
+    "knownLocalSecretsAbsent": true,
+    "diffCheckPassed": true
+  }
+}

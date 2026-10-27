@@ -1,0 +1,589 @@
+{
+  "requirements": 63,
+  "completeRequirements": 1,
+  "completePercent": 1.59,
+  "caseCounts": {
+    "PASS": 13,
+    "NOT_RUN": 82,
+    "FAIL": 2,
+    "BLOCKED": 3
+  },
+  "requirementsDetail": [
+    {
+      "requirementId": "R01",
+      "cases": [
+        "V2-001",
+        "V2-002"
+      ],
+      "complete": true,
+      "status": "PASS"
+    },
+    {
+      "requirementId": "R02",
+      "cases": [
+        "V2-003",
+        "V2-004",
+        "V2-005"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R03",
+      "cases": [
+        "V2-006"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R04",
+      "cases": [
+        "V2-007",
+        "V2-008",
+        "V2-010",
+        "V2-011",
+        "V2-012"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R05",
+      "cases": [
+        "V2-008",
+        "V2-009",
+        "V2-012"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R06",
+      "cases": [
+        "V2-013",
+        "V2-014"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R07",
+      "cases": [
+        "V2-015",
+        "V2-016",
+        "V2-017"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R08",
+      "cases": [
+        "V2-018",
+        "V2-019",
+        "V2-095"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R09",
+      "cases": [
+        "V2-020",
+        "V2-021",
+        "V2-022"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R10",
+      "cases": [
+        "V2-023",
+        "V2-024",
+        "V2-025"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R11",
+      "cases": [
+        "V2-025"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R12",
+      "cases": [
+        "V2-026",
+        "V2-027",
+        "V2-028"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R13",
+      "cases": [
+        "V2-029",
+        "V2-030"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R14",
+      "cases": [
+        "V2-022",
+        "V2-031"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R15",
+      "cases": [
+        "V2-032",
+        "V2-083"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R16",
+      "cases": [
+        "V2-033",
+        "V2-034"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R17",
+      "cases": [
+        "V2-035",
+        "V2-036"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R18",
+      "cases": [
+        "V2-037"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R19",
+      "cases": [
+        "V2-038"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R20",
+      "cases": [
+        "V2-038",
+        "V2-077"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R21",
+      "cases": [
+        "V2-039",
+        "V2-044"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R22",
+      "cases": [
+        "V2-040",
+        "V2-041",
+        "V2-044"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R23",
+      "cases": [
+        "V2-042"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R24",
+      "cases": [
+        "V2-043",
+        "V2-049",
+        "V2-072",
+        "V2-073"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R25",
+      "cases": [
+        "V2-045",
+        "V2-046",
+        "V2-048"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R26",
+      "cases": [
+        "V2-047",
+        "V2-049"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R27",
+      "cases": [
+        "V2-047"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R28",
+      "cases": [
+        "V2-050",
+        "V2-051"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R29",
+      "cases": [
+        "V2-052",
+        "V2-053",
+        "V2-054"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R30",
+      "cases": [
+        "V2-055",
+        "V2-060"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R31",
+      "cases": [
+        "V2-056",
+        "V2-057",
+        "V2-058"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R32",
+      "cases": [
+        "V2-059",
+        "V2-060",
+        "V2-061"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R33",
+      "cases": [
+        "V2-054",
+        "V2-061",
+        "V2-071"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R34",
+      "cases": [
+        "V2-040",
+        "V2-062",
+        "V2-063",
+        "V2-064",
+        "V2-065"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R35",
+      "cases": [
+        "V2-066"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R36",
+      "cases": [
+        "V2-067"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R37",
+      "cases": [
+        "V2-018",
+        "V2-068",
+        "V2-092"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R38",
+      "cases": [
+        "V2-069"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R39",
+      "cases": [
+        "V2-070",
+        "V2-071"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R40",
+      "cases": [
+        "V2-022",
+        "V2-074"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R41",
+      "cases": [
+        "V2-075",
+        "V2-076"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R42",
+      "cases": [
+        "V2-077",
+        "V2-100"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R43",
+      "cases": [
+        "V2-078",
+        "V2-079",
+        "V2-096"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R44",
+      "cases": [
+        "V2-080",
+        "V2-100"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R45",
+      "cases": [
+        "V2-081",
+        "V2-083"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R46",
+      "cases": [
+        "V2-082"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R47",
+      "cases": [
+        "V2-084",
+        "V2-085"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R48",
+      "cases": [
+        "V2-086",
+        "V2-100"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R49",
+      "cases": [
+        "V2-086",
+        "V2-096"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R50",
+      "cases": [
+        "V2-087",
+        "V2-088",
+        "V2-089",
+        "V2-100"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R51",
+      "cases": [
+        "V2-090"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R52",
+      "cases": [
+        "V2-091"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R53",
+      "cases": [
+        "V2-092"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R54",
+      "cases": [
+        "V2-093",
+        "V2-094",
+        "V2-097"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R55",
+      "cases": [
+        "V2-096"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R56",
+      "cases": [
+        "V2-095"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R57",
+      "cases": [
+        "V2-093"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R58",
+      "cases": [
+        "V2-097"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R59",
+      "cases": [
+        "V2-069",
+        "V2-098"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R60",
+      "cases": [
+        "V2-001",
+        "V2-015",
+        "V2-026",
+        "V2-099"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R61",
+      "cases": [
+        "V2-099"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R62",
+      "cases": [
+        "V2-100"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    },
+    {
+      "requirementId": "R63",
+      "cases": [
+        "V2-006"
+      ],
+      "complete": false,
+      "status": "INCOMPLETE"
+    }
+  ],
+  "note": "Conservative current-batch closure only. Partial observations are not complete execution. No 95% or code coverage claim."
+}

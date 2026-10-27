@@ -1,0 +1,295 @@
+{
+  "version": 1,
+  "scope": {
+    "origin": "http://127.0.0.1:13002",
+    "slug": "qa-agent-v2-product10-20261023",
+    "ownerId": "qa_agent_v2_product10_20261023",
+    "marker": "PRODUCT10_FIXTURE_V1"
+  },
+  "mode": "real-product-api-sse-db",
+  "syntheticBusinessData": true,
+  "deployment": [
+    {
+      "name": "delegate-agent-test-reps-1",
+      "id": "9cf76878bc061b40d2dcba34317cd914d88098502b62a40b5f505cf593df9185",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-conversation-worker-1",
+      "id": "239953b5cb9423a90250e589f1e0d4e574f645137db68ee53f5f760007e9910b",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-compute-broker-1",
+      "id": "a7369226dbe9df05cad7e56b1df65bbf6151af2611e1243ae1191d49730aaac9",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    }
+  ],
+  "harnessSha256": {
+    "cli.ts": "d1760b5ed96e781de400ce8869f71e24456d31b20e3ab801b79e0a5635470dc1",
+    "client.ts": "407546f9729e05f84582485c016e2fd91b6ec9a3b869c87607b53a2227c141d7",
+    "store.ts": "a310cedbd058102504d1e37b7b3fa96dca1b4090b09512ec8775cec961a8b71a",
+    "scope.ts": "4b4a737fc6f374a480ebc15efef89e4c2e6ebf1da237fde782bdf7125b2c51bb",
+    "cases.ts": "84a06a1a3758de44430cbb2def6ba6f91dc97350697d75138fdc790fce0c1b80",
+    "deployment.ts": "76709c80af068169da688da5cb65d83a6ec6023e4ead75811801d71226510fd9",
+    "../semantic/engine.ts": "988fc9a6b997dd856e3f2956c80c9bfa5af24a26caa6392f82522d98f24e381c"
+  },
+  "judgePromptSha256": "63f15ef1b701e83c35d3f180b13899e25bb2ae8beffbef59f44ef72383ff7bbb",
+  "judgeModel": "qwen3.8-27b",
+  "sameModelJudgeRequested": true,
+  "independentWeightsVerified": false,
+  "definitions": [
+    {
+      "id": "V2-001",
+      "title": "新会话问候",
+      "variants": [
+        {
+          "id": "greeting",
+          "steps": [
+            {
+              "question": "你好",
+              "status": "completed",
+              "tools": "none"
+            }
+          ],
+          "criteria": [
+            {
+              "id": "greeting",
+              "rule": "自然回应问候，不回答不存在的历史话题，不编造身份或来源。"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "repeats": 1,
+  "expectedRows": 1,
+  "rows": [
+    {
+      "caseId": "V2-001",
+      "variant": "greeting",
+      "repeat": 1,
+      "startedAt": "2026-10-23T01:52:25.808Z",
+      "verdict": "pass",
+      "observed": [
+        {
+          "runId": "cmvkbenxc01vqoh0n77yu3orm",
+          "conversationId": "cmvkbenwf01vioh0neb28rt68",
+          "versionId": "cmvkawznt00019kgzz6l1glkh",
+          "deliveryStatus": "COMPLETED",
+          "answer": "你好！我是星河科技的公开资料助手，可以帮你查询公司相关的公开信息，也可以回答一些一般性问题。请问有什么可以帮你的？",
+          "input": "你好",
+          "model": "qwen3.8-27b",
+          "traceAvailable": true,
+          "traceId": "b7552a8f-4122-456f-9091-24615f9bebe0",
+          "taskStatus": "completed",
+          "taskId": "cmvkbenxc01vqoh0n77yu3orm",
+          "usage": {
+            "tokens": 5796,
+            "costUsd": null,
+            "activeMs": 1176.164833001792,
+            "attempts": 1,
+            "toolCalls": 0,
+            "modelTurns": 1,
+            "inputTokens": 5679,
+            "outputTokens": 117
+          },
+          "calls": [],
+          "modelCalls": 1,
+          "sources": [],
+          "knowledge": [],
+          "receipts": [],
+          "retrieval": null
+        }
+      ],
+      "hard": [
+        {
+          "id": "pinned-version",
+          "pass": true,
+          "actual": "cmvkawznt00019kgzz6l1glkh",
+          "expected": "cmvkawznt00019kgzz6l1glkh"
+        },
+        {
+          "id": "real-v2-trace",
+          "pass": true,
+          "actual": true,
+          "expected": true
+        },
+        {
+          "id": "task-status",
+          "pass": true,
+          "actual": "completed",
+          "expected": "completed"
+        },
+        {
+          "id": "delivered",
+          "pass": true,
+          "actual": "COMPLETED",
+          "expected": "COMPLETED"
+        },
+        {
+          "id": "no-cloud-tools",
+          "pass": true,
+          "actual": [],
+          "expected": "no cloud execution"
+        },
+        {
+          "id": "no-business-tools",
+          "pass": true,
+          "actual": [],
+          "expected": []
+        },
+        {
+          "id": "sse-db-answer-match",
+          "pass": true,
+          "actual": "57246cb6907ae6482f4146f3acae99ea8e9b9f1371c5748aae21f7b1840194cd",
+          "expected": "57246cb6907ae6482f4146f3acae99ea8e9b9f1371c5748aae21f7b1840194cd"
+        }
+      ],
+      "admissions": [
+        {
+          "status": 202,
+          "runId": "cmvkbenxc01vqoh0n77yu3orm"
+        }
+      ],
+      "toolEvidence": [],
+      "semantic": {
+        "verdict": "pass",
+        "calls": 1,
+        "durationMs": 1071.2583330000002,
+        "usage": {
+          "inputTokens": 2007,
+          "outputTokens": 163,
+          "totalTokens": 2170,
+          "costUsd": null
+        },
+        "inputSha256": "8bbac40e064504e02d762046750b615a844e632ae8fefec7aff08a1573f387d0",
+        "decision": {
+          "verdict": "pass",
+          "checks": [
+            {
+              "id": "greeting",
+              "verdict": "pass",
+              "reason": "回答自然回应了问候，未提及不存在的历史话题。自称“星河科技的公开资料助手”与可信资料中的“星河公开资料助手”及“星河科技AI信息代理”相符，未编造身份或来源。",
+              "answerQuote": "你好！我是星河科技的公开资料助手，可以帮你查询公司相关的公开信息，也可以回答一些一般性问题。请问有什么可以帮你的？",
+              "evidenceIds": [
+                "published-identity",
+                "published-corpus"
+              ]
+            }
+          ]
+        }
+      },
+      "finishedAt": "2026-10-23T01:52:28.851Z"
+    }
+  ],
+  "summary": [
+    {
+      "id": "V2-001",
+      "variants": [
+        "greeting"
+      ],
+      "expectedRows": 1,
+      "actualRows": 1,
+      "verdict": "pass"
+    }
+  ],
+  "finalSafety": {
+    "noNewLeases": true,
+    "noNewBrowserSessions": true,
+    "pinnedVersion": true
+  },
+  "fixture": {
+    "representativeId": "cmvkahat100019kpprucnylv9",
+    "versionId": "cmvkawznt00019kgzz6l1glkh",
+    "publishedAt": "2026-10-23T01:38:41.417Z",
+    "identity": {
+      "tone": "清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。",
+      "avatarUrl": null,
+      "languages": [
+        "zh-CN",
+        "en"
+      ],
+      "displayName": "星河公开资料助手",
+      "roleSummary": "星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。",
+      "ownerId": "qa_agent_v2_product10_20261023",
+      "ownerName": "星河科技（合成验收）",
+      "agentBehavior": {
+        "version": 1,
+        "answerScope": "open_public",
+        "knowledgePolicy": "owner_facts",
+        "commitmentPolicy": "information_only"
+      }
+    },
+    "resources": [
+      {
+        "resourceKey": "identity/profile.md",
+        "contentHash": "a1328493513d68505ff016b91da80873d14d31b4a7ead8c51b6f297ceae156d1",
+        "safeText": "# 星河公开资料助手\nTagline: 星河科技AI信息代理；企业资料为合成测试数据，不能作出业务承诺。\nTone: 清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。\nLanguages: zh-CN, en\nPublic mode: true\nHuman in loop: false\nGroup activation: reply_or_mention\n## Identity summary\nPRODUCT10_FIXTURE_V1：星河科技是合成测试企业。\n## Skills\n- faq_reply\n- lead_qualify\n- intake_collect\n- quote_request_collect\n- material_delivery\n- scheduling_request\n- human_handoff\n- paid_unlock\n## Handoff prompt\n当前未接入真人接待。",
+        "citationTitle": "星河公开资料助手"
+      },
+      {
+        "resourceKey": "faq/index.md",
+        "contentHash": "3a80b1c867cf3794e677302468fa61b4fc77d3730927bbe97d66caaee7c61f98",
+        "safeText": "# FAQ",
+        "citationTitle": "FAQ"
+      },
+      {
+        "resourceKey": "materials/index.md",
+        "contentHash": "8fcefcb416e007d1bbb8d3ac78a72369f67c08b3ba79cabc7ba57fb9e890898d",
+        "safeText": "# Materials",
+        "citationTitle": "Materials"
+      },
+      {
+        "resourceKey": "policies/index.md",
+        "contentHash": "f56a758433b77b4adf4e5d3def2b7fb5cbf7428c93fa6a455c55c88915998f42",
+        "safeText": "# Policies\n# Policies\n## 星河科技年假制度（合成）\n版本2026.1，2026-01-01生效；正式员工每年年假12天，试用期不适用。\n## 星河科技差旅制度（合成）\n版本2026.1，2026-01-01生效；国内出差住宿报销上限每晚500元，按实际发生金额，不超过上限；申请需住宿发票和出差日期。未提供审批人或时限。\n## Conversation contract\n- Free reply limit: 1000\n- Handoff window: 24 hours\n- Tools and external side effects require capability-policy evaluation.",
+        "citationTitle": "Policies"
+      }
+    ],
+    "capabilityModes": {
+      "exec": "deny",
+      "read": "deny",
+      "write": "deny",
+      "process": "deny",
+      "browser": "deny",
+      "mcp": "allow"
+    },
+    "mcp": [
+      {
+        "slug": "weather",
+        "allowedToolNames": [
+          "openmeteo_search_locations",
+          "openmeteo_get_forecast"
+        ],
+        "tools": [
+          {
+            "name": "openmeteo_search_locations",
+            "description": "Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population. Required prerequisite for name-based queries — all weather tools take latitude/longitude, not place names. Search by a bare place name (city, region, or landmark); never fold a qualifier into it — pass \"Baoding\", not \"Baoding Hebei\", and \"Paris\", not \"Paris, France\". To disambiguate places that share a name, set the country input (ISO 3166-1 alpha-2, e.g. \"US\") and/or read the admin1 and country fields on each ranked result — admin1 is a result field for choosing among matches, not a search input. Returns up to 10 matches ranked by population/relevance."
+          },
+          {
+            "name": "openmeteo_get_forecast",
+            "description": "Weather forecast for coordinates: hourly and/or daily variables for up to 16 days ahead, with optional past_days (up to 92) for recent history. Use past_days instead of openmeteo_get_historical for dates within the last 1–5 days, since the archive’s ERA5 components lag by up to ~5 days. Returns per-timestamp records — each hourly entry contains a \"time\" field (ISO 8601) plus one key per requested variable; each daily entry contains a \"time\" field (YYYY-MM-DD) plus requested variables. Common hourly variables: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover, uv_index, apparent_temperature, precipitation_probability, weather_code, surface_pressure, visibility, wind_direction_10m, wind_gusts_10m, dew_point_2m. Common daily variables: temperature_2m_max, temperature_2m_min, precipitation_sum, wind_speed_10m_max, sunrise, sunset, uv_index_max, precipitation_hours, weather_code. Set current_variables for conditions at this instant — Open-Meteo serves those from 15-minute model data, which is more precise than picking the nearest hourly row, and the response carries a current object plus a current_units map. A wide window — a large past_days plus many hourly variables — produces thousands of records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled they return a bounded preview instead. At least one of current_variables, hourly_variables, or daily_variables is required."
+          }
+        ]
+      },
+      {
+        "slug": "public_search",
+        "allowedToolNames": [
+          "search_pro"
+        ],
+        "tools": [
+          {
+            "name": "search_pro",
+            "description": "标准搜索接口提供增强的网络开放域的实时搜索能力，通过大模型优化与多数据源融合的技术，查询干净、准确、多样、高质量的结果。"
+          }
+        ]
+      }
+    ],
+    "sandboxLeases": 0,
+    "browserSessions": 0
+  },
+  "judgeCalls": 1,
+  "judgeTokenBudgetConsumed": 2170,
+  "limitations": "Ten-case product batch with synthetic business fixtures, real RAG and MCP. No cloud sandbox tests. Reference data and observed citations are separate. A model judgment is fallible. Does not update historical 100-case PASS labels or certify performance."
+}

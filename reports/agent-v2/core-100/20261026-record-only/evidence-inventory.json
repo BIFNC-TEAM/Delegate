@@ -1,0 +1,62 @@
+[
+  {
+    "file": "reports/agent-v2/product10/2026-10-26T02-17-48-809Z-5e8792fa-4197-47fe-be3d-a01bd9475b28.json",
+    "sha256": "40920b6a60a79a713dcac147bf66e446463a058b1c9afbcab1b92fa0a334288b",
+    "rows": 54
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/product-extra.json",
+    "sha256": "e3c2055b16a34a6175c1f0c4dd590b2ac413efeaa6f74f604b7b53ef47fc5893",
+    "rows": 72
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/stateful-results.json",
+    "sha256": "e67473f43619a9bec18c6008abb971b4cbbfc53ccb5a4c54875955ea249d2bca",
+    "rows": 8
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/variant-results.json",
+    "sha256": "de72836f3bdfe103017379b4e83b00e2c20274fdbbec3b48bcbcc1007ed8464d",
+    "rows": 18
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/controlled-results.json",
+    "sha256": "30cb068d51e6ad0f55d370296fe200891cde3a97b1a1b3f5e32641708ef7d30e",
+    "rows": 24
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/catalog-results.json",
+    "sha256": "3b195b4dd256d51ff64f259154a2eed067007f9e8879e05fd9f8b85ed05d7835",
+    "rows": 15
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/repair-eval-results.json",
+    "sha256": "a5326db704a631a3006656a8e3bffd62f90b4fb3609937a29c9956f7070ac825",
+    "rows": 9
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/skills-eval-verified-results.json",
+    "sha256": "8ef3f56b4e2113da09ab6787ecdb64fb22ace044da632ad4ab903796f11da2dd",
+    "rows": 6
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/failure-matrix-results.json",
+    "sha256": "5e55c823b7b09b4e581ffa683d865d640aeefeae3aaac3113977eafa37d5beba",
+    "rows": 24
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/stability-results.json",
+    "sha256": "e3902935e701602fcef8e97532e591a1b1c42b5d400b13464afcc49d8197e75c",
+    "rows": 70
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/timezone-date-results.json",
+    "sha256": "e8bc20f2f5578bb03bc9be3ac199ca62a6566ef6485a1ee99d0e394625e53fb8",
+    "rows": 6
+  },
+  {
+    "file": ".local/acceptance/20261026-record-only/billing-product-results.json",
+    "sha256": "34506c29c7fcf999ff6d2adf7753b53fa5e21242d074626d9097afe86e422a3d",
+    "rows": 5
+  }
+]

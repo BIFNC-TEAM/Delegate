@@ -1,0 +1,217 @@
+[
+  {
+    "leaseId": "cmviwg9mw001eo814qy5ol056",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwgiky002no814t3y3ljqy",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwgski003wo814vkzwp6ro",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwi9kj0065o81480am0ohh",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwil0g007eo814263h01oh",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwitrw008no8142bao77os",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwj15v00aso814tikiv5p3",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwjag700c1o814hyag9ujg",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwjt7l00e9o814ppukh3iz",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwk39s00fmo814et4kgpfv",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwkg2n00gpo814ej6c1orf",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwkosm00hyo814m1hi0aob",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwkvv300j1o8149y0lrqo3",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwlexa00k4o814tp7tjrvv",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwlo5200l7o814f957rap1",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwlyyr00mao814qo6i3rhx",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwm9vo00ndo81498efrg3t",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwmjrw00p0o8140k2e8nm1",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwmukh00q3o814rluze9un",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwn3e600rxo814crgopsqf",
+    "previousStatus": "ERROR",
+    "previousError": "config_invalid",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "killAcknowledged": true,
+    "absent": true,
+    "status": "cleanup_confirmed"
+  },
+  {
+    "leaseId": "cmviwn7zd00syo814eklm86bh",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "status": "unbound_creation_requires_reconciliation"
+  },
+  {
+    "leaseId": "cmviwn90q00tro814jkcopbw5",
+    "previousStatus": "STOPPED",
+    "previousError": null,
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "status": "unbound_creation_requires_reconciliation"
+  },
+  {
+    "leaseId": "cmviwp1tn00vmo814yqblalvb",
+    "previousStatus": "ERROR",
+    "previousError": "isolated_python_cleanup_pending",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "status": "unbound_creation_requires_reconciliation"
+  },
+  {
+    "leaseId": "cmviwp3wv00w9o814hr0xw7po",
+    "previousStatus": "ERROR",
+    "previousError": "isolated_python_cleanup_pending",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "status": "unbound_creation_requires_reconciliation"
+  },
+  {
+    "leaseId": "cmviwp5v500wwo814ot739sah",
+    "previousStatus": "ERROR",
+    "previousError": "isolated_python_cleanup_pending",
+    "origin": "https://api.ap-guangzhou.tencentags.com",
+    "status": "unbound_creation_requires_reconciliation"
+  }
+]

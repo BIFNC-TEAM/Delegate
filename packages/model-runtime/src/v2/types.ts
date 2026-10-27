@@ -58,7 +58,7 @@ export class V2Error extends Error {
 
 /** A trusted host has established that parameter correction is safe. */
 export class V2RecoverableToolError extends V2Error {
-  constructor(readonly disposition: "not_dispatched" | "isolated_output_rejected" | "isolated_program_failed", readonly reason: string, readonly feedback: string) {
-    super(disposition === "not_dispatched" ? "unavailable" : "invalid_result");
+  constructor(readonly disposition: "not_dispatched" | "isolated_output_rejected" | "isolated_program_failed" | "read_failed", readonly reason: string, readonly feedback: string) {
+    super(disposition === "not_dispatched" || disposition === "read_failed" ? "unavailable" : "invalid_result");
   }
 }

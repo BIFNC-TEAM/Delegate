@@ -1,5 +1,5 @@
 const toolContext = { runId: "run-pi", sessionId: "conversation-pi", traceId: "fixture", timezone: "Asia/Shanghai", attachments: [], idempotencyKey: "fixture" };
-import { buildAgentCapabilities } from "../src/agent-capabilities";
+import { observeBrowserPage, buildAgentCapabilities } from "../src/agent-capabilities";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -456,5 +456,14 @@ describe("governed V2 host capabilities", () => {
     })).toEqual({ ok: false, reason: "sandbox_attachment_path_not_read" });
     expect(normalizeExpectedSandboxOutputs(["/dev/stdout", "stdout", "-", "ranking.csv"]))
       .toEqual(["ranking.csv"]);
+  });
+});
+
+describe("HTTP observation classification", () => {
+  it.each([401,403])("preserves HTTP %s access denial", status => expect(observeBrowserPage({httpStatus:status,textSnippet:"denied"}).state).toBe("blocked"));
+  it.each([404,408,429,500])("does not confuse HTTP %s with an authorization revocation", status => expect(observeBrowserPage({httpStatus:status,textSnippet:"error page"}).state).toBe("unavailable"));
+  it("keeps empty and valid pages distinct", () => {
+    expect(observeBrowserPage({httpStatus:200,textSnippet:""}).state).toBe("empty");
+    expect(observeBrowserPage({httpStatus:200,textSnippet:"content"}).state).toBe("available");
   });
 });

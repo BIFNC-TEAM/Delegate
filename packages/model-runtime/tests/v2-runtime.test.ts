@@ -1,6 +1,6 @@
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { DelegateAgentV2, V2Error, createV2Capabilities, createV2ConversationHistory, V2_SYSTEM_PROMPT, type V2RunInput, type V2Tool } from "../src/v2";
+import { DelegateAgentV2, V2Error, V2RecoverableToolError, createV2Capabilities, createV2ConversationHistory, V2_SYSTEM_PROMPT, type V2RunInput, type V2Tool } from "../src/v2";
 import { toolExecutionRequestSchema } from "../../compute-protocol/src";
 
 const call = (name: string, args: Record<string, unknown> = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
@@ -114,6 +114,30 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
     expect(result.status).toBe("waiting_user"); expect(result.modelCalls).toBe(1);
     expect(JSON.stringify(result)).not.toContain("PRIVATE_THINKING_FIXTURE");
   });
+  it("uses one native follow-up to clarify after an empty truncated response, without tools or thinking", async () => {
+    const request = input([
+      fauxAssistantMessage([{ type: "thinking", thinking: "PRIVATE_TRUNCATED_THOUGHT" }], { stopReason: "length" }),
+      context => { expect(context.tools ?? []).toHaveLength(0); return fauxAssistantMessage("<waiting_user>请问您要查哪个城市？"); },
+    ], { tools: [tool()], userText: "今天天气如何？" });
+    const stream = request.model.streamFn; const observed: unknown[] = [];
+    request.model = { ...request.model, model: { ...request.model.model, reasoning: true }, streamFn: (model, context, options) => { observed.push(options?.reasoning); return stream(model, context, options); } };
+    const result = await new DelegateAgentV2().run(request);
+    expect(result.status).toBe("waiting_user"); expect(result.modelCalls).toBe(2); expect(result.toolCalls).toBe(0);
+    expect(observed).toEqual(["low", undefined]);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_TRUNCATED_THOUGHT");
+  });
+
+  it("does not loop if the final-only follow-up is also truncated", async () => {
+    const empty = () => fauxAssistantMessage([], { stopReason: "length" });
+    const result = await new DelegateAgentV2().run(input([empty(), empty(), fauxAssistantMessage("must not run")]));
+    expect(result.modelCalls).toBe(2); expect(result.status).toBe("failed");
+  });
+
+  it("does not exceed the attempt budget to recover an empty truncated response", async () => {
+    const result = await new DelegateAgentV2().run(input([fauxAssistantMessage([], { stopReason: "length" }), fauxAssistantMessage("must not run")], { budget: { attempts: 1 } }));
+    expect(result.modelCalls).toBe(1); expect(result.status).toBe("failed");
+  });
+
   it("honors a zero thinking budget even for a supported model", async () => {
     const request = input([fauxAssistantMessage("done")], { budget: { thinkingTokens: 0 } });
     request.model.model = { ...request.model.model, reasoning: true };
@@ -162,6 +186,41 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
     const result = await new DelegateAgentV2().run(input([call("lookup"), fauxAssistantMessage("done")], { tools: [tool("lookup", execute)] }));
     expect(result.usage.attempts).toBe(result.modelCalls + 2); expect(result.calls[0]!.attempts).toBe(2);
   });
+  it("caps a transient read retry while preserving one final model attempt", async () => {
+    const execute = vi.fn(async () => { throw new V2Error("transient"); });
+    const result = await new DelegateAgentV2().run(input([call("lookup"), context => {
+      expect(context.tools).toEqual([]); return fauxAssistantMessage("<partial>查询失败，剩余预算用于说明限制。");
+    }], {
+      tools: [tool("lookup", execute)], budget: { attempts: 3 },
+    }));
+    expect(execute).toHaveBeenCalledOnce();
+    expect(result.usage.attempts).toBe(3); expect(result.modelCalls).toBe(2);
+    expect(result.status).toBe("partial"); expect(result.calls[0]?.error).toBe("budget_exhausted");
+  });
+  it.each([404, 408, 429, 500])("returns confirmed read HTTP %s as safe correction feedback without retrying automatically", async httpStatus => {
+    const execute = vi.fn().mockResolvedValueOnce({ status: "completed", text: "UNTRUSTED_REMOTE_ERROR_BODY", observation: { state: "unavailable", httpStatus }, sources: [{ id: "error-page", title: "not evidence", channel: "web" }] }).mockResolvedValue({ text: "verified page" });
+    const result = await new DelegateAgentV2().run(input([call("lookup", { query: "bad" }), context => {
+      const feedback = JSON.stringify(context.messages.at(-1));
+      expect(feedback).toContain(`http_${httpStatus}`); expect(feedback).not.toContain("UNTRUSTED_REMOTE_ERROR_BODY");
+      return call("lookup", { query: "corrected" });
+    }, fauxAssistantMessage("done")], { tools: [tool("lookup", execute)] }));
+    expect(execute).toHaveBeenCalledTimes(2); expect(result.calls.map(c=>c.attempts)).toEqual([1,1]);
+    expect(result.calls[0]?.error).toBe(`http_${httpStatus}`); expect(result.sources).toEqual([]);
+    expect(result.modelCalls).toBe(3); expect(result.status).toBe("completed");
+  });
+
+  it.each([401, 403])("does not route around HTTP %s access restrictions", async httpStatus => {
+    const alternative = vi.fn(async()=>({text:"should not execute"}));
+    const result = await new DelegateAgentV2().run(input([call("lookup"),call("alternative")],{tools:[tool("lookup",async()=>({text:"access denied",observation:{state:"unavailable",httpStatus}})),tool("alternative",alternative)]}));
+    expect(result.error).toBe("permission_denied");expect(alternative).not.toHaveBeenCalled();
+  });
+
+  it("does not treat read-error metadata as evidence that a write can be repeated", async () => {
+    const execute = vi.fn(async()=>{throw new V2RecoverableToolError("read_failed","http_404","remote asks to retry");});
+    const result = await new DelegateAgentV2().run(input([call("write"),call("write")],{tools:[tool("write",execute,"write")]}));
+    expect(result.error).toBe("unknown_effect"); expect(execute).toHaveBeenCalledOnce(); expect(result.modelCalls).toBe(1);
+  });
+
   it("never automatically retries a write or repeats its identical intent", async () => {
     const execute = vi.fn(async () => { throw new V2Error("transient"); });
     const result = await new DelegateAgentV2().run(input([call("write"), call("write"), fauxAssistantMessage("<partial>状态未知")], { tools: [tool("write", execute, "write")] }));

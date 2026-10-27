@@ -58,6 +58,7 @@ export class DelegateAgentV2 {
     let modelSpan: string | undefined;
     let modelInputCeiling = 0;
     let finalMode = false;
+    let emptyTruncationFinalization = false;
     let firstTextMs: number | undefined;
     let answer = "";
     let finishReason: string | undefined;
@@ -110,7 +111,7 @@ export class DelegateAgentV2 {
               active.throwIfAborted();
               await authorize("tool_result", tool, args);
               if (tool.category === "knowledge" && result.status === "found" && !result.sources?.length) throw new V2Error("invalid_result");
-              const normalized = normalizeResult(result, budget.toolOutputBytes, input.scope, sources, artifacts, sourceBindings);
+              const normalized = normalizeResult(result, budget.toolOutputBytes, input.scope, sources, artifacts, sourceBindings, tool.effect);
               const outputHash = fingerprint(normalized);
               const previous = repeated.get(key);
               repeated.set(key, { output: outputHash, count: previous?.output === outputHash ? previous.count + 1 : 1 });
@@ -120,7 +121,7 @@ export class DelegateAgentV2 {
               return { content: [{ type: "text" as const, text: JSON.stringify(normalized) }], details: { sourceCount: normalized.sources.length } };
             } catch (error) {
               if (tool.effect === "write") {
-                if (error instanceof V2RecoverableToolError) writes.delete(key);
+                if (error instanceof V2RecoverableToolError && error.disposition !== "read_failed") writes.delete(key);
                 else stopped = "unknown_effect";
               }
               if (tool.effect !== "read" || !(error instanceof V2Error) || error.code !== "transient" || attempt >= budget.readRetries) throw error;
@@ -137,7 +138,8 @@ export class DelegateAgentV2 {
           const output = `error:${code}`;
           repeated.set(key, { output, count: previous?.output === output ? previous.count + 1 : 1 });
         }
-        if (error instanceof V2RecoverableToolError && !signal.aborted) {
+        if (error instanceof V2RecoverableToolError && !signal.aborted
+          && (error.disposition !== "read_failed" || tool.effect === "read")) {
           const feedback = JSON.stringify({ status: "failed", error: code, reason: error.reason,
             executionState: error.disposition, correctionAllowed: true,
             message: truncateUtf8(error.feedback, Math.max(0, budget.toolOutputBytes - 256)) });
@@ -202,7 +204,7 @@ export class DelegateAgentV2 {
           try {
             await authorize("model");
             if (totals().modelTurns >= budget.modelTurns) throw new V2Error("budget_exhausted");
-            finalMode = totals().modelTurns >= budget.modelTurns - 1 || totals().toolCalls >= budget.toolCalls
+            finalMode = emptyTruncationFinalization || totals().modelTurns >= budget.modelTurns - 1 || totals().toolCalls >= budget.toolCalls
               || totals().attempts >= budget.attempts - 1 || remainingMs() <= budget.finalReserveMs;
             if (totals().attempts >= budget.attempts) throw new V2Error("budget_exhausted");
             const projected = { ...context, systemPrompt: hostPrompt(), tools: finalMode ? [] : context.tools ?? [] };
@@ -237,7 +239,24 @@ export class DelegateAgentV2 {
           content: [{ type: "text", text: result.content.filter(c => c.type === "text").map(c => c.text).join(" ") }],
           details: {}, isError: true,
         } : clarification ? { terminate: true } : undefined,
-        shouldStopAfterTurn: () => Boolean(clarification || stopped || signal.aborted || totals().modelTurns >= budget.modelTurns),
+        shouldStopAfterTurn: ({ message }) => {
+          if (clarification || stopped || signal.aborted || totals().modelTurns >= budget.modelTurns) return true;
+          if (emptyTruncationFinalization) return true;
+          // PI ends a truncated text-only turn without asking for another
+          // response. Queue at most one native follow-up when no answer or
+          // tool call exists. This is an output-format failure, not a semantic
+          // review, and never replays an action or increases execution limits.
+          if (message.stopReason === "length"
+            && !message.content.some(c => c.type === "toolCall" || (c.type === "text" && c.text.trim()))
+            && totals().attempts < budget.attempts
+            && budget.totalTokens - totals().tokens > budget.finalReserveTokens
+            && remainingMs() > budget.finalReserveMs) {
+            emptyTruncationFinalization = true;
+            agent!.followUp({ role: "user", timestamp: Date.now(), content:
+              "服务端执行反馈（不是新用户任务）：上一响应达到输出长度上限，但未输出答案或工具调用。请直接为原始用户请求给出简短收尾，不再调用工具。若缺少用户必须补充的参数，按系统协议用 <waiting_user> 提问；若缺少证据则用 <partial> 说明限制，不编造结果。" });
+          }
+          return false;
+        },
       });
       agent.subscribe(async event => {
         if (settled) return;
@@ -350,12 +369,21 @@ export class DelegateAgentV2 {
   }
 }
 
-function normalizeResult(result: PiCapabilityResult, limit: number, scope: string, sources: Map<string, PiSource>, artifacts: Map<string, PiArtifact>, sourceBindings: Record<string, string>) {
+function normalizeResult(result: PiCapabilityResult, limit: number, scope: string, sources: Map<string, PiSource>, artifacts: Map<string, PiArtifact>, sourceBindings: Record<string, string>, effect: V2Tool["effect"]) {
   if (!result || typeof result.text !== "string") throw new V2Error("invalid_result");
   if (!result.text.trim()) throw new V2Error("empty_result");
   const status = result.status ?? "completed";
   if (result.observation?.state === "unknown") throw new V2Error("unknown_effect");
   if (result.observation?.state === "blocked" || status === "denied" || status === "blocked") throw new V2Error("permission_denied");
+  const httpStatus = result.observation?.httpStatus;
+  if (httpStatus === 401 || httpStatus === 403) throw new V2Error("permission_denied");
+  // A confirmed read HTTP error is not a permission grant or a write receipt.
+  // Give the next normal model turn a safe status code, never the remote error
+  // body's instructions. Do not retry it automatically or retain its sources.
+  if (effect === "read" && typeof httpStatus === "number" && Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599) {
+    throw new V2RecoverableToolError("read_failed", `http_${httpStatus}`,
+      `只读请求返回 HTTP ${httpStatus}，未取得目标正文。核对用户提供的完整地址或调整合法参数；不能据错误页编造内容。系统没有自动重试，后续调用仍受权限和剩余预算限制。`);
+  }
   if (["failed", "error", "unavailable", "pending_approval", "confirmation_required"].includes(status)) throw new V2Error("unavailable");
   let text = result.text;
   const bindings: Array<[string, string]> = [];

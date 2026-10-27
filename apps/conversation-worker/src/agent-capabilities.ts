@@ -736,7 +736,8 @@ function resolvePublicArtifactFileName(artifact: { id: string; kind: string; mim
 
 /** A transport observation, not a judgement of relevance or source freshness. */
 export function observeBrowserPage(page: { textSnippet?: string; httpStatus?: number; observedAt?: string }): NonNullable<PiCapabilityResult["observation"]> {
-  const state = page.httpStatus && page.httpStatus >= 400 ? "blocked"
+  const state = page.httpStatus === 401 || page.httpStatus === 403 ? "blocked"
+    : page.httpStatus && page.httpStatus >= 400 ? "unavailable"
     : !page.textSnippet?.trim() ? "empty" : "available";
   return {
     state, ...(page.httpStatus !== undefined ? { httpStatus: page.httpStatus } : {}),

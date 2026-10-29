@@ -17,10 +17,11 @@ vi.mock("../app/api/dashboard/auth", () => ({
 import { GET, POST } from "../app/api/dashboard/knowledge-assets/route";
 
 const metadata = { sourcePath: "笔记库/产品/说明.md", properties: { tags: ["产品"], 成本: 100 }, referencedPaths: [], warnings: [] };
-function upload(options: { metadata?: unknown; policy?: string; name?: string; visibility?: string; links?: unknown[] } = {}) {
+function upload(options: { metadata?: unknown; notion?: unknown; policy?: string; name?: string; visibility?: string; links?: unknown[] } = {}) {
   const form = new FormData();
   form.set("file", new File(["这是一份已经预览并确认的产品说明正文，属性不混入问答。"], options.name ?? "说明.md", { type: "text/markdown" }));
   if (options.metadata !== undefined) form.set("obsidianImport", JSON.stringify(options.metadata));
+  if (options.notion !== undefined) form.set("notionImport", JSON.stringify(options.notion));
   form.set("conflictPolicy", options.policy ?? "skip_duplicates");
   if (options.visibility) form.set("visibility", options.visibility);
   form.set("representativeLinks", JSON.stringify(options.links ?? []));
@@ -59,6 +60,27 @@ describe("Obsidian upload through the existing knowledge endpoint", () => {
     const response = await POST(upload());
     expect((await response.json()).upload.outcome).toBe("skipped_duplicate");
     expect(mocks.create).not.toHaveBeenCalled(); expect(mocks.store).not.toHaveBeenCalled();
+  });
+
+  const notion = { pageId: "11111111-1111-4111-8111-111111111111", workspaceId: "workspace", workspaceName: "Test", sourceUrl: "https://www.notion.so/11111111111141118111111111111111", importedAt: "2026-10-27T00:00:00.000Z", warnings: [], incomplete: false };
+  it("skips identical Notion content through the standard conflict policy", async () => {
+    const response = await POST(upload({ notion }));
+    expect((await response.json()).upload.outcome).toBe("skipped_duplicate");
+    expect(mocks.store).not.toHaveBeenCalled();
+  });
+  it("creates a numbered Notion copy only when requested, preserving provenance", async () => {
+    expect((await POST(upload({ notion, policy: "keep_both" }))).status).toBe(201);
+    expect(mocks.create).toHaveBeenCalledWith("owner-a", expect.objectContaining({ metadata: { notionImport: notion }, sourceUrl: notion.sourceUrl }), { processingMode: "deferred", numberFileName: true });
+  });
+  it("passes Notion provenance through source replacement", async () => {
+    mocks.replace.mockResolvedValue({ id: "old" });
+    expect((await POST(upload({ notion, policy: "replace_existing" }))).status).toBe(200);
+    expect(mocks.replace).toHaveBeenCalledWith("owner-a", "old", expect.objectContaining({ notionImport: notion }));
+  });
+  it("rejects mixed providers and private fields before storage", async () => {
+    expect((await POST(upload({ notion, metadata }))).status).toBe(422);
+    expect((await POST(upload({ notion: { ...notion, ciphertext: "private" } }))).status).toBe(422);
+    expect(mocks.store).not.toHaveBeenCalled();
   });
 
   it.each([

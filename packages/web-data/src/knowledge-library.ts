@@ -20,6 +20,7 @@ import { demoRepresentative } from "@delegate/domain";
 
 import { prisma } from "./prisma";
 import { nextObsidianFileName, obsidianImportSchema, type ObsidianImportMetadata } from "./knowledge-obsidian";
+import { notionImportSchema, type NotionImportMetadata } from "./notion/types";
 import { isKnowledgeVerificationPage, knowledgeBrowserCaptureSchema, knowledgeCaptureUrlSchema, type KnowledgeBrowserCapture } from "./knowledge-web-capture";
 import {
   extractDocumentWithMinerU,
@@ -98,6 +99,7 @@ export const knowledgeAssetUpdateSchema = z.object({
 });
 
 const knowledgeAssetSourceReplacementSchema = z.object({
+  notionImport: notionImportSchema.optional(),
   kind: fileAssetKindSchema,
   originalFileName: knowledgeOriginalFileNameSchema.min(1),
   mimeType: z.string().trim().max(160),
@@ -147,6 +149,7 @@ export type RepresentativeKnowledgeBindingResult = {
 
 export type KnowledgeAssetRecord = {
   obsidianImport?: ObsidianImportMetadata;
+  notionImport?: NotionImportMetadata;
   id: string;
   kind: z.infer<typeof assetKindSchema>;
   status: "processing" | "ready" | "failed" | "archived";
@@ -675,7 +678,8 @@ export async function replaceKnowledgeAssetSource(
         originalFileName: parsed.originalFileName,
         mimeType: parsed.mimeType,
         sizeBytes: parsed.sizeBytes,
-        sourceUrl: null,
+        sourceUrl: parsed.notionImport?.sourceUrl ?? null,
+        metadata: { ...(asset.metadata as Record<string, unknown> ?? {}), obsidianImport: null, notionImport: parsed.notionImport ?? null } as Prisma.InputJsonValue,
         sourceText: null,
         sourceObjectBucket: parsed.sourceObjectBucket,
         sourceObjectKey: parsed.sourceObjectKey,
@@ -761,6 +765,7 @@ export async function createKnowledgeAsset(
   const parsed = knowledgeAssetCreateSchema.parse(input);
   validateCreateSource(parsed);
   const obsidian = parsed.metadata?.obsidianImport === undefined ? undefined : obsidianImportSchema.parse(parsed.metadata.obsidianImport);
+  const notion = parsed.metadata?.notionImport === undefined ? undefined : notionImportSchema.parse(parsed.metadata.notionImport);
   if (shouldUseDemoKnowledge(ownerId)) {
     validateDemoLinks(parsed.representativeLinks);
     if (options.numberFileName && parsed.originalFileName) {
@@ -775,6 +780,7 @@ export async function createKnowledgeAsset(
       visibility: parsed.visibility,
       title: parsed.title,
       ...(obsidian ? { obsidianImport: obsidian } : {}),
+      ...(notion ? { notionImport: notion } : {}),
       originalFileName: parsed.originalFileName ?? null,
       mimeType: parsed.mimeType ?? null,
       sizeBytes: parsed.sizeBytes ?? null,
@@ -1569,7 +1575,10 @@ function assignReplacementSource(
   asset.originalFileName = input.originalFileName;
   asset.mimeType = input.mimeType;
   asset.sizeBytes = input.sizeBytes;
-  asset.sourceUrl = null;
+  asset.sourceUrl = input.notionImport?.sourceUrl ?? null;
+  delete asset.obsidianImport;
+  delete asset.notionImport;
+  if (input.notionImport) asset.notionImport = input.notionImport;
   asset.sourceText = null;
   asset.sourceObjectBucket = input.sourceObjectBucket;
   asset.sourceObjectKey = input.sourceObjectKey;
@@ -1620,9 +1629,11 @@ const knowledgeAssetInclude = {
 } as const;
 
 function serializeAsset(asset: AssetWithRelations): KnowledgeAssetRecord {
+  const notion = notionImportSchema.safeParse((asset.metadata as Record<string, unknown> | null)?.notionImport);
   const source = obsidianImportSchema.safeParse((asset.metadata as Record<string, unknown> | null)?.obsidianImport);
   return {
     ...(source.success ? { obsidianImport: source.data } : {}),
+    ...(notion.success ? { notionImport: notion.data } : {}),
     id: asset.id,
     kind: fromAssetKind(asset.kind),
     status: fromAssetStatus(asset.status),

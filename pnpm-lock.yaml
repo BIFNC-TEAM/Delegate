@@ -494,6 +494,9 @@ importers:
       sharp:
         specifier: 0.35.0
         version: 0.35.0
+      undici:
+        specifier: ^7.29.0
+        version: 7.29.0
       yaml:
         specifier: 2.9.0
         version: 2.9.0

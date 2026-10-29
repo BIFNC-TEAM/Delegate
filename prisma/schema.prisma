@@ -1296,10 +1296,38 @@ model Owner {
   walletExceptionActions       WalletExceptionAction[]
   telegramBotConnections       TelegramBotConnection[]
   obsidianSyncConnection       ObsidianSyncConnection?
+  notionConnections            NotionConnection[]
+  notionOAuthStates            NotionOAuthState[]
   auditEvents                  EventAudit[]               @relation("OwnerAuditEvents")
   payoutProfile                CreatorPayoutProfile?      @relation("PayoutProfileOwner")
   createdPayoutProfiles        CreatorPayoutProfile[]     @relation("PayoutProfileCreator")
   createdPayoutDestinations    PayoutDestination[]        @relation("PayoutDestinationCreator")
+}
+
+model NotionConnection {
+  id            String   @id @default(cuid())
+  ownerId       String
+  owner         Owner    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  workspaceId   String
+  workspaceName String
+  ciphertext    String   @db.Text
+  expiresAt     DateTime
+  revision      Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  @@unique([ownerId, workspaceId])
+  @@index([expiresAt])
+}
+
+model NotionOAuthState {
+  id          String   @id
+  ownerId     String
+  owner       Owner    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  browserHash String
+  returnTo    String
+  expiresAt   DateTime
+
+  @@index([expiresAt])
 }
 
 model ObsidianSyncConnection {

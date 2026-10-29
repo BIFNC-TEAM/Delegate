@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./notion": "./src/notion/service.ts",
+    "./notion-content": "./src/notion/content.ts",
+    "./notion-types": "./src/notion/types.ts",
     ".": "./src/index.ts",
     "./compute-conversation-results": "./src/compute-conversation-results.ts",
     "./memory-settings": "./src/memory-settings.ts",
@@ -30,6 +33,7 @@
     "@delegate/artifacts": "workspace:*",
     "@delegate/compute-protocol": "workspace:*",
     "@delegate/domain": "workspace:*",
+    "@delegate/obsidian-sync": "workspace:*",
     "@delegate/openviking": "workspace:*",
     "@delegate/registry": "workspace:*",
     "@delegate/runtime": "workspace:*",
@@ -41,9 +45,9 @@
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "5.4.296",
     "sharp": "0.35.0",
+    "undici": "^7.29.0",
     "yaml": "2.9.0",
-    "zod": "^4.3.6",
-    "@delegate/obsidian-sync": "workspace:*"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "vitest": "^4.1.0"

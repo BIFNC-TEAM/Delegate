@@ -1,0 +1,19 @@
+{
+  "name": "@delegate/obsidian-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "obsidian-headless": "0.0.14"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

@@ -4,13 +4,19 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./notion": "./src/notion/service.ts",
+    "./notion-content": "./src/notion/content.ts",
+    "./notion-types": "./src/notion/types.ts",
     ".": "./src/index.ts",
     "./compute-conversation-results": "./src/compute-conversation-results.ts",
     "./memory-settings": "./src/memory-settings.ts",
     "./owner-settings": "./src/owner-settings.ts",
     "./owner-identity-profile": "./src/owner-identity-profile.ts",
     "./owner-avatar-storage": "./src/owner-avatar-storage.ts",
-    "./knowledge-web-capture": "./src/knowledge-web-capture.ts"
+    "./knowledge-web-capture": "./src/knowledge-web-capture.ts",
+    "./knowledge-obsidian": "./src/knowledge-obsidian.ts",
+    "./obsidian-sync": "./src/obsidian-sync/service.ts",
+    "./obsidian-publish": "./src/obsidian-publish.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -27,6 +33,7 @@
     "@delegate/artifacts": "workspace:*",
     "@delegate/compute-protocol": "workspace:*",
     "@delegate/domain": "workspace:*",
+    "@delegate/obsidian-sync": "workspace:*",
     "@delegate/openviking": "workspace:*",
     "@delegate/registry": "workspace:*",
     "@delegate/runtime": "workspace:*",
@@ -38,6 +45,8 @@
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "5.4.296",
     "sharp": "0.35.0",
+    "undici": "^7.29.0",
+    "yaml": "2.9.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

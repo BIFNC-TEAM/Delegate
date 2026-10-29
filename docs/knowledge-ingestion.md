@@ -14,6 +14,26 @@ When `MINERU_API_BASE_URL` is configured, PDF, DOCX, PPTX, XLSX, PNG, JPG, and J
 
 The dashboard accepts up to 20 files in one queue and uploads at most three concurrently. Browser upload progress is reported per file; parsing and indexing are then polled separately. A failed upload can retransmit the original file, while an asset that was stored but failed during parsing/indexing uses the existing reprocess action.
 
+## Obsidian local import
+
+In **Import knowledge → Third-party import → Obsidian**, use the native browser file picker to select multiple Markdown notes, automatically prepare the upload queue, optionally preview, then click **Start upload**. Files start checked; users may uncheck them or add more files from another folder. The browser manages its last-used picker location; Delegate does not persist directory handles or run a local companion. This imports a snapshot, without modifying or synchronizing the vault. Online Sync/Publish and Notion connectors are outside this feature.
+
+- Only selected `.md`/`.markdown` files are read. The picker filters for Markdown; other file types and hidden filenames are rejected. The browser does not expose parent directories, so users should select notes rather than files inside settings folders. Up to 1,000 notes and 40 MiB of source files can be selected per import; each expanded note is limited to 400,000 characters and aggregate expanded text is bounded as well.
+- YAML frontmatter is stored as descriptive `metadata.obsidianImport.properties`, separate from indexed answer text. An import-local source identifier (`selected/<unique-id>/<original-filename>`), explicitly selected reference identifiers and import warnings are retained and shown in asset details. No schema migration is needed.
+- The native file picker does not expose original directories. Name-only wiki/local Markdown references resolve within the selected files; duplicate names remain ambiguous. References containing directory paths cannot reliably resolve and retain a missing-reference notice rather than guessing a match. Ordinary links retain their text; embeds expand only explicitly selected notes, including heading/block references. The preview offers individual **Allow and select** actions for unselected referenced notes. Changing selection or allowing a note automatically rebuilds the reviewed upload content. Removing a queued note also rebuilds the expanded content, so removed dependencies cannot remain hidden in the upload. Preparation cancels superseded requests and disables upload until the current selection is ready. Each file in the upload queue has its own Preview button, which expands the already-prepared text and properties inside that file row. Missing/ambiguous references, cycles and unparsed attachments are reported. Code examples are not treated as references. Plugin queries are never executed.
+- The frontend reuses the existing visibility fields, representative picker, multipart upload endpoint, queue, progress polling and reprocessing actions. Defaults remain Owner-only with no representatives; explicitly selected representative bindings retain the existing approved/enabled semantics.
+- Obsidian queue workers await processing as well as upload, keeping at most three notes in flight instead of starting hundreds of indexing jobs at once. Keep the dialog open until the queue finishes; reopening it does not resume unsubmitted local files. After a batch finishes, another batch can be selected in the same dialog; completed items are retained and never requeued.
+- Obsidian uploads always create new copies, including byte-identical reimports. The preview reserves names within the batch against the owner's existing titles and filenames. Collisions produce `说明（2）.md`, `说明（3）.md`, etc. Renamed files have an editable base name in the duplicate notice; blur saves a validated name while preserving the extension and rechecking collisions. A short owner-scoped PostgreSQL transaction serializes Obsidian name allocation and creation; if the library changed after preview, the upload queue shows the actual allocated name. Ordinary upload conflict policies are unchanged.
+- Uploaded source objects contain the reviewed Markdown snapshot, with approved embeds expanded and YAML properties separated. Reprocessing uses this snapshot, not files on the user's computer. Import completion is not a representative version publication.
+
+Validation:
+
+```bash
+pnpm exec vitest run packages/web-data/tests/knowledge-obsidian.test.ts packages/web-data/tests/knowledge-library.test.ts apps/web/tests/knowledge-obsidian-route.test.ts
+```
+
+For browser verification, start the isolated no-database Dashboard described below, then run `node scripts/tests/knowledge-obsidian.mjs`. Set `OBSIDIAN_PLAYWRIGHT_MODULE` to an existing Playwright module if needed, and optionally `OBSIDIAN_BROWSER_CHANNEL=msedge`. The script creates synthetic notes in the OS temporary directory and tests selection, explicit reference permission, renaming, uploads, metadata, reimports and mobile rendering. It never edits real vaults.
+
 ## Browser capture and manual verification
 
 The URL import dialog supports two paths:

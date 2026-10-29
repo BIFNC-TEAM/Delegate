@@ -9,20 +9,31 @@ import type {
 import type { Locale } from "@delegate/web-ui";
 
 import { knowledgeBrowserCaptureSchema, type KnowledgeBrowserCapture } from "@delegate/web-data/knowledge-web-capture";
+import dynamic from "next/dynamic";
+import type { ObsidianImportMetadata } from "@delegate/web-data/knowledge-obsidian";
+import { KNOWLEDGE_TITLE_MAX_LENGTH, renameKnowledgeMarkdownFile } from "@delegate/web-data/knowledge-obsidian";
+import type { NotionDocument, NotionImportMetadata } from "@delegate/web-data/notion-types";
+import type { ObsidianUpload } from "./knowledge-obsidian-import";
 import { KnowledgeBrowserCaptureForm } from "./knowledge-browser-capture";
+
+const KnowledgeObsidianImport = dynamic(() => import("./knowledge-obsidian-import").then((module) => module.KnowledgeObsidianImport), { ssr: false });
 
 type LibraryResponse = {
   assets: KnowledgeAssetRecord[];
   representatives: KnowledgeRepresentativeOption[];
 };
 
-type ImportMode = "file" | "url" | "text";
+type ImportMode = "file" | "url" | "text" | "obsidian";
 type Visibility = KnowledgeAssetRecord["visibility"];
 type UploadConflictPolicy = "skip_duplicates" | "replace_existing" | "keep_both";
 type UploadQueueStatus = "queued" | "uploading" | "processing" | "completed" | "skipped" | "failed";
 type UploadQueueItem = {
   id: string;
   file: File;
+  obsidianImport?: ObsidianImportMetadata;
+  notionImport?: NotionImportMetadata;
+  previewText?: string;
+  displayName?: string;
   status: UploadQueueStatus;
   progress: number;
   assetId?: string;
@@ -64,6 +75,10 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
   const [visibility, setVisibility] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("notionImport") === "1") setImportOpen(true);
+  }, []);
   const [captureAsset, setCaptureAsset] = useState<KnowledgeAssetRecord | null>(null);
   const loadAbortRef = useRef<AbortController | null>(null);
 
@@ -82,7 +97,7 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
       if (includeArchived) params.set("includeArchived", "true");
       const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets?${params}`, { cache: "no-store", signal: controller.signal });
       const payload = await readResponse<LibraryResponse>(response);
-      setAssets(payload.assets);
+      setAssets(sortKnowledgeAssets(payload.assets));
       setRepresentatives(payload.representatives);
       setSelectedId((current) => current && !payload.assets.some((asset) => asset.id === current) ? null : current);
     } catch (loadError) {
@@ -221,7 +236,7 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
       </section>
 
       </div>
-      {importOpen ? <KnowledgeImportDialog repairAsset={captureAsset ?? undefined} activeSlug={activeSlug} locale={locale} onClose={() => { setImportOpen(false); setCaptureAsset(null); }} onCreated={(asset) => { setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]); }} representatives={representatives} /> : null}
+      {importOpen ? <KnowledgeImportDialog repairAsset={captureAsset ?? undefined} activeSlug={activeSlug} locale={locale} onClose={() => { setImportOpen(false); setCaptureAsset(null); }} onCreated={(asset) => { setAssets((current) => sortKnowledgeAssets(current.some((item) => item.id === asset.id) ? current.map((item) => item.id === asset.id ? asset : item) : [...current, asset])); }} representatives={representatives} /> : null}
       {selected ? <KnowledgeDetailDrawer onBrowserCapture={() => { setCaptureAsset(selected); setSelectedId(null); setImportOpen(true); }} activeSlug={activeSlug} asset={selected} locale={locale} onAction={runAssetAction} onClose={() => setSelectedId(null)} onDelete={permanentlyDelete} onUpdated={(asset) => setAssets((current) => current.map((item) => item.id === asset.id ? asset : item))} representatives={representatives} /> : null}
     </>
   );
@@ -237,7 +252,8 @@ function FilterSelect({ label, value, onChange, options }: { label: string; valu
 
 function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, onCreated, repairAsset }: { repairAsset?: KnowledgeAssetRecord | undefined; activeSlug: string; locale: Locale; representatives: KnowledgeRepresentativeOption[]; onClose: () => void; onCreated: (asset: KnowledgeAssetRecord) => void }) {
   const zh = locale === "zh";
-  const [mode, setMode] = useState<ImportMode>(repairAsset ? "url" : "file");
+  const returningFromNotion = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("notionImport") === "1";
+  const [mode, setMode] = useState<ImportMode>(repairAsset ? "url" : returningFromNotion ? "obsidian" : "file");
   const [title, setTitle] = useState(repairAsset?.title ?? "");
   const [sourceUrl, setSourceUrl] = useState(repairAsset?.sourceUrl ?? "");
   const [urlMethod, setUrlMethod] = useState<"browser" | "direct">("browser");
@@ -247,7 +263,16 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   const [tags, setTags] = useState("");
   const [visibility, setVisibility] = useState<Visibility>(repairAsset?.visibility ?? "owner_only");
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
-  const [queue, setQueue] = useState<UploadQueueItem[]>([]);
+  const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
+  const [obsidianBatch, setObsidianBatch] = useState(0);
+  const [obsidianSource, setObsidianSource] = useState<"local" | "sync" | "publish" | "notion">(returningFromNotion ? "notion" : "local");
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const [obsidianQueue, setObsidianQueue] = useState<UploadQueueItem[]>([]);
+  const queue = mode === "obsidian" ? obsidianQueue : fileQueue;
+  const setQueue = mode === "obsidian" ? setObsidianQueue : setFileQueue;
+  const fileMode = mode === "file" || mode === "obsidian";
+  const [preparing, setPreparing] = useState(false);
+  const removeObsidianSelection = useRef<((path: string) => void) | undefined>(undefined);
   const [conflictPolicy, setConflictPolicy] = useState<UploadConflictPolicy>("skip_duplicates");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -259,13 +284,46 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   const queuedCount = queue.filter((item) => item.status === "queued").length;
   const failedCount = queue.filter((item) => item.status === "failed").length;
   const completedCount = queue.filter((item) => item.status === "completed" || item.status === "skipped").length;
+  const previewItem = queue.find((item) => item.id === previewingId);
   const closeDialog = useCallback(() => {
-    if (!submitting && !isUploading) onClose();
-  }, [isUploading, onClose, submitting]);
-  useModalBehavior(closeDialog, ".knowledge-import-dialog");
+    if (previewingId) { setPreviewingId(null); return; }
+    if (!submitting && !isUploading && !preparing) onClose();
+  }, [isUploading, onClose, submitting, preparing, previewingId]);
+  useModalBehavior(closeDialog, previewItem ? ".knowledge-preview-dialog" : ".knowledge-import-dialog");
+
 
   function updateQueueItem(itemId: string, patch: Partial<Omit<UploadQueueItem, "id" | "file">>) {
     setQueue((current) => current.map((item) => item.id === itemId ? { ...item, ...patch } : item));
+  }
+
+  function preparedNotion(documents: NotionDocument[]) {
+    setObsidianQueue(current => {
+      const next = [...current];
+      for (const document of documents) {
+        const id = `notion:${document.metadata.workspaceId}:${document.id}`;
+        const index = next.findIndex(item => item.id === id);
+        if (index >= 0 && ["uploading", "processing"].includes(next[index]!.status)) continue;
+        if (index >= 0) next.splice(index, 1);
+        const stem = document.title.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim().replace(/[. ]+$/, "").slice(0, KNOWLEDGE_TITLE_MAX_LENGTH) || "Notion";
+        const name = renameKnowledgeMarkdownFile("Notion.md", stem);
+        next.push({ id, file: new File([document.text], name, { type: "text/markdown" }), notionImport: document.metadata, previewText: document.text, status: "queued", progress: 0 });
+      }
+      return next;
+    });
+  }
+
+  function preparedObsidian(items: ObsidianUpload[], removeSelection?: (path: string) => void) {
+    removeObsidianSelection.current = removeSelection;
+    setPreviewingId((current) => items.some(({ metadata }) => metadata.sourcePath === current) ? current : null);
+    setObsidianQueue((current) => [...current.filter((item) => item.status !== "queued" || item.notionImport), ...items.map(({ file, metadata, previewText }): UploadQueueItem => ({ id: metadata.sourcePath, file, obsidianImport: metadata, previewText, status: "queued", progress: 0 }))]);
+  }
+
+  function removeQueueItem(item: UploadQueueItem) {
+    if (item.obsidianImport && item.status === "queued" && removeObsidianSelection.current) {
+      removeObsidianSelection.current(item.obsidianImport.sourcePath);
+      return;
+    }
+    setQueue((current) => current.filter((entry) => entry.id !== item.id));
   }
 
   function addFiles(selectedFiles: File[]) {
@@ -295,7 +353,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     for (let attempt = 0; attempt < PROCESSING_POLL_ATTEMPTS; attempt += 1) {
       await waitFor(PROCESSING_POLL_INTERVAL_MS);
       try {
-        const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets/${assetId}`, { cache: "no-store" });
+        const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets/${assetId}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
         const { asset } = await readResponse<{ asset: KnowledgeAssetRecord }>(response);
         transientFailures = 0;
         onCreated(asset);
@@ -307,7 +365,13 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
           updateQueueItem(itemId, { status: "failed", progress: 100, assetId, message: asset.processingError ?? (zh ? "知识处理失败" : "Knowledge processing failed") });
           return;
         }
-        updateQueueItem(itemId, { status: "processing", progress: Math.min(96, 82 + Math.floor(attempt / 8)), assetId, message: zh ? "正在解析并写入向量索引" : "Parsing and indexing" });
+        const indexing = asset.processingLogs.at(-1)?.stage === "vectorize";
+        updateQueueItem(itemId, {
+          status: "processing", progress: Math.min(96, 82 + Math.floor(attempt / 8)), assetId,
+          message: zh
+            ? `文件已上传，${indexing ? "正在建立检索索引" : "正在解析知识内容"}`
+            : `File uploaded; ${indexing ? "building search index" : "processing content"}`,
+        });
       } catch (pollError) {
         transientFailures += 1;
         if (transientFailures >= 4) {
@@ -324,16 +388,19 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     const representativeLinks = linkedIds.map((representativeId) => ({ representativeId, usageMode: visibility === "public_material" ? "both" : "qa_source", reviewStatus: "approved", enabled: true, priority: 50 }));
     const form = new FormData();
     form.set("file", item.file);
-    form.set("title", queue.length === 1 ? title.trim() : "");
+    form.set("title", !item.obsidianImport && !item.notionImport && queue.length === 1 ? title.trim() : "");
+    if (item.obsidianImport) form.set("obsidianImport", JSON.stringify(item.obsidianImport));
+    if (item.notionImport) form.set("notionImport", JSON.stringify(item.notionImport));
     form.set("visibility", visibility);
     form.set("tags", JSON.stringify(parseTags(tags)));
     form.set("representativeLinks", JSON.stringify(representativeLinks));
-    form.set("conflictPolicy", policy);
+    form.set("conflictPolicy", item.obsidianImport ? "keep_both" : policy);
     try {
       const payload = await uploadKnowledgeFile(activeSlug, form, (progress) => {
         updateQueueItem(item.id, { status: "uploading", progress, message: zh ? `正在上传 ${progress}%` : `Uploading ${progress}%` });
       });
       onCreated(payload.asset);
+      updateQueueItem(item.id, { displayName: payload.asset.originalFileName ?? item.file.name });
       if (payload.upload.outcome === "skipped_duplicate") {
         updateQueueItem(item.id, { status: "skipped", progress: 100, assetId: payload.asset.id, message: zh ? "内容完全相同，已跳过" : "Identical content skipped" });
         return;
@@ -346,7 +413,9 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
           ? (zh ? "已覆盖源文件，正在重建索引" : "Source replaced; rebuilding index")
           : (zh ? "上传完成，正在处理知识" : "Upload complete; processing knowledge"),
       });
-      void watchProcessing(item.id, payload.asset.id);
+      // Vaults can contain many notes: keep their parsing/indexing bounded too.
+      if (item.obsidianImport || item.notionImport) await watchProcessing(item.id, payload.asset.id);
+      else void watchProcessing(item.id, payload.asset.id);
     } catch (uploadError) {
       updateQueueItem(item.id, { status: "failed", progress: 100, message: messageOf(uploadError, zh ? "上传失败" : "Upload failed") });
     }
@@ -359,13 +428,14 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     try {
       await runWithConcurrency(items, UPLOAD_CONCURRENCY, (item) => uploadQueueItem(item, policy));
     } finally {
+      if (mode === "obsidian") { setObsidianBatch((current) => current + 1); removeObsidianSelection.current = undefined; }
       setSubmitting(false);
     }
   }
 
   async function retryQueueItem(item: UploadQueueItem) {
     if (!item.assetId) {
-      await runUploads([item]);
+      await uploadQueueItem(item, conflictPolicy);
       return;
     }
     updateQueueItem(item.id, { status: "processing", progress: 82, message: zh ? "正在重新解析和索引" : "Reprocessing and indexing" });
@@ -377,10 +447,16 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       });
       const { asset } = await readResponse<{ asset: KnowledgeAssetRecord }>(response);
       onCreated(asset);
-      void watchProcessing(item.id, item.assetId);
+      if (item.obsidianImport || item.notionImport) await watchProcessing(item.id, item.assetId);
+      else void watchProcessing(item.id, item.assetId);
     } catch (retryError) {
       updateQueueItem(item.id, { status: "failed", progress: 100, message: messageOf(retryError, zh ? "重新处理失败" : "Reprocessing failed") });
     }
+  }
+
+  async function runWithRetry(item: UploadQueueItem) {
+    setSubmitting(true);
+    try { await retryQueueItem(item); } finally { setSubmitting(false); }
   }
 
   async function retryFailedItems() {
@@ -397,7 +473,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (mode === "file") {
+    if (fileMode) {
       if (!queue.length) {
         setError(zh ? "请选择至少一个知识文件。" : "Choose at least one knowledge file.");
         return;
@@ -439,28 +515,33 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   }
 
   return <div className="knowledge-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) closeDialog(); }} role="presentation">
-    <section aria-label={zh ? "导入知识" : "Import knowledge"} aria-modal="true" className="knowledge-import-dialog" role="dialog">
-      <header><div><span>Knowledge Intake</span><h2>{zh ? "导入新的知识" : "Import new knowledge"}</h2><p>{zh ? "支持批量上传、进度跟踪和失败重试；导入后会自动提取正文、生成摘要与标签。" : "Batch upload with progress and retry; Delegate then extracts, summarizes, tags, and indexes every source."}</p></div><button aria-label={zh ? "关闭" : "Close"} disabled={submitting || isUploading} onClick={closeDialog} type="button">×</button></header>
-      <nav className="knowledge-import-tabs">{((repairAsset ? ["url"] : ["file", "url", "text"]) as ImportMode[]).map((item) => <button className={mode === item ? "is-active" : undefined} disabled={submitting || isUploading} key={item} onClick={() => setMode(item)} type="button"><span>{item === "file" ? "▤" : item === "url" ? "↗" : "Aa"}</span>{item === "file" ? (zh ? "上传文件" : "Upload files") : item === "url" ? (zh ? "导入网址" : "Import URL") : (zh ? "手工文本" : "Manual text")}</button>)}</nav>
+    <section aria-label={zh ? "导入知识" : "Import knowledge"} aria-modal={previewItem ? undefined : true} inert={Boolean(previewItem)} className="knowledge-import-dialog" role="dialog">
+      <header><div><span>Knowledge Intake</span><h2>{zh ? "导入新的知识" : "Import new knowledge"}</h2><p>{zh ? "支持批量上传、进度跟踪和失败重试；导入后会自动提取正文、生成摘要与标签。" : "Batch upload with progress and retry; Delegate then extracts, summarizes, tags, and indexes every source."}</p></div><button aria-label={zh ? "关闭" : "Close"} disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">×</button></header>
+      <nav className="knowledge-import-tabs">{((repairAsset ? ["url"] : ["file", "url", "text", "obsidian"]) as ImportMode[]).map((item) => <button className={mode === item ? "is-active" : undefined} disabled={submitting || isUploading || preparing} key={item} onClick={() => setMode(item)} type="button"><span>{item === "file" ? "▤" : item === "url" ? "↗" : item === "obsidian" ? "⇥" : "Aa"}</span>{item === "file" ? (zh ? "上传文件" : "Upload files") : item === "url" ? (zh ? "导入网址" : "Import URL") : item === "obsidian" ? (zh ? "第三方导入" : "Third-party import") : (zh ? "手工文本" : "Manual text")}</button>)}</nav>
       <form onSubmit={submit}>
-        {mode === "file" ? <>
+        {!repairAsset ? <div hidden={mode !== "obsidian"}><KnowledgeObsidianImport key={obsidianBatch} initialSource={obsidianSource} onSourceChange={setObsidianSource} activeSlug={activeSlug} zh={zh} disabled={submitting || obsidianQueue.some((item) => item.status === "uploading" || item.status === "processing")} onPrepared={preparedObsidian} onNotionPrepared={preparedNotion} onBusyChange={setPreparing} /></div> : null}
+        {fileMode ? <>
+          {mode === "file" ? <>
           <div className={`knowledge-dropzone${queue.length ? " has-file" : ""}`} onClick={() => { if (!submitting) fileRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!submitting) addFiles(Array.from(event.dataTransfer.files)); }}>
             <input accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.txt,.md,.markdown" multiple onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} ref={fileRef} type="file" />
             <span>{queue.length ? String(queue.length).padStart(2, "0") : "↑"}</span>
             <strong>{queue.length ? (zh ? `${queue.length} 个文件已加入上传队列` : `${queue.length} files in the upload queue`) : (zh ? "拖入多个文件，或点击选择" : "Drop files, or click to browse")}</strong>
             <small>{queue.length ? `${formatBytes(queue.reduce((total, item) => total + item.file.size, 0))} · ${zh ? `单批最多 ${MAX_BATCH_FILES} 个` : `${MAX_BATCH_FILES} files max per batch`}` : (zh ? "PDF、Office、PNG/JPG、TXT、Markdown · 单文件最大 15 MB" : "PDF, Office, PNG/JPG, TXT, Markdown · 15 MB per file")}</small>
           </div>
-          <label className="knowledge-conflict-policy"><div><span>{zh ? "重复文件处理" : "Duplicate handling"}</span><small>{conflictPolicyDescription(conflictPolicy, zh)}</small></div><select disabled={submitting || isUploading} onChange={(event) => setConflictPolicy(event.target.value as UploadConflictPolicy)} value={conflictPolicy}><option value="skip_duplicates">{zh ? "跳过完全重复内容" : "Skip identical content"}</option><option value="keep_both">{zh ? "始终保留为新副本" : "Always keep a new copy"}</option><option value="replace_existing">{zh ? "覆盖已有文件" : "Replace existing file"}</option></select></label>
+          <label className="knowledge-conflict-policy"><div><span>{zh ? "重复文件处理" : "Duplicate handling"}</span><small>{conflictPolicyDescription(conflictPolicy, zh)}</small></div><select disabled={submitting || isUploading || preparing} onChange={(event) => setConflictPolicy(event.target.value as UploadConflictPolicy)} value={conflictPolicy}><option value="skip_duplicates">{zh ? "跳过完全重复内容" : "Skip identical content"}</option><option value="keep_both">{zh ? "始终保留为新副本" : "Always keep a new copy"}</option><option value="replace_existing">{zh ? "覆盖已有文件" : "Replace existing file"}</option></select></label>
+          </> : null}
+          {mode === "obsidian" && (obsidianSource === "notion" || queue.some(item => item.notionImport)) ? <label className="knowledge-conflict-policy"><div><span>{zh ? "重复文件处理" : "Duplicate handling"}</span><small>{conflictPolicyDescription(conflictPolicy, zh)}</small></div><select disabled={submitting || isUploading || preparing} value={conflictPolicy} onChange={event => setConflictPolicy(event.target.value as UploadConflictPolicy)}><option value="skip_duplicates">{zh ? "跳过完全重复内容" : "Skip identical content"}</option><option value="keep_both">{zh ? "始终保留为新副本" : "Always keep a new copy"}</option><option value="replace_existing">{zh ? "覆盖已有文件" : "Replace existing file"}</option></select></label> : null}
           {queue.length ? <section className="knowledge-upload-queue" aria-label={zh ? "上传队列" : "Upload queue"}>
             <header><div><span>{zh ? "上传队列" : "Upload queue"}</span><small>{completedCount}/{queue.length} {zh ? "已完成" : "complete"}{failedCount ? ` · ${failedCount} ${zh ? "失败" : "failed"}` : ""}</small></div><strong>{queueProgress}%</strong></header>
             <div className="knowledge-upload-overall"><i style={{ width: `${queueProgress}%` }} /></div>
             <div className="knowledge-upload-list">{queue.map((item) => <article className={`is-${item.status}`} key={item.id}>
               <span className="knowledge-upload-file-icon">{fileMark(uploadFileKind(item.file.name))}</span>
-              <div className="knowledge-upload-item-main"><header><strong title={item.file.name}>{item.file.name}</strong><span>{uploadStatusLabel(item.status, zh)}</span></header><small>{formatBytes(item.file.size)}{item.message ? ` · ${item.message}` : ""}</small><div className="knowledge-upload-progress"><i style={{ width: `${item.progress}%` }} /></div></div>
+              <div className="knowledge-upload-item-main"><header><strong title={item.obsidianImport?.sourcePath ?? item.file.name}>{item.displayName ?? item.file.name}</strong><span>{uploadStatusLabel(item.status, zh)}</span></header><small>{formatBytes(item.file.size)}{item.message ? ` · ${item.message}` : ""}</small><div className="knowledge-upload-progress"><i style={{ width: `${item.progress}%` }} /></div></div>
               <div className="knowledge-upload-actions">
-                {item.status === "failed" ? <button onClick={() => void retryQueueItem(item)} type="button">↻ {item.assetId ? (zh ? "重新处理" : "Reprocess") : (zh ? "重传" : "Retry")}</button> : null}
+                {item.previewText !== undefined ? <button type="button" disabled={preparing} aria-label={zh ? `预览 ${item.file.name}` : `Preview ${item.file.name}`} aria-haspopup="dialog" onClick={() => setPreviewingId(item.id)}>{zh ? "预览" : "Preview"}</button> : null}
+                {item.status === "failed" ? <button disabled={submitting || preparing} onClick={() => void runWithRetry(item)} type="button">↻ {item.assetId ? (zh ? "重新处理" : "Reprocess") : (zh ? "重传" : "Retry")}</button> : null}
                 {item.status === "skipped" ? <button onClick={() => void runUploads([item], "replace_existing")} type="button">↻ {zh ? "覆盖重传" : "Replace"}</button> : null}
-                {!(["uploading", "processing"] as UploadQueueStatus[]).includes(item.status) ? <button aria-label={zh ? `移除 ${item.file.name}` : `Remove ${item.file.name}`} className="is-remove" onClick={() => setQueue((current) => current.filter((entry) => entry.id !== item.id))} type="button">×</button> : null}
+                {!(["uploading", "processing"] as UploadQueueStatus[]).includes(item.status) ? <button aria-label={zh ? `移除 ${item.file.name}` : `Remove ${item.file.name}`} className="is-remove" disabled={submitting || preparing} onClick={() => removeQueueItem(item)} type="button">×</button> : null}
               </div>
             </article>)}</div>
             {failedCount ? <button className="knowledge-retry-all" disabled={submitting} onClick={() => void retryFailedItems()} type="button">↻ {zh ? `重试 ${failedCount} 个失败项` : `Retry ${failedCount} failed item${failedCount === 1 ? "" : "s"}`}</button> : null}
@@ -470,13 +551,24 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
           {!repairAsset ? <fieldset className="knowledge-url-method"><legend>{zh ? "读取方式" : "Capture method"}</legend><label><input type="radio" name="url-method" checked={urlMethod === "browser"} onChange={() => setUrlMethod("browser")} />{zh ? "浏览器采集（支持登录与人工验证）" : "Browser capture (sign-in and manual verification)"}</label><label><input type="radio" name="url-method" checked={urlMethod === "direct"} onChange={() => setUrlMethod("direct")} />{zh ? "直接读取公开网页" : "Fetch public page directly"}</label></fieldset> : <p>{zh ? `为“${repairAsset.title}”补充正文，保留原知识的标签、权限和代表关联。` : `Replace content for “${repairAsset.title}”, keeping its tags, access, and bindings.`}</p>}
           {urlMethod === "browser" ? <KnowledgeBrowserCaptureForm zh={zh} sourceUrl={sourceUrl} capture={capture} confirmed={captureConfirmed} onConfirmed={setCaptureConfirmed} disabled={submitting} onCapture={(next) => { setCapture(next); if (next) { setSourceUrl(next.sourceUrl); if (!title.trim()) setTitle(next.title); } }} /> : <p className="knowledge-url-hint">{zh ? "直接读取不使用浏览器登录状态。遇到内网限制、登录或验证码时，请切换浏览器采集。" : "Direct fetch does not use your browser session. Use browser capture for internal pages, sign-in, or verification."}</p>}
         </> : <label className="knowledge-form-field"><span>{zh ? "知识正文" : "Knowledge text"}<b>*</b></span><textarea minLength={20} onChange={(event) => setSourceText(event.target.value)} placeholder={zh ? "粘贴 FAQ、服务说明、政策、品牌信息或其他可复用知识…" : "Paste FAQs, service guidance, policies, brand context, or other reusable knowledge…"} required rows={8} value={sourceText} /><small>{sourceText.length.toLocaleString()} / 400,000</small></label>}
-        <div hidden={Boolean(repairAsset)} className="knowledge-form-grid"><label className="knowledge-form-field"><span>{zh ? "知识标题" : "Title"}{mode !== "file" ? <b>*</b> : null}</span><input disabled={mode === "file" && queue.length > 1} maxLength={180} onChange={(event) => setTitle(event.target.value)} placeholder={mode === "file" ? (queue.length > 1 ? (zh ? "批量上传使用各自文件名" : "Batch uploads use each filename") : (zh ? "不填则使用文件名" : "Defaults to filename")) : (zh ? "例如：产品与服务 FAQ" : "e.g. Product and service FAQ")} required={mode !== "file"} value={title} />{mode === "file" && queue.length > 1 ? <small>{zh ? "批量上传时，每条知识自动使用对应文件名。" : "Each batch item uses its own filename as the title."}</small> : null}</label><label className="knowledge-form-field"><span>{zh ? "手工标签" : "Tags"}</span><input onChange={(event) => setTags(event.target.value)} placeholder={zh ? "产品, FAQ, 价格" : "Product, FAQ, pricing"} value={tags} /><small>{zh ? "用逗号分隔，最多 20 个" : "Comma separated, up to 20"}</small></label></div>
+        <div hidden={Boolean(repairAsset)} className="knowledge-form-grid"><label className="knowledge-form-field"><span>{zh ? "知识标题" : "Title"}{!fileMode ? <b>*</b> : null}</span><input disabled={mode === "obsidian" || (mode === "file" && queue.length > 1)} maxLength={180} onChange={(event) => setTitle(event.target.value)} placeholder={fileMode ? (queue.length > 1 ? (zh ? "批量上传使用各自文件名" : "Batch uploads use each filename") : (zh ? "不填则使用文件名" : "Defaults to filename")) : (zh ? "例如：产品与服务 FAQ" : "e.g. Product and service FAQ")} required={!fileMode} value={title} />{fileMode && queue.length > 1 ? <small>{zh ? "批量上传时，每条知识自动使用对应文件名。" : "Each batch item uses its own filename as the title."}</small> : null}</label><label className="knowledge-form-field"><span>{zh ? "手工标签" : "Tags"}</span><input onChange={(event) => setTags(event.target.value)} placeholder={zh ? "产品, FAQ, 价格" : "Product, FAQ, pricing"} value={tags} /><small>{zh ? "用逗号分隔，最多 20 个" : "Comma separated, up to 20"}</small></label></div>
         <fieldset disabled={Boolean(repairAsset)} className="knowledge-visibility-options"><legend>{zh ? "可见范围" : "Visibility"}<b>*</b></legend>{visibilityOptions.map((option) => <label className={visibility === option.value ? "is-selected" : undefined} key={option.value}><input checked={visibility === option.value} name="visibility" onChange={() => setVisibility(option.value)} type="radio" /><span>{visibilityIcon(option.value)}</span><div><strong>{zh ? option.zh : option.en}</strong><small>{zh ? option.detailZh : option.detailEn}</small></div><i /></label>)}</fieldset>
         {!repairAsset && (visibility === "selected_representatives" || visibility === "public_material") ? <fieldset className="knowledge-representative-picker"><legend>{zh ? "关联对外代理" : "Linked representatives"}{visibility === "selected_representatives" ? <b>*</b> : null}</legend>{representatives.map((representative) => <label key={representative.id}><input checked={linkedIds.includes(representative.id)} onChange={(event) => setLinkedIds((current) => event.target.checked ? [...current, representative.id] : current.filter((id) => id !== representative.id))} type="checkbox" /><span>{representative.name.slice(0, 1)}</span><div><strong>{representative.name}</strong><small>/{representative.slug}</small></div></label>)}{!representatives.length ? <p>{zh ? "当前工作区还没有可关联的代表。" : "No representatives are available in this workspace."}</p> : null}</fieldset> : null}
         {error ? <div className="knowledge-form-error">! {error}</div> : null}
-        <footer><button disabled={submitting || isUploading} onClick={closeDialog} type="button">{mode === "file" && completedCount ? (zh ? "完成" : "Done") : (zh ? "取消" : "Cancel")}</button><button className="is-primary" disabled={submitting || (mode === "file" && !queuedCount) || (!repairAsset && visibility === "selected_representatives" && !linkedIds.length) || (mode === "url" && urlMethod === "browser" && (!capture || capture.text.trim().length < 20 || !captureConfirmed))} type="submit">{submitting ? <><i className="knowledge-spinner" />{zh ? "正在上传…" : "Uploading…"}</> : mode === "file" ? <>{zh ? `上传队列${queuedCount ? ` (${queuedCount})` : ""}` : `Upload queue${queuedCount ? ` (${queuedCount})` : ""}`}<span>→</span></> : <>{zh ? "开始处理" : "Start processing"}<span>→</span></>}</button></footer>
+        <footer><button disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">{fileMode && completedCount ? (zh ? "完成" : "Done") : (zh ? "取消" : "Cancel")}</button><button className="is-primary" disabled={submitting || preparing || (fileMode && !queuedCount) || (!repairAsset && visibility === "selected_representatives" && !linkedIds.length) || (mode === "url" && urlMethod === "browser" && (!capture || capture.text.trim().length < 20 || !captureConfirmed))} type="submit">{preparing ? <><i className="knowledge-spinner" />{zh ? "正在准备…" : "Preparing…"}</> : submitting ? <><i className="knowledge-spinner" />{mode === "obsidian" && !isUploading ? (zh ? "正在处理知识…" : "Processing knowledge…") : (zh ? "正在上传…" : "Uploading…")}</> : fileMode ? <>{zh ? `开始上传${queuedCount ? ` (${queuedCount})` : ""}` : `Start upload${queuedCount ? ` (${queuedCount})` : ""}`}<span>→</span></> : <>{zh ? "开始处理" : "Start processing"}<span>→</span></>}</button></footer>
       </form>
     </section>
+    {previewItem ? <div className="knowledge-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setPreviewingId(null); }}>
+      <section className="knowledge-import-dialog knowledge-preview-dialog" role="dialog" aria-modal="true" aria-label={zh ? "笔记预览" : "Note preview"}>
+        <header><div><span>{zh ? "笔记预览" : "Note preview"}</span><h2>{previewItem.displayName ?? previewItem.file.name}</h2></div><button type="button" aria-label={zh ? "关闭预览" : "Close preview"} onClick={() => setPreviewingId(null)}>×</button></header>
+        <div className="knowledge-preview-content knowledge-obsidian-preview">
+                {previewItem.notionImport?.warnings.length ? <ul className="knowledge-obsidian-warnings">{previewItem.notionImport.warnings.map(w => <li key={w}>{w}</li>)}</ul> : null}
+                {previewItem.obsidianImport?.warnings.length ? <ul className="knowledge-obsidian-warnings">{previewItem.obsidianImport.warnings.map((warning) => <li key={warning}>{warning.replace(/selected\/[^/]+\//g, "").replace("引用重名，请明确路径", "引用重名，请区分笔记名称后重新选择")}</li>)}</ul> : null}
+                <pre>{previewItem.previewText}</pre>
+                {previewItem.obsidianImport && Object.keys(previewItem.obsidianImport.properties).length ? <details><summary>{zh ? "笔记属性" : "Note properties"}</summary><pre>{JSON.stringify(previewItem.obsidianImport.properties, null, 2)}</pre></details> : null}
+        </div>
+      </section>
+    </div> : null}
   </div>;
 }
 
@@ -515,7 +607,29 @@ function KnowledgeDetailDrawer({ activeSlug, asset, locale, representatives, onC
   </aside></div>;
 }
 
-function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: Locale }) { const zh = locale === "zh"; const facts = [[zh ? "来源类型" : "Source type", kindLabel(asset.kind)], [zh ? "文件大小" : "File size", asset.sizeBytes ? formatBytes(asset.sizeBytes) : "—"], [zh ? "处理版本" : "Processing version", `v${asset.processingVersion}`], [zh ? "最近处理" : "Last processed", asset.processedAt ? formatDate(asset.processedAt, locale) : "—"], [zh ? "创建时间" : "Created", formatDate(asset.createdAt, locale)], [zh ? "可见范围" : "Visibility", visibilityLabel(asset.visibility, zh)]]; return <section className="knowledge-detail-facts">{facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>; }
+function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: Locale }) {
+  const zh = locale === "zh";
+  const facts = [
+    [zh ? "来源类型" : "Source type", asset.notionImport ? "Notion" : asset.obsidianImport?.publishSource ? "Obsidian Publish" : asset.obsidianImport ? "Obsidian" : kindLabel(asset.kind)],
+    [zh ? "文件大小" : "File size", asset.sizeBytes ? formatBytes(asset.sizeBytes) : "—"],
+    [zh ? "处理版本" : "Processing version", `v${asset.processingVersion}`],
+    [zh ? "最近处理" : "Last processed", asset.processedAt ? formatDate(asset.processedAt, locale) : "—"],
+    [zh ? "创建时间" : "Created", formatDate(asset.createdAt, locale)],
+    [zh ? "可见范围" : "Visibility", visibilityLabel(asset.visibility, zh)],
+  ];
+  return <>
+    <section className="knowledge-detail-facts">{facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>
+    {asset.notionImport ? <section className="knowledge-obsidian-preview"><details open><summary>{zh ? "Notion 来源信息" : "Notion source"}</summary><p>{asset.notionImport.workspaceName} · {formatDateTime(asset.notionImport.importedAt, locale)}</p><a href={asset.notionImport.sourceUrl} target="_blank" rel="noreferrer">{zh ? "打开原文" : "Open original"} ↗</a>{asset.notionImport.warnings.length ? <ul className="knowledge-obsidian-warnings">{asset.notionImport.warnings.map(w => <li key={w}>{w}</li>)}</ul> : null}</details></section> : null}
+    {asset.obsidianImport ? <section className="knowledge-obsidian-preview">
+      <details><summary>{zh ? "Obsidian 来源与属性" : "Obsidian source and properties"}</summary>
+        {asset.obsidianImport.publishSource ? <><p>{asset.obsidianImport.publishSource.siteName} · {formatDateTime(asset.obsidianImport.publishSource.importedAt, locale)}</p><a href={asset.obsidianImport.publishSource.sourceUrl} target="_blank" rel="noreferrer">{zh ? "打开原文" : "Open original"} ↗</a></> : null}
+        <p>{asset.obsidianImport.publishSource?.originalPath ?? asset.obsidianImport.sourcePath}</p>
+        <pre>{JSON.stringify(asset.obsidianImport.properties, null, 2)}</pre>
+        {asset.obsidianImport.warnings.length ? <ul className="knowledge-obsidian-warnings">{asset.obsidianImport.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
+      </details>
+    </section> : null}
+  </>;
+}
 function StatusBadge({ status, zh }: { status: KnowledgeAssetRecord["status"]; zh: boolean }) { const labels = { ready: zh ? "已完成" : "Ready", processing: zh ? "处理中" : "Processing", failed: zh ? "异常" : "Failed", archived: zh ? "已归档" : "Archived" }; return <span className={`knowledge-status is-${status}`}><i />{labels[status]}</span>; }
 function RepresentativeStack({ links, zh }: { links: KnowledgeAssetRecord["representativeLinks"]; zh: boolean }) { const enabled = links.filter((link) => link.enabled); return enabled.length ? <div className="knowledge-rep-stack" title={enabled.map((link) => link.representativeName).join(", ")}>{enabled.slice(0, 3).map((link) => <span key={link.representativeId}>{link.representativeName.slice(0, 1)}</span>)}{enabled.length > 3 ? <b>+{enabled.length - 3}</b> : null}<small>{enabled.length}</small></div> : <span className="knowledge-unlinked">{zh ? "未关联" : "Not linked"}</span>; }
 function LoadingRows() { return <>{[0, 1, 2].map((item) => <tr className="knowledge-loading-row" key={item}><td colSpan={7}><span /></td></tr>)}</>; }
@@ -601,6 +715,8 @@ function knowledgeFetch(activeSlug: string, input: RequestInfo | URL, init: Requ
   return fetch(input, { ...init, headers });
 }
 function useModalBehavior(onClose: () => void, selector: string) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -616,7 +732,7 @@ function useModalBehavior(onClose: () => void, selector: string) {
     const firstButton = document.querySelector<HTMLElement>(`${selector} button`);
     firstButton?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
@@ -628,5 +744,9 @@ function useModalBehavior(onClose: () => void, selector: string) {
       }
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onClose, selector]);
+  }, [selector]);
+}
+
+function sortKnowledgeAssets(assets: KnowledgeAssetRecord[]) {
+  return [...assets].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
 }

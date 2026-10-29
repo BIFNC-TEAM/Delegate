@@ -111,6 +111,24 @@ describe("workspace knowledge library", () => {
     await expect(getKnowledgeAsset(null, created.id)).rejects.toMatchObject({ statusCode: 404 });
   });
 
+  it("keeps Obsidian properties and sources across reprocessing and always creates new numbered assets", async () => {
+    const fileName = `obsidian-${Date.now()}.md`;
+    const input = {
+      kind: "markdown" as const, title: fileName.slice(0, -3), originalFileName: fileName,
+      sourceText: "这份测试笔记包含公开产品资料，重复导入应保留每一份而不是覆盖已有知识。",
+      metadata: { obsidianImport: { sourcePath: `Vault/${fileName}`, properties: { cost: 123 }, referencedPaths: [], warnings: [] } },
+    };
+    const assets = await Promise.all(Array.from({ length: 3 }, () => createKnowledgeAsset(null, input, { processingMode: "deferred", numberFileName: true })));
+    expect(new Set(assets.map((asset) => asset.originalFileName)).size).toBe(3);
+    expect(assets.map((asset) => asset.originalFileName)).toEqual([fileName, fileName.replace(".md", "（2）.md"), fileName.replace(".md", "（3）.md")]);
+    const ready = await processKnowledgeAsset(null, assets[0]!.id);
+    expect(ready.obsidianImport).toEqual(input.metadata.obsidianImport);
+    expect(ready.extractedText).not.toContain("123");
+    expect(ready.visibility).toBe("owner_only"); expect(ready.representativeLinks).toEqual([]);
+    const reprocessed = await processKnowledgeAsset(null, ready.id);
+    expect(reprocessed.obsidianImport).toEqual(ready.obsidianImport);
+  });
+
   it("queues reprocessing idempotently before background work starts", async () => {
     const created = await createKnowledgeAsset(null, {
       kind: "text",

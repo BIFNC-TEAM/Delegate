@@ -11,6 +11,7 @@ import {
   findKnowledgeFileConflicts,
   getKnowledgeAsset,
   listKnowledgeAssets,
+  listKnowledgeImportNames,
   listKnowledgeRepresentativeOptions,
   replaceKnowledgeAssetSource,
   resolveUniqueKnowledgeAssetTitle,
@@ -22,12 +23,15 @@ import {
 } from "@delegate/web-data";
 
 import { dashboardAuthErrorResponse, requireDashboardApiOwnerSession } from "../auth";
+import { obsidianImportSchema } from "@delegate/web-data/knowledge-obsidian";
+import { notionImportSchema } from "@delegate/web-data/notion-types";
 
 export async function GET(request: Request) {
   try {
     const session = await requireDashboardApiOwnerSession();
     const ownerId = await resolveKnowledgeLibraryOwnerId(session?.ownerId, request.headers.get("x-delegate-representative"));
     const params = new URL(request.url).searchParams;
+    if (params.get("namesOnly") === "true") return NextResponse.json({ names: await listKnowledgeImportNames(ownerId) });
     const filters: KnowledgeAssetListFilters = {
       ...(params.get("query") ? { query: params.get("query")! } : {}),
       ...(readEnum(params, "status", ["processing", "ready", "failed", "archived"] as const) ? { status: readEnum(params, "status", ["processing", "ready", "failed", "archived"] as const)! } : {}),
@@ -62,9 +66,24 @@ export async function POST(request: Request) {
         throw new KnowledgeLibraryError("文件不能超过 15 MB。", 413);
       }
       const kind = detectKnowledgeFileKind(file.name);
+      const importMetadata = readFormString(form, "obsidianImport");
+      const notionMetadata = readFormString(form, "notionImport");
+      let notionImport;
+      if (notionMetadata) {
+        if (notionMetadata.length > 256_000 || kind !== "markdown" || importMetadata) throw new KnowledgeLibraryError("Notion 来源信息无效。", 422);
+        try { notionImport = notionImportSchema.parse(JSON.parse(notionMetadata)); }
+        catch { throw new KnowledgeLibraryError("Notion 来源信息无效。", 422); }
+      }
+      let obsidianImport;
+      if (importMetadata) {
+        if (importMetadata.length > 256_000 || kind !== "markdown") throw new KnowledgeLibraryError("Obsidian 导入仅支持 Markdown 笔记。", 422);
+        try { obsidianImport = obsidianImportSchema.parse(JSON.parse(importMetadata)); }
+        catch { throw new KnowledgeLibraryError("Obsidian 来源信息无效。", 422); }
+      }
       const bytes = new Uint8Array(await file.arrayBuffer());
+      if ((obsidianImport || notionImport) && new TextDecoder().decode(bytes).length > 400_000) throw new KnowledgeLibraryError("笔记正文超过 400,000 字符。", 413);
       const checksum = checksumKnowledgeSource(bytes);
-      const conflictPolicy = readUploadConflictPolicy(form);
+      const conflictPolicy = obsidianImport ? "keep_both" : readUploadConflictPolicy(form);
       const conflicts = await findKnowledgeFileConflicts(ownerId, {
         fileName: file.name,
         checksum,
@@ -92,6 +111,7 @@ export async function POST(request: Request) {
       try {
         if (replacement) {
           asset = await replaceKnowledgeAssetSource(ownerId, replacement.id, {
+            ...(notionImport ? { notionImport } : {}),
             kind,
             originalFileName: file.name,
             mimeType: file.type || "application/octet-stream",
@@ -103,13 +123,16 @@ export async function POST(request: Request) {
             sourceObjectChecksum: stored.checksum,
           });
         } else {
-          const title = await resolveUniqueKnowledgeAssetTitle(
+          const title = obsidianImport ? file.name.replace(/\.[^.]+$/, "").slice(0, 180) : await resolveUniqueKnowledgeAssetTitle(
             ownerId,
             readFormString(form, "title") || file.name.replace(/\.[^.]+$/, ""),
           );
           asset = await createKnowledgeAsset(ownerId, {
             kind,
             title,
+            ...(obsidianImport ? { metadata: { obsidianImport } } : {}),
+            ...(notionImport ? { metadata: { notionImport }, sourceUrl: notionImport.sourceUrl } : {}),
+            ...(obsidianImport?.publishSource ? { sourceUrl: obsidianImport.publishSource.sourceUrl } : {}),
             visibility: readVisibility(form),
             originalFileName: file.name,
             mimeType: file.type || "application/octet-stream",
@@ -122,7 +145,7 @@ export async function POST(request: Request) {
             tags: readJsonArray<string>(form, "tags"),
             representativeLinks: readJsonArray<NonNullable<KnowledgeAssetCreateInput["representativeLinks"]>[number]>(form, "representativeLinks"),
             createdBy: session?.email ?? session?.ownerId ?? "dashboard-owner",
-          }, { processingMode: "deferred" });
+          }, { processingMode: "deferred", ...((obsidianImport || notionImport) ? { numberFileName: true } : {}) });
         }
       } catch (error) {
         await deleteKnowledgeSource({ bucket: stored.bucket, objectKey: stored.objectKey }).catch(() => undefined);

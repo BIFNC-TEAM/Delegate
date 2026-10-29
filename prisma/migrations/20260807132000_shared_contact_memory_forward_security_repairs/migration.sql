@@ -282,9 +282,6 @@ DECLARE
 BEGIN
   SELECT pg_get_functiondef('"memory_use_item_scope_guard"()'::regprocedure)
     INTO guard_definition;
-  -- pg_get_functiondef preserves the line endings used when the function was
-  -- created. Normalize CRLF so the exact marker check works on every host.
-  guard_definition := replace(guard_definition, E'\r\n', E'\n');
   marker_count := (
     length(guard_definition)
       - length(replace(guard_definition, authority_read_marker, ''))

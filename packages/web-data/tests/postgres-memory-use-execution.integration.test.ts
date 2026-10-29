@@ -18,6 +18,7 @@ import {
   type MemoryProjectionProvider,
 } from "../src/memory-projection-execution";
 import {
+  revalidateMemoryUseContextSourcesInTransaction,
   finalizeMemoryUseGenerationInTransaction,
   markMemoryUseItemsDisplayed,
   recordMemoryUseSearchHits,
@@ -36,6 +37,25 @@ if (process.env.DELEGATE_POSTGRES_E2E === "1") {
 describePostgres("Memory use PostgreSQL execution", () => {
   afterAll(async () => {
     await prisma.$disconnect();
+  });
+
+  it("revalidates governed context before finalization and rejects an automatic forget boundary", async () => {
+    const fixture = await createFixture();
+    const started = await startOrReuseMemoryUseRun({ generationRunId: fixture.generationRunId, sourceChannel: "web" });
+    const hits = await recordMemoryUseSearchHits({ useRunId: started.run.id, hits: [{ sourceKind: "CONTACT_MEMORY", projectionItemId: fixture.contactAProjectionId }] });
+    expect(hits.eligibleItems).toHaveLength(1);
+    const check = () => prisma.$transaction(tx => revalidateMemoryUseContextSourcesInTransaction(tx, {
+      generationRunId: fixture.generationRunId, conversationId: fixture.conversationAId, useRunId: started.run.id, itemIds: hits.eligibleItems.map(item => item.memoryUseItemId),
+    }));
+    await expect(check()).resolves.toBeUndefined();
+    expect(await prisma.memoryUseItem.findUniqueOrThrow({ where: { id: hits.eligibleItems[0]!.memoryUseItemId } })).toMatchObject({ injectedAt: null });
+    await prisma.$transaction(async tx => {
+      const text = "删除我的记忆";
+      const source = await tx.message.create({ data: { conversationId: fixture.conversationAId, senderType: "AUDIENCE", deliveryStatus: "ACCEPTED", text } });
+      await requestAutomaticContactChannelMemoryDeletionInTransaction(tx, { representativeId: fixture.representativeId, contactId: fixture.contactAId,
+        sourceChannel: RepresentativeChannelKind.WEB, sourceMessageId: source.id, sourceHash: createHash("sha256").update(text).digest("hex"), occurredAt: new Date() });
+    });
+    await expect(check()).rejects.toMatchObject({ code: "memory_use_source_rejected" });
   });
 
   it("tracks search, injection, citation, and Web display without crossing contacts", async () => {

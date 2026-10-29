@@ -40,14 +40,14 @@ AMN 的长期命题很简单：任何 Agent 都可以赚钱，任何用户都可
 
 Delegate 现在包含这些可运行的页面和服务：
 
-- **营销站点** 位于 `apps/site`，使用 Dispatch Editorial 设计系统。
+- **营销站点** 位于 `apps/site`，使用 `DESIGN.md` 中批准的蓝色服务网络设计，包含中英文交互演示和随登录态更新的账号导航。
 - **公开 representative 应用** 位于 `apps/reps`，包含代表档案、服务档位、网页聊天、充值入口模块，以及签名 public-chat session state。
 - **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、代表级 Memory 配置、workflow state，以及 Owner 资料、身份安全和 Dashboard 通知设置。
 - **可选 Telegram bot runtime** 位于 `apps/bot`，基于 grammY long-poll 和共享 Conversation Platform；它保留 Telegram 特有命令与交付边界，但不是第一版 Delegate 产品主入口。
 - **可选 Matrix Application Service** 位于 `apps/matrix-bridge`，负责认证 Matrix transaction、映射渠道事件和管理虚拟用户。原生 Matrix 是独立的可选渠道，不是 Telegram 的必需中转层。
 - **AMN wallet control plane** 覆盖不可变服务商品与价格、本地 mock、默认关闭的微信支付 API v3 Native 收款与恢复、服务权益、usage charging、Creator 暂定 20% 收益策略、退款/冲正、提现冻结、provider adapters，以及 owner/public wallet views。
 - **Compute broker** 位于 `apps/compute-broker`，在 approval 和 policy gate 后提供受治理的 `exec`、`read`、`write`、`process` 和 `browser` 请求。
-- **Agent Runtime V3** 横跨 `packages/runtime`、`packages/model-runtime`、conversation worker、Compute Broker 和 workflow runner：使用唯一的服务端验证 Goal/Action DAG、schema-pinned MCP 编译、原子执行准入、Verified Result 和证据绑定 Composer，并保留 V2 回滚兼容。
+- **Agent V2** 基于 PI 0.85.1 原生循环，统一处理所有新请求，提供 RAG 默认优先、自主工具选择和真实执行追踪。见 [运行说明](./docs/agent-v2.md)及[清理与切换](./docs/agent-v2-cleanup.md)。
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
 - **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、delegation tasks、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
 - **OpenViking 集成** 作为 PostgreSQL 权威数据之后的可重建投影，支持已发布公开知识与受治理记忆的同步和召回。
@@ -268,6 +268,10 @@ PORT=3102 pnpm dev:reps
 - Dashboard: `http://localhost:3101/dashboard?view=overview`
 - Representative: `http://localhost:3102/reps/lin-founder-rep`
 
+请同步配置 `NEXT_PUBLIC_SITE_URL`、`NEXT_PUBLIC_DASHBOARD_URL`、`NEXT_PUBLIC_REPRESENTATIVE_URL` 和认证服务中登记的回调地址。Dashboard 只允许配置的官网来源读取会话状态；如果复用端口 3001 的现有 Docker Dashboard，官网应使用其配置的来源（通常为端口 3000），不能仅换用一个预览端口。
+
+官网回归测试：`pnpm --filter @delegate/site test`。已登录用户显示账号菜单，正文入口直接前往代表管理；切回标签页或恢复页面时会重新检查会话。
+
 如果只想为本地非 Docker app 开发启动数据库：
 
 ```bash
@@ -340,7 +344,7 @@ queue 配置不完整，Delegate 会以 `temporal_not_fully_configured` 失败�
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
 - `PUBLIC_CHAT_RATE_LIMIT_SECRET` 会先对网络、用户和对外代理限流键做 HMAC，再写入 Postgres；未配置时回退到 `REP_PUBLIC_CHAT_SESSION_SECRET`。三个 `PUBLIC_CHAT_*_REQUESTS_*` 变量用于调整分布式准入限额。只有受信反向代理会覆盖指定请求头时才设置 `PUBLIC_CHAT_CLIENT_IP_HEADER`，否则保持为空。
 - `PUBLIC_MATERIAL_LINK_SECRET` 用于签发十分钟有效、绑定对外代理、资料校验和与处理版本的公开资料链接。下载时会重新检查当前发布和审批状态，因此资料归档、停用、替换或取消公开后，已签发链接也会失效。
-- `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_MODEL_FALLBACK_PROVIDER` 和各 Provider 的模型配置控制 Pi 的模型调用与有界回退。新对话只运行内嵌的 `@earendil-works/pi-agent-core@0.85.1`，知识库、MCP、Skill、沙盒、产物和真人转接都通过 Delegate capability adapter 按需接入。旧 V2/V3 Planner 与 Composer 发布开关已移除；Worker 仍会明确拒绝遗留变量，以防运维人员误以为它们还能启用回退链路。
+- 新请求统一使用 Agent V2 和 PI 0.85.1 原生循环。`DELEGATE_V2_MODEL_*` 可完整指定聊天模型连接；否则复用已配置 provider。额度、授权知识、MCP、Skills 和沙盒由宿主提供，人工接管通过现有产品控制保留。旧分类、规划、核验和改写入口已删除。见 [配置与切换](./docs/agent-v2-cleanup.md)。
 - `DELEGATE_AGICTO_API_KEY` 启用 AGICTO；未单独配置时可以复用现有 `OPENVIKING_MODEL_API_KEY` 与 `OPENVIKING_MODEL_API_BASE`。AGICTO 仅在线路协议上兼容 OpenAI，不会被记录成 OpenAI Provider，也不会借用 `OPENAI_API_KEY`。长文档通过 `DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS`、`DELEGATE_MODEL_DOCUMENT_MAX_OUTPUT_TOKENS` 和 `DELEGATE_MODEL_DOCUMENT_MAX_PARTS` 设置独立超时、单段预算和有界续写段数。
 - `OPENVIKING_*` 控制 public memory sync、recall 和 commit 行为。
 - `COMPUTE_*` 控制 broker、Docker runner、browser image 和 native computer-use readiness。`COMPUTE_MCP_CATALOG_REFRESH_INTERVAL_MS` 默认 120 秒，应小于外部 Capability 5 分钟 Availability TTL。
@@ -352,7 +356,7 @@ queue 配置不完整，Delegate 会以 `temporal_not_fully_configured` 失败�
 
 知识文件会先持久化到对象存储，再由后台任务重新读取原文件、解析正文、规范化与分块，并写入 OpenViking 向量索引。只有对象、正文和向量索引全部成功后，资产才会进入 `READY`；归档和永久删除会同步移除向量索引，避免已撤权内容继续被召回。
 
-当 model providers 不可用时，旧的纯展示路径仍可使用 deterministic preview；V3 active 的规划、证据、工具执行和 Composer 会失败关闭，绝不会把缺失的工具/证据结果改成模型猜测。
+当 model providers 不可用时，旧的纯展示路径仍可使用 deterministic preview；V2 的证据、工具执行和回答释放会失败关闭，绝不会把缺失的工具/证据结果改成模型猜测。
 
 ## 常用命令
 
@@ -530,8 +534,9 @@ Delegate 使用 [DESIGN.md](./DESIGN.md) 中定义的 **Dispatch Editorial** 方
 ## 文档地图
 
 - [Architecture](./docs/architecture.md): product thesis、runtime loop、security boundary 和 OpenViking rules。
-- [Agent Runtime V3](./docs/agent-runtime-v3.md): PlannerProposal、TurnPlan、能力、审批、执行、证据、交付、计费、发布门槛和 pi 框架决策的权威规范。
-- [Conversation runtime flow](./docs/conversation-runtime-flow.md): 渠道中立的 V3 运行流程。
+- [Agent V2](./docs/agent-v2.md)：独立入口、系统提示词、预算、启动和回退；[验收与对照记录](./docs/agent-v2-validation.md)。
+- [清理与切换](./docs/agent-v2-cleanup.md)：删除范围、历史数据兼容、上线与回退。
+- [Conversation runtime flow](./docs/conversation-runtime-flow.md): 渠道中立的 V2 运行流程。
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): 更大的系统方向和 tradeoffs。
 - [Public audience identity](./docs/public-audience-identity.md): Web 匿名身份、Contact/Conversation、充值和 sandbox linkage。
 - [Conversation platform](./docs/conversation-platform.md): 渠道中立消息、episode、版本、人工接管、SSE 和 Matrix Application Service 边界。

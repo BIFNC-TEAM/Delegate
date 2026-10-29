@@ -24,10 +24,10 @@ describe("legacy fixed-tier pricing retirement", () => {
       readWorkspaceFile("packages/web-data/src/representative-setup.ts"),
       readWorkspaceFile("packages/web-data/src/conversation-platform.ts"),
       readWorkspaceFile("packages/web-data/src/openviking.ts"),
-      readWorkspaceFile("packages/model-runtime/src/context.ts"),
+      readWorkspaceFile("packages/model-runtime/src/v2/prompt.ts"),
       readWorkspaceFile("apps/bot/src/representative-config.ts"),
       readWorkspaceFile("apps/bot/src/telegram-bot-runtime.ts"),
-      readWorkspaceFile("apps/conversation-worker/src/processor-pi.ts"),
+      readWorkspaceFile("apps/conversation-worker/src/processor.ts"),
     ].join("\n");
 
     expect(sources).not.toContain("pricingPlans");

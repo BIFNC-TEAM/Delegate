@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   calculateSelfDurations,
@@ -14,6 +14,38 @@ class VirtualClock implements MonotonicClock {
 }
 
 describe("Pi telemetry timing contracts", () => {
+  it("minimizes arbitrary nested inputs before retained events and audit callbacks", async () => {
+    const onEvent = vi.fn();
+    const telemetry = new PiTelemetry({ runId: "audit", onEvent });
+    const secret = "SYNTHETIC_PRIVATE_CANARY";
+    const data = { toolCallId: "call-1", arguments: { query: secret, nested: [{ password: secret }], url: `https://example.invalid/?token=${secret}` }, sourceCount: 2, extra: { body: secret } };
+    await telemetry.event({ type: "tool.started", module: "mcp", data });
+    expect(JSON.stringify(telemetry.events)).not.toContain(secret);
+    expect(JSON.stringify(onEvent.mock.calls)).not.toContain(secret);
+    expect(telemetry.events[0]?.data).toMatchObject({ sourceCount: 2, argumentCount: 3 });
+    expect(data.arguments.query).toBe(secret);
+  });
+
+  it("keeps response text in the delivery callback but excludes it from audit history", async () => {
+    const onEvent = vi.fn();
+    const telemetry = new PiTelemetry({ runId: "audit", onEvent });
+    const delta = "SYNTHETIC_PRIVATE_RESPONSE";
+    await telemetry.event({ type: "response.delta", module: "response", delta });
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ delta }));
+    expect(JSON.stringify(telemetry.events)).not.toContain(delta);
+    expect(telemetry.events[0]).not.toHaveProperty("delta");
+  });
+
+  it("removes raw provider errors and URL credentials from span diagnostics", () => {
+    const telemetry = new PiTelemetry({ runId: "audit" });
+    const secret = "SYNTHETIC_PRIVATE_SPAN";
+    const spanId = telemetry.start({ module: "mcp", operation: "call" });
+    telemetry.end(spanId, { status: "error", error: `request failed password=${secret}`, resultRef: `https://user:${secret}@example.invalid/private?q=${secret}` });
+    expect(JSON.stringify(telemetry.spans)).not.toContain(secret);
+    expect(telemetry.spans[0]?.error).toBe("operation_failed");
+    expect(telemetry.spans[0]?.resultRef).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
   it("measures serial spans and request elapsed time", () => {
     const clock = new VirtualClock();
     const telemetry = new PiTelemetry({ runId: "serial", clock });

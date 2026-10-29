@@ -1,0 +1,193 @@
+# Agent V2 运行说明
+
+日期：2026-10-19。V2 已验收，新请求统一使用 V2。旧编排已删除，历史任务和数据按[清理与切换说明](agent-v2-cleanup.md)保留。有限行为测试不代表任意任务均可靠。
+
+分支：`codex/agent-architecture`；基线：`0387c5f`。隔离 worktree：`/Users/neo/.codex/worktrees/agent-v2/Delegate`。原目录未跟踪的 reports/docs 保留，未带入本次开发线。
+
+## 已核实的 PI 实现
+
+仓库锁定 `@earendil-works/pi-agent-core@0.85.1` 和 `@earendil-works/pi-ai@0.85.1`。实现核对了安装包 README、`dist/agent.d.ts`、`dist/types.d.ts` 和 `dist/agent-loop.js`，以及 [对应 tag 的官方文档](https://github.com/earendil-works/pi/blob/v0.85.1/packages/agent/README.md)。未升级框架。
+
+实际使用 `Agent`、`streamFn`、`beforeToolCall`、`prepareNextTurnWithContext`、`shouldStopAfterTurn`、`subscribe`、`abort`。PI 自己维护模型/工具循环、参数处理、工具返回配对与事件。一个 batch 中出现 `executionMode: sequential` 工具时，0.85.1 会将整个 batch 串行执行；V2 对写操作使用这个原生行为，另用信号感知的 semaphore 限制独立读取并发。
+
+## 主流程与责任
+
+```mermaid
+flowchart TD
+  A[现有身份、发布、受众和额度准入] --> B[固定 V2 版本、组装必要上下文]
+  B --> C[PI 主模型]
+  C --> D{主模型的下一步}
+  D -->|缺少必要用户输入| E[保存 waiting_user 与累计预算]
+  E -->|后续用户补充，新主动时限| B
+  D -->|需要证据或执行| F[参数、权限、预算、幂等边界]
+  F --> G[真实工具执行或结构化错误]
+  G --> C
+  D -->|充分或无法继续| H[最终答案、模型声明的状态、来源 ID]
+  H --> I[授权与格式检查]
+  I --> J[现有存储、SSE、来源与可展开过程]
+```
+
+主模型决定 RAG 是否适用、澄清、工具/Skill/参数、组合与顺序、证据充分性、冲突和时效，以及失败后修正或停止。默认不确定覆盖时先一次 RAG；翻译/润色、完整材料总结、实时信息、明确来源约束和已有有效证据允许跳过。内部事实未找到不得用互联网或常识补造。
+
+服务端维护注册、执行、参数和权限、预算、取消、并发、真实追踪及会话。语义判断留在正常的下一轮模型响应中。仅检查来源 ID 存在，不能由此断言内容支持结论。无效引用的整段答案被拦下；已有来源但缺少可解析引用时结果标记 partial，不启动额外核验模型。
+
+`waiting_user` 来自主模型的 `<waiting_user>` 状态标记或 `request_clarification` 工具，服务端不靠天气/政策等词语推断。等待用户期间没有活动定时器。恢复重新计主动时限，保留原任务输入与累计轮次、尝试、token、费用及已尝试写入指纹。模型仍可能错误声明状态，此问题通过真实评估暴露，不能用格式检查证明语义正确。
+
+## V2 放弃了哪些旧决策
+
+- 不调用 `DelegatePiAgentRuntime.run`、旧 `buildPiTools`、`GoalExecutionState`、固定 final review/rewrite。
+- 不调用 ordinary-question 知识预取、simple/selective-text 分流、知识问题正则、旧证据需求派生。
+- 不调用知识查询重写、引用关键词过滤、附件专项 Skill 选择/恢复与输出文件名推断。
+- 不根据任务关键词隐藏/替换工具；大量目录仅提供通用词项发现和分页。
+
+worker 通过 `agent-capabilities.ts` 复用授权检索和工具传输，通过 `generation-delivery.ts` 保留渠道交付。`processor.ts` 只负责认领、租约、确定性控制与 V2 入口，不再导入旧决策模块。
+
+## 复用与安全边界
+
+- PI 模型客户端及现有 provider 配置；V2 factory 禁用 SDK 隐式重试。
+- `recallRepresentativeContext` / OpenViking / Memory UseRun，限定 `PUBLIC_KNOWLEDGE`，保留当前授权与撤回检查。
+- 已发布具体 MCP schema、服务端行为分类、Compute Broker 的准入/审批/幂等及执行回执。
+- V2 附带 `rejectApprovalWait` 收紧约束。Broker 在执行时将所有最终 ask 决策改为 deny；客户端先查询受认证的 `/internal/compute/features`，旧 broker 不支持则不发送执行请求，避免未知字段被旧 schema 丢弃。
+- 已安装版本固定的 Skills、受限 Python/浏览器/文件能力。
+- 会话 principal、租户/受众/版本边界、工作租约、钱包准入、Postgres 消息保存和渠道交付。
+- `PiTelemetry` 与现有审计最小化方法。真实调用记录只含调用标识哈希、注册名称、类别、参数数量、时间、状态、来源哈希、大小和尝试次数；不保留 raw arguments、完整工具返回、密钥或隐藏思维。
+
+`AgentContextAuthorization` 在每次模型调用、工具派发、结果接收和最终释放处复查。拒绝会终止相应 run，不允许换工具绕过。未知行为工具拒绝派发。写操作串行，不做基础设施重试；结果未知停止且明确告知查回执。主机适配器仍须实施持久幂等与远程取消，单纯 AbortSignal 无法撤销已发生的外部效果。
+
+worker 在交给 V2 前，按同一权限判断过滤工具清单并在执行时再次检查：沙盒执行要求有效计算配置启用且 `exec/write=allow`，浏览器要求 `browser=allow`，MCP 要求 `mcp=allow`。需要审批或行为未分类的工具不进入模型清单。少量工具直接暴露和大量工具的 `discover_tools` 均使用这份过滤后的清单；RAG、Skills 不因计算权限关闭而被移除。这只排除已知不可执行的能力，不能代替 Broker 对具体参数、资源及运行环境的实时准入检查，也不保证外部服务可用。
+
+宿主确认脚本未提交，或受限 Python 已结束且输出格式被拒绝、没有发布文件时，可把结构化错误交回下一次正常模型响应，由模型决定修正参数；每次调用仍计预算。当前文件契约将完整 stdout 保存为唯一产物，日志必须写 stderr。未知执行结果、权限拒绝及交付完整性未确认不能借此重试，见[CSV 输出契约与真实恢复验证](agent-v2-csv-output-fix.md)。
+
+已有代表的 `answerScope=owner_and_domain` 或 `knowledgePolicy=domain_only` 在旧 worker 中要求专项语义审核。当前 V2 在模型/工具开始前明确阻止这些受限配置，不默默丢掉审核要求，也不退回旧审核链。此限制适用于所有新请求，不会回退旧版本。
+
+## 入口与文件
+
+新的[100条核心验收规格](../tests/agent-v2/README.md)统一列出用例、测试数据文件清单及需求映射。最新[2026-10-26执行登记](../reports/agent-v2/core-100/20261026-record-only/report.md)为39条完整执行（33 PASS、3 FAIL、3 REVIEW）、16条部分执行、45条阻塞。首批10条已有产品API/SSE自动断言及独立语义评审；其余部分使用受控测试和采证复核，不能宣称100条全自动或95%覆盖。20261027工具目录权限修复只通过本地机制回归，尚未部署或真实模型复测，历史报告保持原样。
+
+| 文件/目录 | 用途 |
+| --- | --- |
+| `packages/model-runtime/src/v2/prompt.ts` | 实际接入的核心系统提示词 |
+| `v2/runtime.ts` | 单一 PI 循环、事件、预算、来源、澄清状态 |
+| `v2/config.ts` / `guards.ts` | 集中配置、时限、并发和输出边界 |
+| `v2/capabilities.ts` | RAG、具体 MCP、Search、Skills、沙盒/浏览器定义 |
+| `v2/provider.ts` | 复用 PI provider，关闭隐式模型重试 |
+| `v2/cli.ts` / `fixtures.ts` | 独立本地入口、显式合成工具 |
+| `v2/evaluate.ts` | 真模型决策 + 受控工具数据，对照旧版本 |
+| `apps/conversation-worker/src/processor-v2.ts` | 所有聊天新请求的唯一模型执行入口 |
+| `packages/compute-protocol` / `apps/compute-broker` / `compute-client.ts` | 无审批等待的单调收紧约束及协议能力检查 |
+| `packages/web-data/src/agent-v2-session.ts` | 同 episode、同版本、同受众范围的澄清恢复 |
+| `public-agent-presentation.ts` / `public-agent-feedback.tsx` | 授权后的来源和可展开真实过程 |
+
+独立包入口为 `@delegate/model-runtime/v2`。core 不依赖数据库；必须由调用方提供可信 `authorize` 回调。不要将这个 in-process 接口直接作为匿名公网 API。
+
+## 本地启动
+
+在 worktree 根目录：
+
+```sh
+pnpm install --frozen-lockfile
+pnpm db:generate
+pnpm test:agent:v2
+pnpm agent:v2 -- "翻译成英文：会议改到明天。"
+```
+
+沿用 `.env.example` 的 `DELEGATE_MODEL_PROVIDER` 和相应 provider 凭据。不会打印凭据；不将原工作区 `.env` 复制或提交。可以通过 `node --env-file=/absolute/path/to/.env --import tsx ...` 显式加载本地配置。
+
+演示检索及恢复（真实模型、明确的合成工具，不能当现实业务/天气服务）：
+
+```sh
+pnpm agent:v2 --fixture-tools --session .local/agent-v2-session.json "查询星河科技的员工年假制度"
+pnpm agent:v2 --fixture-tools --session .local/agent-v2-session.json "今天的天气如何"
+pnpm agent:v2 --fixture-tools --session .local/agent-v2-session.json "上海"
+```
+
+CLI 默认没有业务工具；`--fixture-tools` 才启用合成库、合成天气和实际数值乘法。session 文件为本地开发者拥有的 0600 文件；不是客户端可提交的授权凭证。完成后状态写为 null。Ctrl-C 传递取消信号。
+
+在已有**隔离测试数据库/服务栈**中接入现有 Web 聊天：
+
+```sh
+DELEGATE_AGENT_VERSION=v2 \
+pnpm dev:conversation-worker
+```
+
+所有代表的新请求均使用 V2，不再需要白名单。`DELEGATE_AGENT_VERSION` 可省略或设为 `v2`；其他显式版本会拒绝启动。原白名单变量不再生效，应从部署配置移除。聊天和 SSE 路径保持不变。首次认领固定版本；旧版已启动任务不会改跑 V2，而是以不可重试的停止状态保留回执。部署时先停止旧 worker，避免不同版本同时消费队列。
+
+使用 MCP/沙盒/浏览器时，隔离测试栈的 Compute Broker 也须使用本开发线代码；旧 broker 会因不支持 `rejectApprovalWait` 而被拒绝。这个协议限制只会把 ask 收紧为 deny，不能把 deny/ask 升为 allow。
+
+Web 显示现有进度阶段、最终来源和可展开的调用状态/耗时。公网投影不含内部工具名、参数、回执正文和 ID；内部审计保存实际注册工具名称。样式沿用 `DESIGN.md` 颜色、字体和 4px 间距，原生 details 支持键盘。
+
+## 配置与预算
+
+均以 `DELEGATE_V2_` 为前缀，完整默认值见 `config.ts`。这些是初始防护值，**待真实负载调整，不是性能最优结论**。
+
+| 后缀 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `ACTIVE_MS` | 120000 | 单次 PI 主动执行时限；不包含等待用户的时间 |
+| `FINAL_RESERVE_MS` | 15000 | 保留收尾窗口，禁止新工具耗尽它 |
+| `TOOL_TIMEOUT_MS` | 25000 | 工具尝试的共享时限，受总时限进一步限制 |
+| `MODEL_TURNS` | 8 | 一个任务累计模型轮次，最后一轮收尾 |
+| `TOOL_CALLS` | 12 | PI 提出的工具调用数，含参数/权限阻止的提议 |
+| `ATTEMPTS` | 16 | 模型请求 + 工具实际尝试/基础设施重试总数，预留一次最终模型请求 |
+| `CONCURRENCY` | 3 | 独立只读调用并发上限；写调用使原生 batch 串行 |
+| `TOOL_OUTPUT_BYTES` | 12000 | 完整 JSON 结果包大小，包括来源/产物元数据 |
+| `CONTEXT_BYTES` | 64000 | 完整发送上下文大小；超限明确停止，不偷偷删掉当前任务或调用配对 |
+| `TOTAL_TOKENS` | 200000 | 累计计量预算，发送前按 UTF-8 大小保守准入 |
+| `OUTPUT_TOKENS` | 2048 | 每次最大输出 |
+| `FINAL_RESERVE_TOKENS` | 512 | 最后回答保留输出量 |
+| `READ_RETRIES` | 1 | 仅 host 明确分类为 transient 的只读错误 |
+| `DIRECT_TOOLS` | 16 | 小目录直接暴露；大目录 discover_tools 分页加载 |
+| `TEMPERATURE` | 0 | 初始低随机性配置，不保证模型策略正确 |
+| `THINKING_TOKENS` | 1024 | 已验证 profile 的原生思考上限，包含在输出额度内；0 关闭，最后收尾或输出不足时关闭 |
+| `REASONING_PROFILE` | auto | 自动应用已验证的 Qwen Plus 配置；可显式设为 `qwen-chat-template`，仅用于支持对应字段的 Chat Completions 端点 |
+| `COST_USD` | 未设置 | 可选费用准入；必须有可信的模型输入/输出单价，否则拒绝 |
+| `TIMEZONE` | Asia/Shanghai | worker/CLI 的可信时区；不能从访客文本授予身份或位置 |
+
+token usage 使用 provider 的实际值；没有 usage 时以保守估值扣减预算。费用基于配置单价，`costAvailable=false` 时 0 不是“免费”，也不是实际账单。模型客户端超时仍受既有 `DELEGATE_MODEL_TIMEOUT_MS` 约束；模型容量使用既有 `DELEGATE_PI_CONTEXT_WINDOW_TOKENS` 配置，应依据真实 provider 容量设置。外部自定义 adapter 不得隐藏重试；必须把可重试错误抛成 `V2Error("transient")`，由 V2 统一计数。
+
+V2 默认对已验证的 `agicto`/`bailian`、`openai-completions`、`qwen-plus` 组合使用 PI 原生 Qwen thinking profile；这是模型能力适配，不依赖用户问题或业务关键词。思考发生在正常主模型请求内，不引入核验链，正文不会写入追踪或澄清状态。其他模型保留已配置的 PI 传输绑定。具体质量、耗时取舍和复测见[澄清修复验收](agent-v2-clarification-fix.md)。
+
+自托管端点可显式配置 `DELEGATE_V2_REASONING_PROFILE=qwen-chat-template`。PI 0.85.1 会发送 `chat_template_kwargs.enable_thinking` 和 `thinking_token_budget`，而非 Qwen Plus 的顶层 `enable_thinking` / `thinking_budget`。必须先验证服务端支持；不能仅凭模型名字套用。当前本地 `qwen3.8-27b` 的配置、复测及限制见[模型切换验收](agent-v2-qwen38-validation.md)。
+
+自定义模型端点时，同时配置 `DELEGATE_V2_MODEL_BASE_URL`、`DELEGATE_V2_MODEL_ID`、`DELEGATE_V2_MODEL_API_KEY`，仅覆盖 V2 的 Chat Completions 连接。三项必须完整，避免把旧凭据发往新地址；没有模型回退，不修改旧 `DELEGATE_MODEL_*` 配置。新端点费用单价默认未知，需用 `DELEGATE_V2_MODEL_INPUT_COST_USD_PER_1M_TOKENS` / `DELEGATE_V2_MODEL_OUTPUT_COST_USD_PER_1M_TOKENS` 单独提供，不能继承另一模型的单价。实际 `3002` 地理代表切换见[部署记录](agent-v2-geography-3002.md)。
+
+SDK 的 `authorizedUserLocation` 只能由可信主机提供已获授权的位置，缺省为 `null`；worker 不从时区、IP 或检索结果推断位置。模型同时收到本次真实工具结果摘要（不含原始参数），避免把工具描述或计划当成已经执行。
+
+会话历史以带真实请求状态的参考数据提供，当前消息单独作为本轮目标；不重放旧助手事实或把已完成的历史请求当待办。等待澄清的任务单独标记，正常指代与续问仍由主模型判断，见[连续对话修复与复测](agent-v2-current-turn-fix.md)。
+
+## 来源、状态与数据保存
+
+返回 `text / sources / artifacts / status / calls / events / spans / usage / taskUsage / firstTextMs`。来源 ID 由范围、来源身份、版本和 URL 稳定派生；模型使用 `[S:id]`，worker 映射为允许公开的来源标题，真实链接通过既有来源栏显示。内部 ledger 映射 `sourceBindings` 不进入公开 API 或审计。
+
+流式过程事件来自真实 PI/工具事件。最终文字在本轮结束、来源格式检查及授权释放后发送；当前不展示模型的工具前猜测、未结束草稿或隐藏思维。因此 `firstTextMs` 是首个释放的最终文字时刻，不等于 provider 首 token。这里选择安全缓冲，不声称已实现逐 token 的可验证事实流。
+
+worker 将最小 `v2Task` 存入原有 `GenerationRun.contextSnapshot.agentTrace`，与最终消息事务一起保存，无需迁移表结构。澄清恢复只重新读取同 episode 的未删除用户消息、同代表版本和范围；关闭短期记忆时不恢复。检索正文、Skill 正文、工具结果不写入该状态。跨请求证据未获得当前 UseRun 重新授权时，不复用旧正文，必要时重新检索。
+
+## 已知限制
+
+1. 初轮两项行为失败已完成[定向修复与多轮真实复测](agent-v2-clarification-fix.md)；历史失败保留。有限样本不代表开放任务均可靠，也不能以 mocked tests 证明自主行为。
+2. 新的审批等待/恢复尚未实现 V2 checkpoint 协议。当前明确阻止需要新审批、未知行为和不满足 allow 模式的沙盒/浏览器操作；不会自动回退旧流程或静默创建审批。一般写入的持久幂等仍由 Compute Broker 执行。
+3. 保留明确的专项语义审核边界：上述受限代表配置暂不能进入 V2。并未用一个全局审核模型代替它。
+4. 主机目前没有单独配置 `web` Search adapter，实际生产能力依赖发布的具体 MCP 搜索工具或允许的沙盒浏览器。独立库的 Search adapter 接口已实现，演示使用合成工具。
+5. 当前生产沙盒仍遵循原有 Python、附件归属、单文本产物等底层限制；V2 不将它包装成无限制 shell 或任意文件编辑器。RAG 主机没有返回文档更新时间/公开版本的字段时保持缺失，不伪造时效。
+6. 已部署独立本地 Postgres + OpenViking + Compute Broker 验收栈，入口、自检和 10 个手工用例见[本地部署记录](agent-v2-local-deployment.md)。这不覆盖全部权限/账单/渠道组合，也不代表在线检索质量或负载压测完成。已有渠道交付使用原实现；无法强制撤销远程已提交的效果。
+7. 初始版本只做有界上下文和按需工具发现，没有复杂缓存或新增规划服务。超大任务可明确因 context/budget limit 停止。
+
+上线部署及回退边界见[清理与切换说明](agent-v2-cleanup.md)。本次仅修改代码，不自动部署、不修改数据库或代表配置。
+
+## 2026-10-22 本地修复保留状态
+
+[修复、验证与待验收报告](../reports/agent-v2/core-100/20261022-remediation/report.md)记录额度准入、PG冲突、Web交付/匿名重放、空截断收尾及只读HTTP错误分类。仍由主模型作正常决策；无新增业务路由或固定核验链。仅思考达到输出上限且无答案/工具时，允许一次受预算约束的PI原生无工具收尾。
+
+最新源码未全部部署：3002未动，13002运行r3；HTTP分类修复仅构建至未应用的r4，最后状态提示词更新未构建。长URL完整性和失败任务误标completed仍未解决。最终离线Agent专项228通过，不能代替100条完整验收或性能通过。
+
+按用户决定保留本地修复/报告，暂停新增云沙盒测试，暂不推送或创建PR。共享腾讯沙盒凭据尚待轮换，详见[凭据事件报告](../reports/agent-v2/core-100/20261022-remediation/credential-routing-incident.md)。
+
+## 独立测试评审器（2026-10-23）
+
+新增测试命令 `test:agent:v2:semantic`、`typecheck:agent:v2:semantic`、`eval:agent:v2:semantic`。实现位于 `packages/model-runtime/evaluation/semantic/`，没有从生产入口导出，也没有被服务源代码导入。具体执行和结果协议见[测试评审器文档](../packages/model-runtime/evaluation/semantic/README.md)。
+
+它在Agent结束后独立评分，不修改Agent回答或状态。当前仅三类合成场景；业务架构、13002/3002部署、权限和历史100条验收登记均不因此改变。当前评审模型复用了Qwen连接，相关性风险在报告中明确标注。
+
+## 首批真实产品验收入口
+
+新增独立命令 `eval:agent:v2:product`，对固定13002/15432隔离环境执行10条用例的18个变体，读取实际发布版本、知识授权/注入记录和MCP回执后评审。专用合成代表明确禁止浏览器和代码执行，不修改正常服务链路。详见[运行说明](../packages/model-runtime/evaluation/product/README.md)和[实际验收结果](../reports/agent-v2/product10/report-20261023.md)。本批存在失败和待复核，未达到发布门槛；100条覆盖矩阵不自动继承通过。

@@ -59,7 +59,14 @@ export async function GET(
     return NextResponse.json({ error: "Artifact not found." }, { status: 404 });
   }
 
-  const inline = new URL(request.url).searchParams.get("inline") === "1";
+  // Generated content must not execute with the application's origin. Unknown
+  // and active document types remain downloads even if inline=1 is requested.
+  const safeInlineMimeTypes = new Set([
+    "text/plain", "text/csv", "text/markdown", "application/json",
+    "image/png", "image/jpeg", "image/webp", "image/gif",
+  ]);
+  const inline = new URL(request.url).searchParams.get("inline") === "1"
+    && safeInlineMimeTypes.has(artifact.mimeType.split(";", 1)[0]!.trim().toLowerCase());
   const response = new NextResponse(new Uint8Array(artifact.buffer), {
     status: 200,
     headers: {
@@ -67,6 +74,7 @@ export async function GET(
       "Content-Type": artifact.mimeType,
       "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="${artifact.fileName}"`,
       "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
     },
   });
   setPublicAudienceSessionCookie(

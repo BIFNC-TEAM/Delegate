@@ -371,6 +371,7 @@ services:
       TENCENT_AGS_DOMAIN: ${TENCENT_AGS_DOMAIN:-}
       TENCENT_AGS_REGION: ${TENCENT_AGS_REGION:-}
       TENCENT_AGS_CODE_TOOL: ${TENCENT_AGS_CODE_TOOL:-}
+      TENCENT_AGS_ALL_IN_ONE_TOOL: ${TENCENT_AGS_ALL_IN_ONE_TOOL:-}
     depends_on:
       postgres:
         condition: service_healthy

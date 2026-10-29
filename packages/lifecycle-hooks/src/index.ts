@@ -60,6 +60,9 @@ export type ToolPreflightEvent = {
   capability: string;
   decision: "allow" | "ask" | "deny";
   reason: string;
+  codeClassification?: "untrusted_code";
+  inlineCodeIntegrityVerified?: boolean;
+  codeExecutionProfileId?: string | null;
   requestedCommand?: string;
   requestedPath?: string;
   workingDirectory?: string;

@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import {
   nativeComputerUsePreflightResponseSchema,
+  generalCodeExecutionAvailability,
   type BrowserTransportKind,
   type NativeComputerProvider,
   type NativeComputerProviderSnapshot,
@@ -259,6 +260,7 @@ export function deriveNativeComputerUsePreflight(params: {
 }
 
 export async function executeNativeComputerUseLoop(params: {
+  authorizeContext?: () => Promise<void>;
   provider?: NativeComputerProvider;
   task: string;
   maxSteps: number;
@@ -388,6 +390,7 @@ export function summarizeNativeActions(actions: NativeBrowserAction[]) {
 }
 
 async function runOpenAiNativeLoop(params: {
+  authorizeContext?: () => Promise<void>;
   providerConfig: ReadyNativeProviderConfig;
   task: string;
   maxSteps: number;
@@ -410,6 +413,7 @@ async function runOpenAiNativeLoop(params: {
       ? { baseURL: computeBrokerConfig.nativeComputerUse.openai.baseUrl }
       : {}),
     timeout: computeBrokerConfig.mcpTimeoutMs,
+    ...(params.authorizeContext ? { fetch: async (...args: Parameters<typeof fetch>) => { await params.authorizeContext!(); return globalThis.fetch(...args); } } : {}),
   });
   const usage = createUsageAccumulator("openai", params.providerConfig.model);
   const trace: NativeComputerLoopTrace = {
@@ -435,6 +439,7 @@ async function runOpenAiNativeLoop(params: {
   let lastSafetyChecks: NativeComputerPendingSafetyCheck[] = [];
 
   for (let index = 0; index < params.maxSteps; index += 1) {
+    await params.authorizeContext?.();
     const response = await client.responses.create(
       previousResponseId
         ? ({
@@ -546,6 +551,7 @@ async function runOpenAiNativeLoop(params: {
 }
 
 async function runAnthropicNativeLoop(params: {
+  authorizeContext?: () => Promise<void>;
   providerConfig: ReadyNativeProviderConfig;
   task: string;
   maxSteps: number;
@@ -568,6 +574,7 @@ async function runAnthropicNativeLoop(params: {
       ? { baseURL: computeBrokerConfig.nativeComputerUse.anthropic.baseUrl }
       : {}),
     timeout: computeBrokerConfig.mcpTimeoutMs,
+    ...(params.authorizeContext ? { fetch: async (...args: Parameters<typeof fetch>) => { await params.authorizeContext!(); return globalThis.fetch(...args); } } : {}),
   });
   const usage = createUsageAccumulator("anthropic", params.providerConfig.model);
   const trace: NativeComputerLoopTrace = {
@@ -609,6 +616,7 @@ async function runAnthropicNativeLoop(params: {
   ];
 
   for (let index = 0; index < params.maxSteps; index += 1) {
+    await params.authorizeContext?.();
     const response = await client.beta.messages.create({
       betas: ["computer-use-2025-01-24"],
       model: params.providerConfig.model,
@@ -738,6 +746,7 @@ async function runOpenCodeNativeLoop(params: {
   }>;
   startedAt: Date;
 }): Promise<NativeComputerLoopResult> {
+  if (!generalCodeExecutionAvailability.available) throw new Error(generalCodeExecutionAvailability.reason);
   if (!params.executeOpenCodeComputerUse) {
     throw new Error("opencode_sandbox_executor_missing");
   }
@@ -1341,6 +1350,10 @@ function buildOpenCodeProviderReadiness(params: {
       model: params.model,
       reason: "daytona_sandbox_required",
     };
+  }
+
+  if (!generalCodeExecutionAvailability.available) {
+    return { provider: "opencode", enabled: true, status: "disabled", transportKind: "opencode_computer_use", model: params.model, reason: generalCodeExecutionAvailability.reason };
   }
 
   return {

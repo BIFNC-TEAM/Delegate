@@ -57,6 +57,20 @@ describe("Prisma write-conflict retry", () => {
     expect(operation).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["40001", "40P01"])("retries an aborted PostgreSQL transaction in Prisma's unknown-error wrapper (%s)", async code => {
+    const error = new Prisma.PrismaClientUnknownRequestError(`ConnectorError(QueryError(PostgresError { code: "${code}", message: "synthetic database conflict" }))`, { clientVersion: "6.19.2" });
+    const operation = vi.fn().mockRejectedValueOnce(error).mockResolvedValue("committed");
+    await expect(runWithPrismaWriteConflictRetry(operation, { sleep: async () => undefined })).resolves.toBe("committed");
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["23505", "08006", "P0001"])("does not replay other unknown database failures (%s)", async code => {
+    const error = new Prisma.PrismaClientUnknownRequestError(`PostgresError { code: "${code}", message: "deadlock detected" }`, { clientVersion: "6.19.2" });
+    const operation = vi.fn().mockRejectedValue(error);
+    await expect(runWithPrismaWriteConflictRetry(operation, { sleep: async () => undefined })).rejects.toBe(error);
+    expect(operation).toHaveBeenCalledOnce();
+  });
+
   it.each(["40001", "40P01"])(
     "retries raw PostgreSQL write conflict %s wrapped as P2010",
     async (databaseCode) => {
@@ -71,6 +85,13 @@ describe("Prisma write-conflict retry", () => {
       expect(operation).toHaveBeenCalledTimes(2);
     },
   );
+
+  it("uses the outer database code, not conflict-looking text inside an error", async () => {
+    const error = new Prisma.PrismaClientUnknownRequestError('PostgresError { code: "P0001", message: user data PostgresError { code: "40P01", } }', { clientVersion: "6.19.2" });
+    const operation = vi.fn().mockRejectedValue(error);
+    await expect(runWithPrismaWriteConflictRetry(operation, { sleep: async () => undefined })).rejects.toBe(error);
+    expect(operation).toHaveBeenCalledOnce();
+  });
 });
 
 function prismaError(code: string) {

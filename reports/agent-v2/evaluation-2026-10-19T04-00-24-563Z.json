@@ -1,0 +1,136 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "temperature": 0,
+  "promptSha256": "a1495a51684cfba1114065a0e143e420a87cafac0b300faab57bf637d4348d3e",
+  "repeats": 1,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "internal",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "completed",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "星河科技正式员工每年享有 **12 天年假**。\n\n适用条件：  \n- 仅适用于**正式员工**；  \n- **试用期员工不适用**该年假政策。  \n\n该规定自 **2026年1月1日起生效**，依据制度版本 2026.1 [S:5d9a577f70d091643969b257]。",
+      "sources": [
+        {
+          "id": "5d9a577f70d091643969b257",
+          "title": "合成测试：星河科技员工制度",
+          "channel": "knowledge",
+          "version": "2026.1",
+          "dataTime": "2026-01-01"
+        }
+      ],
+      "durationMs": 5851.468333,
+      "firstTextMs": 5841.026167,
+      "firstFinalOutputMs": 5841.026167,
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "retrieve_authorized_knowledge"
+      ],
+      "ragCalls": 1,
+      "ragDurationMs": 4.351749999999811,
+      "inputTokens": 3914,
+      "outputTokens": 171,
+      "error": null
+    },
+    {
+      "id": "realtime",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": false,
+        "fixtureFact": false,
+        "sourcePresent": false,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": false,
+      "text": "当前模拟场景中，我代表星河科技，但未获授权访问实时天气API或外部气象服务。知识库中也未预置天气数据源。如需获取上海今日天气，请提供可接入的授权天气接口，或允许我调用 search_current_web 工具搜索公开网页中的最新天气信息（注意：该方式返回的是网页快照，非直连气象局实时API）。是否同意使用网络搜索方式？",
+      "sources": [],
+      "durationMs": 3167.873125,
+      "firstTextMs": 3166.5916669999997,
+      "firstFinalOutputMs": 3166.5916669999997,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1830,
+      "outputTokens": 97,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请提供您所在的城市或具体位置，以便查询当地天气。",
+      "sources": [],
+      "durationMs": 1330.136290999999,
+      "firstTextMs": 1329.119208,
+      "firstFinalOutputMs": 1329.119208,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1829,
+      "outputTokens": 18,
+      "error": null
+    },
+    {
+      "id": "clarification-resume",
+      "variant": "v2",
+      "status": "completed",
+      "text": "根据最新天气信息，今天（2026年10月19日）上海天气为：**20°C，多云**。观测时间为 09:00（北京时间）[S:5b8a65135de8e6d1b3e60d45]。",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "taskUsage": {
+        "modelTurns": 3,
+        "toolCalls": 1,
+        "attempts": 4,
+        "tokens": 5813,
+        "inputTokens": 5688,
+        "outputTokens": 125,
+        "costUsd": 0,
+        "activeMs": 6058.417124999998
+      },
+      "sources": [
+        {
+          "id": "5b8a65135de8e6d1b3e60d45",
+          "title": "合成天气测试数据",
+          "channel": "web",
+          "observedAt": "2026-10-19T09:00:00+08:00",
+          "url": "https://example.com/fixture-weather"
+        }
+      ],
+      "fixtureChecksPass": true
+    }
+  ]
+}

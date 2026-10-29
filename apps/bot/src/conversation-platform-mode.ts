@@ -1,4 +1,4 @@
-export type TelegramConversationPlatformMode = "legacy" | "shadow" | "worker";
+export type TelegramConversationPlatformMode = "worker";
 
 export function resolveTelegramConversationPlatformMode(
   env: Record<string, string | undefined> = process.env,

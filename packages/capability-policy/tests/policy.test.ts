@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { evaluateCapabilityPolicy, evaluateCapabilityPolicyStack } from "../src/index";
+import { ownerManagedPolicyOverlaysSchema } from "@delegate/compute-protocol";
 
 describe("evaluateCapabilityPolicy", () => {
+  it("drops retired plan-tier inputs from overlay configuration without changing approval settings", () => {
+    const config = { enabled: true, browserDecision: "allow", browserRequiresApproval: false,
+      mcpDecision: "ask", mcpRequiresApproval: true, requiredPlanTier: "deep_help" };
+    const parsed = ownerManagedPolicyOverlaysSchema.parse({ baseline: config, trustedCustomer: config });
+    expect(parsed.baseline).not.toHaveProperty("requiredPlanTier");
+    expect(parsed.trustedCustomer).not.toHaveProperty("requiredPlanTier");
+    expect(parsed.baseline).toMatchObject({ browserDecision: "allow", browserRequiresApproval: false, mcpRequiresApproval: true });
+  });
   const profile = {
     id: "profile_1",
     representativeId: "rep_1",
@@ -58,6 +67,19 @@ describe("evaluateCapabilityPolicy", () => {
     expect(result.matchedRuleId).toBe("rule_allow_ls");
   });
 
+  it.each(["allow", "ask", "deny"] as const)("ignores retired plan fields while preserving the configured %s decision", (decision) => {
+    // Legacy database rows must not reintroduce PASS/DEEP_HELP after the
+    // broker has already authorized the generation's consumption quota.
+    const legacyProfile = { ...profile, rules: [{
+      id: "legacy-browser", capability: "browser" as const, decision,
+      requiredPlanTier: "deep_help" as const, requiresPaidPlan: true,
+      requiresHumanApproval: decision === "ask", priority: 100,
+    }] };
+    const result = evaluateCapabilityPolicy(legacyProfile, { capability: "browser" });
+    expect(result.decision).toBe(decision);
+    expect(result.reason).not.toContain("plan");
+  });
+
   it("asks when a matching rule requires approval", () => {
     const result = evaluateCapabilityPolicy(profile, {
       capability: "write",
@@ -69,6 +91,33 @@ describe("evaluateCapabilityPolicy", () => {
     expect(result.reason).toBe("human_approval_required");
   });
 
+  it.each(["allow", "ask", "deny"] as const)("ignores only the retired generated browser ASK and honors configured %s", (decision) => {
+    const managedId = "cap_profile_managed_rep_1";
+    const retired = { ...profile, id: managedId, isDefault: false, isManaged: true,
+      managedScope: "delegate_managed" as const, managedSource: "delegate-default", precedence: 100,
+      rules: [{ id: `${managedId}_browser_paid_private`, capability: "browser" as const, decision: "ask" as const,
+        domainPattern: ".*", resourceScopeCondition: "browser_lane" as const, channelCondition: "private_chat" as const,
+        priority: 220, requiresHumanApproval: true }] };
+    const base = { ...profile, rules: [{ id: "owner-browser", capability: "browser" as const, decision, priority: 1000, requiresHumanApproval: decision === "ask" }] };
+    const result = evaluateCapabilityPolicyStack([retired, base], { capability: "browser", resourceScope: "browser_lane", channel: "private_chat", domain: "example.com" });
+    expect(result.decision).toBe(decision); expect(result.matchedRuleId).toBe("owner-browser");
+  });
+
+  it.each([
+    { decision: "deny" as const, requiresHumanApproval: false },
+    { domainPattern: "example.com" },
+    { priority: 221 },
+    { maxEstimatedTokens: 100 },
+  ])("preserves customized management rules even with the legacy id: %j", change => {
+    const id = "cap_profile_managed_rep_1";
+    const managed = { ...profile, id, isDefault: false, isManaged: true, managedScope: "delegate_managed" as const, managedSource: "delegate-default", precedence: 100,
+      rules: [{ id: `${id}_browser_paid_private`, capability: "browser" as const, decision: "ask" as const,
+        domainPattern: ".*", resourceScopeCondition: "browser_lane" as const, channelCondition: "private_chat" as const,
+        priority: 220, requiresHumanApproval: true, ...change }] };
+    const result = evaluateCapabilityPolicyStack([managed, { ...profile, defaultDecision: "allow" as const }], { capability: "browser", domain: "example.com", resourceScope: "browser_lane", channel: "private_chat", estimatedTokens: 10 });
+    expect(result.decision).not.toBe("allow"); expect(result.matchedRuleId).toBe(`${id}_browser_paid_private`);
+  });
+
   it("falls back to the profile default when no rule matches", () => {
     const result = evaluateCapabilityPolicy(profile, {
       capability: "process",
@@ -78,7 +127,7 @@ describe("evaluateCapabilityPolicy", () => {
     expect(result.reason).toBe("default_profile_decision");
   });
 
-  it("lets managed overlays override the base profile when channel and plan conditions match", () => {
+  it("lets managed overlays override the base profile when channel conditions match", () => {
     const managedProfile = {
       ...profile,
       id: "managed_1",
@@ -106,8 +155,6 @@ describe("evaluateCapabilityPolicy", () => {
       capability: "browser",
       resourceScope: "browser_lane",
       channel: "private_chat",
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
     });
 
     expect(result.decision).toBe("ask");
@@ -147,8 +194,6 @@ describe("evaluateCapabilityPolicy", () => {
     const deniedForStandard = evaluateCapabilityPolicyStack([customerOverlay, profile], {
       capability: "mcp",
       resourceScope: "remote_mcp",
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
       contactTrustTier: "standard",
     });
 
@@ -157,8 +202,6 @@ describe("evaluateCapabilityPolicy", () => {
     const allowedForVerified = evaluateCapabilityPolicyStack([customerOverlay, profile], {
       capability: "mcp",
       resourceScope: "remote_mcp",
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
       contactTrustTier: "verified",
     });
 
@@ -267,8 +310,6 @@ describe("evaluateCapabilityPolicy", () => {
     const fallbackForOtherAccount = evaluateCapabilityPolicyStack([customerAccountOverlay, profile], {
       capability: "browser",
       resourceScope: "browser_lane",
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
       customerAccountId: "customer_other",
     });
 
@@ -277,8 +318,6 @@ describe("evaluateCapabilityPolicy", () => {
     const allowedForAssignedAccount = evaluateCapabilityPolicyStack([customerAccountOverlay, profile], {
       capability: "browser",
       resourceScope: "browser_lane",
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
       customerAccountId: "customer_acme",
     });
 

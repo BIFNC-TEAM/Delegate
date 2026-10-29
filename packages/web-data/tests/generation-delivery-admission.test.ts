@@ -57,7 +57,7 @@ function buildTx() {
       }),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    generationRun: { findUnique: vi.fn().mockResolvedValue(null) },
+    generationRun: { findUnique: vi.fn().mockResolvedValue({ contextSnapshot: {}, conversationId: "conversation-1", outputMessageId: "output-message-1" }) },
     eventAudit: { upsert: vi.fn() },
   };
 }

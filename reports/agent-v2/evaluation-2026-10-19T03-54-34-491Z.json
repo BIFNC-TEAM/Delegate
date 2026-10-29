@@ -1,0 +1,86 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "repeats": 2,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请问您想查询哪个城市或地区的天气？",
+      "sources": [],
+      "durationMs": 1525.119833,
+      "firstTextMs": 1515.1444999999999,
+      "firstFinalOutputMs": 1515.1444999999999,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1620,
+      "outputTokens": 14,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 1,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请问您想查询哪个城市或地区的天气？",
+      "sources": [],
+      "durationMs": 1157.7468340000003,
+      "firstTextMs": 1157.307,
+      "firstFinalOutputMs": 1157.307,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1620,
+      "outputTokens": 14,
+      "error": null
+    },
+    {
+      "id": "clarification-resume",
+      "variant": "v2",
+      "status": "waiting_user",
+      "text": "请问您想查询上海今天（2026年10月19日）的具体天气信息，例如：  \n- 温度范围（最高/最低气温）？  \n- 是否有降水（雨、雾等）？  \n- 风力风向、湿度、空气质量（AQI）等其他要素？  \n\n我将为您精准获取最新权威天气数据。",
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "taskUsage": {
+        "modelTurns": 2,
+        "toolCalls": 0,
+        "attempts": 2,
+        "tokens": 3334,
+        "inputTokens": 3235,
+        "outputTokens": 99,
+        "costUsd": 0,
+        "activeMs": 3893.2413749999996
+      },
+      "fixtureChecksPass": false
+    }
+  ]
+}

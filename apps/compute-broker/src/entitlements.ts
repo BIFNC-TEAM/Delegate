@@ -29,14 +29,10 @@ export type AudienceGenerationRunAuthorization =
   | (AudienceGenerationRunAuthorizationBase & {
       kind: "free";
       productCode: null;
-      activePlanTier: undefined;
-      hasPaidEntitlement: false;
     })
   | (AudienceGenerationRunAuthorizationBase & {
       kind: "wallet";
       productCode: string;
-      activePlanTier: "pass" | "deep_help";
-      hasPaidEntitlement: true;
     });
 
 export type AudienceGenerationRunAuthorizationInput = {
@@ -192,8 +188,6 @@ export async function requireAudienceGenerationRunAuthorization(
       generationRunId,
       representativeId,
       productCode: account.productCode,
-      activePlanTier: "pass",
-      hasPaidEntitlement: true,
     };
   }
 
@@ -213,8 +207,6 @@ export async function requireAudienceGenerationRunAuthorization(
       generationRunId,
       representativeId,
       productCode: null,
-      activePlanTier: undefined,
-      hasPaidEntitlement: false,
     };
   }
   throwAudienceAuthorizationDenied();
@@ -238,20 +230,6 @@ export async function verifyRunScopedServiceCreditReservation(
     usageChargeId: input.usageChargeId,
     tokenAmount: input.tokenAmount,
   });
-}
-
-export function deriveConversationComputeEntitlements(
-  authorization: AudienceGenerationRunAuthorization | null,
-) {
-  return authorization?.hasPaidEntitlement
-    ? {
-        hasPaidEntitlement: true as const,
-        activePlanTier: authorization.activePlanTier,
-      }
-    : {
-        hasPaidEntitlement: false as const,
-        activePlanTier: undefined,
-      };
 }
 
 export function hasServerStoredServiceCreditReservation(snapshot: unknown): boolean {

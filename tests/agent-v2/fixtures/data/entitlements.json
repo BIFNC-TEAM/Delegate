@@ -1,0 +1,25 @@
+{
+  "synthetic": true,
+  "variants": [
+    {
+      "id": "free",
+      "freeReplies": 1000,
+      "wallet": 0
+    },
+    {
+      "id": "wallet",
+      "freeReplies": 0,
+      "wallet": "positive synthetic balance"
+    },
+    {
+      "id": "none",
+      "freeReplies": 0,
+      "wallet": 0
+    }
+  ],
+  "realPayments": false,
+  "databaseReady": true,
+  "preparedInBatch": "20261021-smoke",
+  "preparation": "Isolated mock recharge + purchase domain functions; no real merchant/payment. Free/paid settings restored after test.",
+  "observedFailure": "No-credit requests dispatched no model/tools but retried and returned an internal billing error; V2-087 FAIL."
+}

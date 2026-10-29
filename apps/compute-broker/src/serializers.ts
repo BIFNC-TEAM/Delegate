@@ -542,11 +542,7 @@ export function serializeCapabilityProfile(profile: {
       ...(rule.channelCondition
         ? { channelCondition: rule.channelCondition.toLowerCase() as any }
         : {}),
-      ...(rule.requiredPlanTier
-        ? { requiredPlanTier: rule.requiredPlanTier.toLowerCase() as any }
-        : {}),
       ...(typeof rule.maxEstimatedTokens === "number" ? { maxEstimatedTokens: rule.maxEstimatedTokens } : {}),
-      requiresPaidPlan: rule.requiresPaidPlan,
       requiresHumanApproval: rule.requiresHumanApproval,
       priority: rule.priority,
     })),

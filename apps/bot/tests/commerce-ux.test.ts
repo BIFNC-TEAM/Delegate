@@ -157,23 +157,13 @@ describe("Telegram commerce UX", () => {
 
     const plansKeyboard = source.slice(
       source.indexOf("function buildPlansKeyboard"),
-      source.indexOf("function buildPlanKeyboardForConversation"),
+      source.indexOf("function parseStartPayload"),
     );
     expect(plansKeyboard).toContain("buildWebRechargeKeyboard(");
     expect(plansKeyboard).not.toContain('text("Buy Pass"');
 
-    const conversationKeyboard = source.slice(
-      source.indexOf("function buildPlanKeyboardForConversation"),
-      source.indexOf("function buildPlanReplyOptions"),
-    );
-    expect(conversationKeyboard).toContain("buildWebRechargeKeyboard(");
-    expect(conversationKeyboard).not.toContain("buy:${plan.suggestedPlan}");
+    expect(source).not.toContain("buildPlanKeyboardForConversation");
 
-    const computeKeyboard = source.slice(
-      source.indexOf("function buildComputeReplyOptions"),
-      source.indexOf("function formatComputeReply"),
-    );
-    expect(computeKeyboard).toContain('.url(');
-    expect(computeKeyboard).not.toContain('"buy:deep_help"');
+    expect(source).not.toContain("buildComputeReplyOptions");
   });
 });

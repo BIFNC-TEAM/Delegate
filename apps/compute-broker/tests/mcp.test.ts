@@ -30,6 +30,28 @@ afterAll(async () => {
 });
 
 describe("callRemoteMcpTool", () => {
+  it("authenticates discovery only at the official search endpoint using the server-held key", async () => {
+    const endpoint = "https://dashscope.aliyuncs.com/api/v1/mcps/EnhancedSearch/mcp";
+    const calls: Array<{ url: string; authorization: string | null; body: any }> = [];
+    const original = global.fetch;
+    vi.stubEnv("DELEGATE_BAILIAN_API_KEY", "SYNTHETIC_SEARCH_KEY_ONLY");
+    global.fetch = (async (url, init) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization"), body });
+      if (body.id === undefined) return new Response(null, { status: 202 });
+      const result = body.method === "initialize"
+        ? { protocolVersion: body.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic", version: "1" } }
+        : { tools: [{ name: "search_pro", inputSchema: { type: "object", properties: { query: { type: "string" } } } }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const { listRemoteMcpTools } = await import("../src/mcp");
+      await listRemoteMcpTools({ binding: { serverUrl: endpoint, transportKind: "streamable_http" } });
+      expect(calls.some(c => c.body.method === "tools/list")).toBe(true);
+      expect(calls.every(c => c.url === endpoint && c.authorization === "Bearer SYNTHETIC_SEARCH_KEY_ONLY")).toBe(true);
+      expect(JSON.stringify(calls.map(c => c.body))).not.toContain("SYNTHETIC_SEARCH_KEY_ONLY");
+    } finally { global.fetch = original; vi.unstubAllEnvs(); }
+  });
   it("calls an MCP tool over streamable HTTP and returns a summarized result", async () => {
     const { callRemoteMcpTool } = await import("../src/mcp");
     const onBeforeToolCall = vi.fn().mockResolvedValue(undefined);
@@ -193,7 +215,7 @@ describe("callRemoteMcpTool", () => {
           transportKind: "streamable_http",
           defaultToolName: "lookup",
           allowedToolNames: ["lookup"],
-          maxRetries: 0,
+          maxRetries: 1,
           retryBackoffMs: 0,
         },
         toolArguments: { city: "Shanghai" },
@@ -205,7 +227,7 @@ describe("callRemoteMcpTool", () => {
       expect(result.summary).toContain("Weather for Shanghai");
       expect(fetchCount).toBeGreaterThan(1);
       expect(failedToolCall).toBe(true);
-      expect(onBeforeToolCall).toHaveBeenCalledTimes(1);
+      expect(onBeforeToolCall).toHaveBeenCalledTimes(2);
     } finally {
       global.fetch = originalFetch;
       await retryServer.close();

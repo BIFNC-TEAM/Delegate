@@ -55,4 +55,14 @@ describe("Pi approval continuation snapshots", () => {
       },
     })).toBeUndefined();
   });
+  it("preserves v2 checkpoint and failed-read result and fences another approval", () => {
+    const checkpoint = { version: 2, pending: { approvalId: "a1", callId: "c1", toolName: "browse_in_sandbox" }, turnsUsed: 4, activeMs: 100 };
+    const pending = markPiApprovalContinuationPending({ piExecutionProtocol: "goal_v2" }, "a1", checkpoint);
+    expect(readPiApprovalContinuation(pending)?.checkpoint).toEqual(checkpoint);
+    expect(() => markPiApprovalContinuationCompleted(pending, { approvalId: "old", completedAt: new Date(), artifacts: [] })).toThrow("action_mismatch");
+    const completed = markPiApprovalContinuationCompleted(pending, { approvalId: "a1", completedAt: new Date(), artifacts: [], resultStatus: "failed" });
+    expect(readPiApprovalContinuation(completed)).toMatchObject({ version: 2, status: "completed", resultStatus: "failed", checkpoint });
+    expect(() => readPiApprovalContinuation({ piApprovalContinuation: { version: 2, checkpoint: { version: 2, text: "x".repeat(1024 * 1024) } } })).toThrow("checkpoint_invalid");
+  });
+
 });

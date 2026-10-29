@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { mergeGenerationCompletionContext } from "../src/conversation-platform";
+import { mergeGenerationCompletionContext, resolveGenerationAgentVariant } from "../src/conversation-platform";
 
 describe("generation Agent trace persistence", () => {
+  it("pins running versions across configuration changes and keeps existing PI work on PI", () => {
+    expect(resolveGenerationAgentVariant({})).toBe("v2");
+    expect(resolveGenerationAgentVariant({})).toBe("v2");
+    expect(resolveGenerationAgentVariant({ agentVariant: "v2" })).toBe("v2");
+    expect(resolveGenerationAgentVariant({ piExecutionProtocol: "goal_v2" })).toBe("pi");
+    expect(resolveGenerationAgentVariant({ agentVariant: "pi" })).toBe("pi");
+  });
   it("preserves Pi operational timing evidence alongside the runtime outcome", () => {
     const merged = mergeGenerationCompletionContext(
       { piStream: { version: 1, sequence: 2, text: "partial" } },

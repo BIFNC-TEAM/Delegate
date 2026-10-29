@@ -87,13 +87,13 @@ services:
   agent-test-mcp:
     image: delegate-agent-test-conversation-worker:local
     command: >
-      sh -lc "node --import tsx packages/agent-regression/src/test-mcp-server.ts"
+      sh -lc "node --import tsx scripts/agent-test-mcp-server.ts"
     environment:
       AGENT_TEST_MCP_PORT: "4050"
     ports: !override
       - "14050:4050"
     volumes:
-      - ./packages/agent-regression/src/test-mcp-server.ts:/app/packages/agent-regression/src/test-mcp-server.ts:ro
+      - ./scripts/agent-test-mcp-server.ts:/app/scripts/agent-test-mcp-server.ts:ro
     healthcheck:
       test:
         [

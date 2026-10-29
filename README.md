@@ -40,14 +40,14 @@ The current product wedge is intentionally narrow:
 
 Delegate currently includes these working surfaces and services:
 
-- **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
+- **Marketing site** in `apps/site`, using the approved blue service-network design in `DESIGN.md`, with bilingual interactive demos and session-aware account navigation.
 - **Public representative app** in `apps/reps`, including representative profiles, service packages, web chat, WeChat checkout, and signed public-chat session state.
 - **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, representative Memory configuration, workflow state, and Owner profile, identity-security, and Dashboard notification settings. Public knowledge authoring and publishing remain in Knowledge Library.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
 - **AMN wallet control plane** covering immutable billing products and prices, snapshotted orders, internal wallet ledger entries, local mock payment, default-off WeChat Pay API v3 Native collection and recovery, service-credit fulfillment, usage charging, provisional Creator 20% revenue share, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
-- **Agent Runtime V3** across `packages/runtime`, `packages/model-runtime`, the conversation worker, Compute Broker, and workflow runner: one server-validated goal/action DAG, schema-pinned MCP compilation, atomic execution admission, verified results, evidence-bound composition, and V2 rollback compatibility.
+- **Agent V2 on PI 0.85.1** handles every new conversation with model-directed RAG-first execution, governed tools, real source events and persisted clarification. See [runtime](./docs/agent-v2.md) and [legacy cleanup / cutover](./docs/agent-v2-cleanup.md).
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
 - **OpenViking integration** as a rebuildable retrieval projection behind PostgreSQL-authoritative public knowledge and governed memory, with exact-version/hash sync and safe operational diagnostics.
@@ -350,6 +350,10 @@ Then open:
 - Dashboard: `http://localhost:3101/dashboard?view=overview`
 - Representative: `http://localhost:3102/reps/lin-founder-rep`
 
+Keep `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_DASHBOARD_URL`, `NEXT_PUBLIC_REPRESENTATIVE_URL`, and the registered authentication callback URLs aligned with these ports. The dashboard only exposes website session state to its configured site origin. When reusing the existing Docker dashboard on port 3001, use the configured site origin (normally port 3000), rather than an unrelated preview port.
+
+Run the website regression tests with `pnpm --filter @delegate/site test`. Signed-in visitors see their account menu and direct representative-management links; the page rechecks the session when they return from another tab or restore the page.
+
 For database-only local development:
 
 ```bash
@@ -445,7 +449,7 @@ The default `.env.example` is safe for local development. Important settings:
 - `PUBLIC_CHAT_RATE_LIMIT_SECRET` HMACs network/audience/representative rate-limit keys before they reach Postgres; it falls back to `REP_PUBLIC_CHAT_SESSION_SECRET`. The three `PUBLIC_CHAT_*_REQUESTS_*` variables tune distributed admission limits. Set `PUBLIC_CHAT_CLIENT_IP_HEADER` only when a trusted reverse proxy overwrites that header, otherwise leave it empty.
 - `PUBLIC_MATERIAL_LINK_SECRET` signs ten-minute public-material links that are bound to the representative, asset checksum, and processing version. Downloads re-check the current published/approved state, so archiving, disabling, replacing, or unpublishing an asset invalidates outstanding links.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_MODEL_FALLBACK_PROVIDER`, and the provider-specific model variables control model-backed representative replies.
-- New conversation turns run through embedded `@earendil-works/pi-agent-core@0.85.1`; see [`docs/pi-agent-rearchitecture.md`](docs/pi-agent-rearchitecture.md). Pi owns the model/tool loop, while Delegate adapts knowledge, MCP, Skill metadata, the isolated Compute sandbox, artifacts and human handoff. The production scheduler imports only `processor-pi.ts`; retired V2/V3 planner rollout variables are rejected instead of selecting a fallback runtime.
+- New turns use Agent V2 and the native PI loop. The scheduler invokes `processor.ts`; retired planner configuration is rejected. Old started runs are not replayed through V2. See [cutover](docs/agent-v2-cleanup.md).
 - `DELEGATE_MODEL_DOCUMENT_MAX_OUTPUT_TOKENS`, `DELEGATE_MODEL_DOCUMENT_MAX_PARTS`, and `DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS` are the independent output, bounded-continuation, and request budgets for complete managed documents. A length-limited response continues with the same Provider instead of restarting on a fallback; exhaustion still fails closed and never creates an Artifact.
 - `DELEGATE_AGICTO_API_KEY` enables the distinct AGICTO provider at `DELEGATE_AGICTO_BASE_URL`; when omitted it may reuse the already configured `OPENVIKING_MODEL_API_KEY` and `OPENVIKING_MODEL_API_BASE`. AGICTO uses an OpenAI-compatible wire format but is never recorded or credentialed as the OpenAI provider. `DELEGATE_MODEL_API_KEY` (or `OPENAI_API_KEY`), `DELEGATE_BAILIAN_API_KEY`, and `ANTHROPIC_API_KEY` remain isolated credentials for OpenAI, Bailian, and Anthropic respectively.
 - `OPENVIKING_*` controls public memory sync, recall, and commit behavior.
@@ -670,26 +674,14 @@ transaction.
 
 The first product path to dogfood is the browser representative page at `http://localhost:3102/reps/lin-founder-rep`, plus the owner dashboard at `http://localhost:3101/dashboard?view=overview`.
 
-## Pi Agent regression
+## Agent verification
 
-New production conversation turns run through the embedded Pi Agent runtime.
-The isolated end-to-end regression stack has separate ports, database and
-artifact volumes from the developer stack:
-
-```bash
-pnpm test:agent:stack:up
-pnpm test:agent:stack:seed
-pnpm test:agent:smoke:product
-pnpm test:agent:stack:down
+```sh
+pnpm test:agent:v2
+pnpm eval:agent:v2 --live --suite=clarification --repetitions=3
 ```
 
-`test:agent:smoke:product` runs the 15 core cases with a real configured model
-and includes an actual product HTTP/SSE flow through fictional KB data, the
-local `orders-test` MCP server, Skill discovery/load, Docker sandbox execution
-and a downloaded CSV. JSON, JUnit, Markdown and HTML reports are written to
-`reports/agent-regression/`. See
-[Pi Agent rearchitecture](./docs/pi-agent-rearchitecture.md) for architecture,
-evidence rules, limitations and the remaining migration work.
+Mechanism tests use simulated models. The explicitly enabled live evaluation uses a real model with controlled tool data; it does not certify production source quality. Retired loop comparison results remain in `reports/agent-v2`; use the historical Git revision for reproduction, not a second runtime inside the current worker.
 
 ## Design System
 
@@ -706,9 +698,9 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 ## Documentation Map
 
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
-- [Pi Agent rearchitecture](./docs/pi-agent-rearchitecture.md): active Pi runtime path, capability adapters, timing and executable regression status.
-- [Agent Runtime V3](./docs/agent-runtime-v3.md): archived pre-Pi protocol and migration context; not an active runtime guide.
-- [Conversation runtime flow](./docs/conversation-runtime-flow.md): archived V3 flow plus the pointer to the current Pi path.
+- [Agent V2](./docs/agent-v2.md): isolated entry, policies, budgets, startup, rollback, and [validation](./docs/agent-v2-validation.md).
+- [Agent cleanup and cutover](./docs/agent-v2-cleanup.md): removed modules, preserved contracts, rollout and rollback.
+- [Conversation runtime flow](./docs/conversation-runtime-flow.md): shared V2 ingress, authorization, execution and delivery.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
 - [Public audience identity](./docs/public-audience-identity.md): web identity, Contact/Conversation, service purchase, and sandbox linkage.
 - [Wallet & Billing product contract](./docs/wallet-billing-product-contract.md): V1 package, price-version, entitlement, revenue, refund, and production-gate rules.

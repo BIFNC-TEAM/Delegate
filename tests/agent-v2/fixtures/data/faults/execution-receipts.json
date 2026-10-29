@@ -1,0 +1,20 @@
+{
+  "synthetic": true,
+  "positive": {
+    "outcome": "failed",
+    "reason": "isolated_python_program_failed",
+    "transport": "response_received",
+    "semantic": "failed",
+    "exitCode": 1,
+    "finishedAt": "2026-10-21T08:00:01Z",
+    "fileArtifacts": []
+  },
+  "negativeMutations": [
+    "missing finishedAt",
+    "exitCode 0",
+    "transport unknown",
+    "semantic unknown",
+    "FILE artifact present"
+  ],
+  "requirement": "Also requires real verified no-egress Python profile; JSON alone grants no execution authority."
+}

@@ -83,6 +83,11 @@ export async function finalizeComputeApprovalConversation(input: {
     ) {
       return null;
     }
+    const activeContinuation = readPiApprovalContinuation(run.contextSnapshot);
+    // A late/duplicate result for step A must never terminalize or overwrite
+    // the currently pending step B in the same generation.
+    if (activeContinuation && activeContinuation.approvalId !== approval.id) return null;
+    if (activeContinuation?.version === 2 && activeContinuation.status === "completed") return null;
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessageId) {
       let message = await tx.message.findUnique({ where: { id: run.outputMessageId } });
       if (!message) return null;
@@ -170,7 +175,10 @@ export async function finalizeComputeApprovalConversation(input: {
 
     const piContinuation = readPiApprovalContinuation(run.contextSnapshot);
     if (
-      input.outcome === "completed"
+      (input.outcome === "completed" || (input.outcome === "failed"
+        && piContinuation?.version === 2
+        && ["browse_in_sandbox", "search_current_web", "read_public_web"].includes(
+          String((piContinuation.checkpoint?.["pending"] as Record<string, unknown> | undefined)?.["toolName"]))))
       && piContinuation?.status === "pending"
       && piContinuation.approvalId === approval.id
     ) {
@@ -199,6 +207,7 @@ export async function finalizeComputeApprovalConversation(input: {
               approvalId: approval.id,
               completedAt: now,
               artifacts: continuationArtifacts,
+              resultStatus: input.outcome === "completed" ? "completed" : "failed",
             },
           ),
         },

@@ -4,12 +4,14 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { demoRepresentative } from "@delegate/domain";
+import { parseTaskControlCommand } from "@delegate/runtime";
 import {
-  createPiModelBindingFromEnv,
-  delegatePiAgentRuntime,
-} from "@delegate/model-runtime";
+  createV2ModelBindingFromEnv,
+  delegateAgentV2,
+} from "@delegate/model-runtime/v2";
 import {
   acceptInboundConversationMessage,
+  controlPublicAudienceTask,
   AgentWalletReconciliationError,
   buildRepresentativeRuntimeProfile,
   buildWebAudienceExternalUserId,
@@ -118,10 +120,20 @@ export async function POST(
         clientAddress: resolvePublicChatClientAddress(request),
       });
     }
-    const runtime = await getPublicRepresentativeRuntime(slug);
-    if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     const { body, attachmentFiles } = await readPublicChatRequest(request);
     if (!body.message) return privateJson({ error: "Message is required." }, 400);
+    const control = parseTaskControlCommand(body.message);
+    if (control) {
+      if (attachmentFiles.length) return privateJson({ error: "Task controls do not accept attachments.", code: "task_control_attachments_not_allowed" }, 400);
+      const audienceRequest = await resolvePublicAudienceRequestPrincipal({ representativeSlug: slug, cookieStore: await cookies() });
+      await audienceRequest.revalidate();
+      const result = await controlPublicAudienceTask({ representativeSlug: slug, audienceIdentityId: audienceRequest.principal.audienceIdentityId, audienceId: audienceRequest.principal.audienceId, ...control });
+      const response = privateJson({ status: "completed", reply: { role: "assistant", text: result.text }, taskControl: { outcome: result.outcome, tasks: result.tasks } }, 200);
+      setPublicAudienceSessionCookie(response, request, slug, audienceRequest.sessionState);
+      return response;
+    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     if (!publicMemoryDisclosureMatches(
       body.memoryDisclosure,
       runtime.governedMemoryDisclosure,
@@ -280,27 +292,24 @@ export async function POST(
       freeRepliesUsed: 0,
       freeReplyLimit: representative.contract.freeReplyLimit,
     });
-    const modelBinding = createPiModelBindingFromEnv();
+    const modelBinding = createV2ModelBindingFromEnv();
     if (!modelBinding.ok) {
       return privateJson({
         error: modelBinding.reason,
         code: "pi_model_unavailable",
       }, 503);
     }
-    const piResult = await delegatePiAgentRuntime.run({
-      runId: `demo-${principal.audienceId}-${Date.now()}`,
-      sessionId: principal.audienceId,
-      userText: body.message,
-      representative: {
-        id: representative.id,
-        name: representative.name,
-        role: representative.tagline,
-        instructions: `语气：${representative.tone}`,
-        capabilities: ["普通问答"],
-      },
-      model: modelBinding.binding,
-      timeoutMs: 30_000,
-      maxSteps: 2,
+    if (runtime.setup.agentBehavior?.answerScope === "owner_and_domain" || runtime.setup.agentBehavior?.knowledgePolicy === "domain_only") {
+      return privateJson({ error: "The configured mandatory review is not available in V2.", code: "agent_policy_unavailable" }, 503);
+    }
+    const requestId = `demo-${principal.audienceId}-${Date.now()}`;
+    const timezone = process.env.DELEGATE_V2_TIMEZONE ?? "Asia/Shanghai";
+    const piResult = await delegateAgentV2.run({
+      requestId, sessionId: principal.audienceId, scope: requestId, userText: body.message, timezone,
+      model: modelBinding.binding, tools: [], authorize: async () => undefined,
+      context: { traceId: requestId, runId: requestId, sessionId: principal.audienceId, timezone, attachments: [], idempotencyKey: requestId },
+      instructions: `Representative: ${representative.name}. Role: ${representative.tagline}. Tone: ${representative.tone}. This nonpersistent demo has no knowledge or execution tools. Explain unavailable capabilities; do not imply a real lookup or action.`,
+      budget: { activeMs: 30000, finalReserveMs: 5000, modelTurns: 2 },
     });
     if (piResult.status === "failed" || piResult.status === "cancelled") {
       return privateJson({
@@ -309,7 +318,7 @@ export async function POST(
       }, piResult.status === "cancelled" ? 499 : 502);
     }
     const response = NextResponse.json({
-      status: "completed",
+      status: piResult.status,
       reply: {
         role: "assistant",
         text: piResult.text,
@@ -322,6 +331,7 @@ export async function POST(
     setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
+    if (error instanceof Error && error.message === "public_task_control_conflict") return privateJson({ error: "Task state changed. Check its current state before trying again.", code: "task_control_conflict" }, 409);
     if (error instanceof ConversationIngressValidationError) {
       return privateJson(
         {

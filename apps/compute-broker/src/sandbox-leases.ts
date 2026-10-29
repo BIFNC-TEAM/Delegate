@@ -21,6 +21,7 @@ import {
   markSandboxProviderOperationResolved,
 } from "./sandbox-provider-operations";
 import { SandboxProviderRegistry } from "./sandbox-provider-registry";
+import { buildTencentLeaseImage, resolveTencentSandboxTool } from "./tencent-sandbox-config";
 import { mapRunnerTypeFromDb } from "./serializers";
 
 type SandboxManagedSession = {
@@ -47,6 +48,10 @@ export type EnsureUserSandboxLeaseParams = {
     routingDigest?: string | null | undefined;
   }>;
   idleStopMinutes?: number | undefined;
+  /** Server-owned action fence. Never populated from an Agent path or image. */
+  exclusivePythonExecution?: { id: string; token: string };
+  /** Broker-only: anonymous read-only browser work, before URL dispatch. */
+  recoverMissingBrowserRuntime?: boolean;
 };
 
 type SandboxLeaseWithIdentity = {
@@ -73,6 +78,19 @@ type SandboxLeaseWithIdentity = {
 export type SandboxProviderFactory = (providerKind: "docker" | "daytona" | "tencent") => Promise<SandboxProvider>;
 
 export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParams) {
+  try {
+    return await ensureUserSandboxLeaseAttempt(params);
+  } catch (error) {
+    if (!(error instanceof ReusableBrowserRuntimeMissing)) throw error;
+    // The failed reusable lease was marked ERROR before reaching here. Reserve
+    // a fresh lease with the same identity/policy; never repeat a URL operation.
+    return ensureUserSandboxLeaseAttempt({ ...params, recoverMissingBrowserRuntime: false });
+  }
+}
+
+class ReusableBrowserRuntimeMissing extends Error {}
+
+async function ensureUserSandboxLeaseAttempt(params: EnsureUserSandboxLeaseParams) {
   if (!params.session.contactId) {
     throw new Error("sandbox_identity_requires_contact");
   }
@@ -172,14 +190,34 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       });
     }
 
-    const reusableLease = await tx.sandboxLease.findFirst({
+    if (params.exclusivePythonExecution && (providerKind !== "tencent" || !computeBrokerConfig.tencent.allInOneTool)) {
+      throw new Error("isolated_python_provider_unavailable");
+    }
+    const baseLeaseImage = providerKind === "tencent" && computeBrokerConfig.tencent.allInOneTool
+      ? buildTencentLeaseImage({
+          domain: computeBrokerConfig.tencent.domain,
+          tool: resolveTencentSandboxTool(computeBrokerConfig.tencent, params.networkMode),
+          image: params.session.baseImage,
+        })
+      : params.session.baseImage;
+    const leaseImage = params.exclusivePythonExecution
+      ? `delegate.aio.single-python.v1:${params.exclusivePythonExecution.id}:${baseLeaseImage}`
+      : baseLeaseImage;
+    if (params.exclusivePythonExecution) {
+      const fenced = await tx.toolExecution.updateMany({
+        where: { id: params.exclusivePythonExecution.id, status: "RUNNING", executionLeaseToken: params.exclusivePythonExecution.token, rawResultRef: null },
+        data: { rawResultRef: "isolated_python_reserving" },
+      });
+      if (fenced.count !== 1) throw new Error("isolated_python_dispatch_already_claimed");
+    }
+    const reusableLease = params.exclusivePythonExecution ? null : await tx.sandboxLease.findFirst({
       where: {
         sandboxIdentityId: identity.id,
         provider,
         networkMode: params.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
         networkPolicyHash,
         filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
-        baseImage: params.session.baseImage,
+        baseImage: leaseImage,
         runtimeClass: mapRuntimeClassToDb(params.session.runtimeClass),
         identityLifecycleEpoch: identity.lifecycleEpoch,
         status: {
@@ -218,7 +256,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
             networkAllowlist,
             networkPolicyHash,
             filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
-            baseImage: params.session.baseImage,
+            baseImage: leaseImage,
             runtimeClass: mapRuntimeClassToDb(params.session.runtimeClass),
             identityLifecycleEpoch: identity.lifecycleEpoch,
             status: "STARTING",
@@ -227,7 +265,11 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
           },
         });
 
-    await tx.computeSession.update({
+    if (params.exclusivePythonExecution) {
+      await tx.toolExecution.update({ where: { id: params.exclusivePythonExecution.id }, data: {
+        rawResultRef: JSON.stringify({ profileId: "delegate.aio.single-python.v1", leaseId: lease.id }),
+      } });
+    } else await tx.computeSession.update({
       where: { id: params.session.id },
       data: {
         sandboxLeaseId: lease.id,
@@ -320,7 +362,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       const updatedLease = await tx.sandboxLease.findUniqueOrThrow({
         where: { id: reservation.lease.id },
       });
-      await tx.computeSession.update({
+      if (!params.exclusivePythonExecution) await tx.computeSession.update({
         where: { id: params.session.id },
         data: {
           sandboxLeaseId: updatedLease.id,
@@ -422,6 +464,10 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
         },
       },
     });
+    if (params.recoverMissingBrowserRuntime && params.session.runtimeClass === "BROWSER"
+      && !reservation.createdLease && providerError?.code === "RUNTIME_NOT_FOUND" && !providerError.ambiguous) {
+      throw new ReusableBrowserRuntimeMissing();
+    }
     throw error;
   }
 }

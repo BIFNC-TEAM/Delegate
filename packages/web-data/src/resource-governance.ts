@@ -10,7 +10,6 @@ type DeliverableKind = "deck" | "case_study" | "download" | "generated_document"
 type DeliverableVisibility = "owner_only" | "public_material";
 type DeliverableSourceKind = "artifact" | "external_link" | "bundle";
 type PolicyDecision = "allow" | "ask" | "deny";
-type CapabilityPlanTier = "pass" | "deep_help";
 
 type OverlayConfig = {
   enabled: boolean;
@@ -18,7 +17,6 @@ type OverlayConfig = {
   browserRequiresApproval: boolean;
   mcpDecision: PolicyDecision;
   mcpRequiresApproval: boolean;
-  requiredPlanTier: CapabilityPlanTier;
 };
 
 type GovernanceContactAssignment = {

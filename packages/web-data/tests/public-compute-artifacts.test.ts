@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -58,7 +59,7 @@ describe("public compute artifact downloads", () => {
       conversationId: "conversation-1",
       sessionId: "session-1",
       toolExecutionId: "execution-1",
-      objectKey: "objects/file",
+      objectKey: "objects/file", sizeBytes: 5, sha256: createHash("sha256").update("hello").digest("hex"),
       mimeType: "text/plain; charset=utf-8",
       kind: "FILE",
       toolExecution: { requestedPath: "/workspace/notes/result.txt" },
@@ -87,5 +88,28 @@ describe("public compute artifact downloads", () => {
         conversationId: "conversation-1",
       }),
     }));
+  });
+
+  it("verifies an authorized delivery without counting it as a visitor download", async () => {
+    mocks.findFirst.mockResolvedValue({ id: "artifact", objectKey: "objects/file", sizeBytes: 5, sha256: createHash("sha256").update("hello").digest("hex"), mimeType: "text/plain", kind: "FILE", toolExecution: { requestedPath: "outputs/result.txt" } });
+    mocks.readArtifactObject.mockResolvedValue({ buffer: Buffer.from("hello") });
+    await expect(getPublicConversationArtifactDownload({ representativeSlug: "sktone", artifactId: "artifact", audienceIdentityId: "identity" }, { recordDownload: false })).resolves.toMatchObject({ buffer: Buffer.from("hello"), fileName: "result.txt" });
+    expect(mocks.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ representative: { slug: "sktone" }, conversation: { audienceIdentityId: "identity" }, OR: expect.any(Array) }) }));
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.createLedger).not.toHaveBeenCalled();
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each(["corrupt", "removed_during_read", "metadata_changed"])("withholds %s before counting egress", async change => {
+    const row = { id: "artifact", objectKey: "objects/file", mimeType: "text/plain", kind: "FILE", sizeBytes: 5,
+      sha256: createHash("sha256").update("hello").digest("hex"), toolExecution: { requestedPath: "result.txt" } };
+    mocks.findFirst.mockResolvedValue(row);
+    mocks.readArtifactObject.mockImplementationOnce(async () => {
+      if (change === "removed_during_read") mocks.findFirst.mockResolvedValue(null);
+      if (change === "metadata_changed") mocks.findFirst.mockResolvedValue({ ...row, objectKey: "replaced-object" });
+      return { buffer: Buffer.from(change === "corrupt" ? "other" : "hello") };
+    });
+    expect(await getPublicConversationArtifactDownload({ representativeSlug: "sktone", artifactId: "artifact", audienceIdentityId: "identity" })).toBeNull();
+    expect(mocks.update).not.toHaveBeenCalled(); expect(mocks.createLedger).not.toHaveBeenCalled();
   });
 });

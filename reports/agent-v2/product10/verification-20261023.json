@@ -1,0 +1,139 @@
+{
+  "date": "2026-10-23",
+  "scope": "product10 synthetic tenant, real API/SSE/RAG/MCP",
+  "rawRecoveredReport": "2026-10-23T01-42-12-861Z-188bc211-b5a3-4116-867f-8dd1424f2e33-recovered.json",
+  "rawRecoveredSha256": "c11f51f340ac2bec0b3ead0f2dd8837b20351bb90593b3429f71b93c2358a292",
+  "recheckedReport": "recheck-4ef98a60-1a03-491a-97f5-dec37792cd72.json",
+  "recheckedSha256": "c6fce5f4e1703d0ac532b2b9606e6bcdd5fe7aa1c766e1ec7857115962420f3f",
+  "caseSummary": [
+    {
+      "id": "V2-001",
+      "expectedRows": 3,
+      "actualRows": 3,
+      "verdict": "pass"
+    },
+    {
+      "id": "V2-002",
+      "expectedRows": 6,
+      "actualRows": 6,
+      "verdict": "fail"
+    },
+    {
+      "id": "V2-003",
+      "expectedRows": 6,
+      "actualRows": 6,
+      "verdict": "fail"
+    },
+    {
+      "id": "V2-004",
+      "expectedRows": 3,
+      "actualRows": 3,
+      "verdict": "review"
+    },
+    {
+      "id": "V2-005",
+      "expectedRows": 9,
+      "actualRows": 9,
+      "verdict": "pass"
+    },
+    {
+      "id": "V2-007",
+      "expectedRows": 6,
+      "actualRows": 6,
+      "verdict": "pass"
+    },
+    {
+      "id": "V2-011",
+      "expectedRows": 9,
+      "actualRows": 9,
+      "verdict": "fail"
+    },
+    {
+      "id": "V2-013",
+      "expectedRows": 3,
+      "actualRows": 3,
+      "verdict": "pass"
+    },
+    {
+      "id": "V2-020",
+      "expectedRows": 6,
+      "actualRows": 6,
+      "verdict": "review"
+    },
+    {
+      "id": "V2-031",
+      "expectedRows": 3,
+      "actualRows": 3,
+      "verdict": "pass"
+    }
+  ],
+  "variantCounts": {
+    "pass": 35,
+    "fail": 12,
+    "review": 7
+  },
+  "productMetrics": {
+    "runs": 57,
+    "missingModel": 0,
+    "inputTokens": 504496,
+    "outputTokens": 26826,
+    "modelCalls": 84,
+    "toolCalls": 27
+  },
+  "judgeCalls": 54,
+  "judgeTokens": 146965,
+  "judgeCostsUsd": null,
+  "activeRuns": 0,
+  "finalSafety": {
+    "noNewLeases": true,
+    "noNewBrowserSessions": true,
+    "pinnedVersion": true
+  },
+  "mainContainersUnchanged": true,
+  "productionSourceUnchanged": true,
+  "deployment": [
+    {
+      "name": "delegate-agent-test-reps-1",
+      "id": "9cf76878bc061b40d2dcba34317cd914d88098502b62a40b5f505cf593df9185",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-conversation-worker-1",
+      "id": "239953b5cb9423a90250e589f1e0d4e574f645137db68ee53f5f760007e9910b",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    },
+    {
+      "name": "delegate-agent-test-compute-broker-1",
+      "id": "a7369226dbe9df05cad7e56b1df65bbf6151af2611e1243ae1191d49730aaac9",
+      "image": "delegate-agent-v2:remediation-20261022-r3"
+    }
+  ],
+  "offlineTests": {
+    "productHarness": 17,
+    "semanticJudge": 33,
+    "modelRuntime": 155,
+    "existingAgent": 228,
+    "note": "Overlapping suites, do not sum."
+  },
+  "diagnosticJudgeCalls": 3,
+  "diagnosticJudgeTokens": 7718,
+  "harnessHashes": {
+    "packages/model-runtime/evaluation/product/scope.ts": "4b4a737fc6f374a480ebc15efef89e4c2e6ebf1da237fde782bdf7125b2c51bb",
+    "packages/model-runtime/evaluation/product/recheck.ts": "0b0776fc7f2e134b8ef18b62ff8afaf7b2a6c72381615de0874b080c8e4f2292",
+    "packages/model-runtime/evaluation/product/cli.ts": "d1760b5ed96e781de400ce8869f71e24456d31b20e3ab801b79e0a5635470dc1",
+    "packages/model-runtime/evaluation/product/cases.ts": "84a06a1a3758de44430cbb2def6ba6f91dc97350697d75138fdc790fce0c1b80",
+    "packages/model-runtime/evaluation/product/client.ts": "407546f9729e05f84582485c016e2fd91b6ec9a3b869c87607b53a2227c141d7",
+    "packages/model-runtime/evaluation/product/deployment.ts": "76709c80af068169da688da5cb65d83a6ec6023e4ead75811801d71226510fd9",
+    "packages/model-runtime/evaluation/product/store.ts": "d60babdd92e4f93f5005668f560ac638bf84d238dc60c352ccc1755884169da7",
+    "packages/model-runtime/evaluation/semantic/cli.ts": "dd4411c478a16b14eba9ef27b39c16c9fef0fdd21e4c040bc80694f068df675c",
+    "packages/model-runtime/evaluation/semantic/engine.ts": "8e2371e1e3b10f184151de6ad40c28a5469b693ce78a49b8bd859c6237b1503b",
+    "packages/model-runtime/evaluation/semantic/cases.ts": "1542a2d50ef6aa45de0df1217f70cde6c3214f759b8773ee85afabf0f9072521",
+    "packages/model-runtime/evaluation/semantic/options.ts": "0ce18a67c744eb1e5ab882e7f2d7e6ce8353bb216ef9f35756370f1f9e776389"
+  },
+  "validation": {
+    "reportJsonValid": true,
+    "originalMalformedJsonPreservedSeparately": true,
+    "relativeLinksValid": true,
+    "knownSecretScanPassed": true
+  }
+}

@@ -4,7 +4,7 @@ Agent Runtime V3 publishes an MCP capability only after the real Tool Schema is
 stored in `McpToolDefinition`. Definition hash, tool-schema hash, binding
 revision, and dynamic availability are reported as separate coordinates; MCP
 annotations never grant execution or lower approval requirements. See
-[Agent Runtime V3](./agent-runtime-v3.md).
+[Agent Runtime V3](agent-v2-cleanup.md#历史实现).
 
 The owner dashboard exposes a read-only workspace capability health snapshot:
 

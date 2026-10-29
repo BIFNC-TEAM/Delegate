@@ -1,4 +1,11 @@
+import type { McpRecoveryContract } from "@delegate/compute-protocol";
+
 export type McpSuccessContract = Record<string, unknown>;
+
+export const BAILIAN_SEARCH_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/mcps/EnhancedSearch/mcp";
+export function isBailianSearchEndpoint(value: string): boolean {
+  return normalizeTrustedMcpEndpoint(value) === BAILIAN_SEARCH_ENDPOINT;
+}
 
 export type McpCapabilitySemantics = {
   operations: string[];
@@ -18,6 +25,9 @@ export type CapabilityServerPolicy = {
     reversibility: "not_applicable" | "reversible" | "irreversible" | "unknown";
   };
   idempotency: "naturally_idempotent" | "idempotency_key" | "not_idempotent" | "unknown";
+  /** Access contract is independent of effects, approval and idempotency. */
+  resultAccess?: "public_snapshot";
+  recoveryContract?: McpRecoveryContract;
   successContract?: McpSuccessContract;
   semantics?: McpCapabilitySemantics;
   supportedChannels?: string[];
@@ -37,6 +47,18 @@ export function resolveServerOwnedMcpCapabilityPolicy(input: {
   const transportKind = input.transportKind.trim().toLowerCase();
   const toolName = input.toolName.trim().toLowerCase();
   const toolSchemaHash = stripSha256(input.toolSchemaHash);
+  if (endpoint === BAILIAN_SEARCH_ENDPOINT && transportKind === "streamable_http" && toolName === "search_pro"
+    && toolSchemaHash === "372e44b4012735c63ae94e82ea6265b389d98a6902e0b8e9b98e28937bdf9d94") {
+    return {
+      policyId: "delegate.mcp.bailian-search.read.v1", classificationVersion: "delegate.mcp-effect.bailian-search.v1",
+      resultAccess: "public_snapshot",
+      effect: { boundary: "external", mutation: "none", reversibility: "not_applicable" },
+      idempotency: "naturally_idempotent",
+      recoveryContract: { version: 1, id: "delegate.bailian-search.read.v1", mode: "natural_read" },
+      semantics: { operations: ["search"], evidenceClasses: ["search_snippet"], freshnessClasses: ["indexed"],
+        authorityClasses: ["search_provider"], domains: ["public_web"], aliases: ["public search", "联网搜索", "公开资料检索"] },
+    };
+  }
   const expectedSchemaHash = DEEPWIKI_TRUSTED_TOOL_SCHEMA_HASHES[toolName];
   if (
     endpoint === DEEPWIKI_TRUSTED_ENDPOINT
@@ -46,6 +68,7 @@ export function resolveServerOwnedMcpCapabilityPolicy(input: {
   ) {
     return {
       policyId: "delegate.mcp-policy.deepwiki.public-read.v1",
+      resultAccess: "public_snapshot",
       classificationVersion: "delegate.mcp-effect.deepwiki.v2",
       effect: {
         boundary: "external",
@@ -53,6 +76,7 @@ export function resolveServerOwnedMcpCapabilityPolicy(input: {
         reversibility: "not_applicable",
       },
       idempotency: "naturally_idempotent",
+      recoveryContract: { version: 1, id: "delegate.deepwiki.read-recovery.v1", mode: "natural_read" },
       successContract: {
         kind: "server_evaluator",
         evaluatorId: "mcp.deepwiki.read_semantic",
@@ -75,6 +99,7 @@ export function resolveServerOwnedMcpCapabilityPolicy(input: {
   ) {
     return {
       policyId: "delegate.mcp.openmeteo.read.v1",
+      resultAccess: "public_snapshot",
       classificationVersion: "delegate.mcp.openmeteo.effect.v1",
       effect: {
         boundary: "external",
@@ -82,6 +107,7 @@ export function resolveServerOwnedMcpCapabilityPolicy(input: {
         reversibility: "not_applicable",
       },
       idempotency: "naturally_idempotent",
+      recoveryContract: { version: 1, id: "delegate.openmeteo.read-recovery.v1", mode: "natural_read" },
       successContract: openMeteoPolicy.successContract,
       semantics: openMeteoPolicy.semantics,
       ...(openMeteoPolicy.argumentDefaults
@@ -90,6 +116,16 @@ export function resolveServerOwnedMcpCapabilityPolicy(input: {
     };
   }
   return null;
+}
+
+/** Provider-owned key fields never become model-owned business arguments. */
+export function projectMcpModelInputSchema(inputSchema: Record<string, unknown>, policy: CapabilityServerPolicy | null) {
+  const contract = policy?.recoveryContract;
+  if (contract?.mode !== "keyed" || contract.key.kind !== "argument") return inputSchema;
+  const schema = structuredClone(inputSchema);
+  if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)) delete (schema.properties as Record<string, unknown>)[contract.key.name];
+  if (Array.isArray(schema.required)) schema.required = schema.required.filter(key => key !== contract.key.name);
+  return schema;
 }
 
 const DEEPWIKI_TRUSTED_ENDPOINT = "https://mcp.deepwiki.com/mcp";

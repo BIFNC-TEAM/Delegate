@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "dataTime": "2026-10-21T15:55:00Z",
+  "controlledObservations": {
+    "Shanghai": 20,
+    "Beijing": 10,
+    "Hangzhou": 18
+  },
+  "E": "Use actual MCP observations, never these synthetic values.",
+  "currentOnly": {
+    "rainForecast": null
+  }
+}

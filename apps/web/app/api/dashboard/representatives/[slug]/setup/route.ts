@@ -1,4 +1,5 @@
 import { after, NextResponse } from "next/server";
+import { agentBehaviorSchema } from "@delegate/domain";
 
 import {
   assertOwnerCanManageSkills,
@@ -70,6 +71,7 @@ export async function PATCH(
         name: String(body.name ?? ""),
         tagline: String(body.tagline ?? ""),
         tone: String(body.tone ?? ""),
+        ...(body.agentBehavior !== undefined ? { agentBehavior: agentBehaviorSchema.parse(body.agentBehavior) } : {}),
         languages: Array.isArray(body.languages)
           ? body.languages.filter((entry): entry is string => typeof entry === "string")
           : [],

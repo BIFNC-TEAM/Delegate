@@ -102,6 +102,7 @@ vi.mock("../src/agent-wallet-usage-charge", () => ({
 
 import {
   acceptInboundConversationMessage,
+  ServiceCreditRequiredError,
   authorizeGenerationRunFreeUsage,
   authorizeGenerationRunMcpNoCharge,
   completeInlineGenerationRun,
@@ -1376,7 +1377,19 @@ describe("generation wallet reservation lifecycle", () => {
     );
   });
 
-  it("queues an unreserved run so the worker can classify an MCP-only no-charge turn", async () => {
+  it.each([null, "different-link", "different-proof"])("replays only matching anonymous Web identity provenance (%s)", async provenance => {
+    mocks.tx.conversation.findFirst.mockResolvedValue({ id: "conversation-1", audienceIdentityId: "audience-1", freeRepliesUsed: 3,
+      representative: availableRepresentative, episodes: [{ id: "episode-1", sequence: 1, status: "ACTIVE", representativeVersionId: "version-1" }], channelBindings: connectedWebChannelBindings });
+    const existing = { ...reservedRun, inputMessage: { id: "message-in", sourceIdentityLinkId: provenance === "different-link" ? provenance : null, sourceIdentityConnectionProofId: provenance === "different-proof" ? provenance : null } };
+    mocks.tx.generationRun.findUnique.mockResolvedValue(existing);
+    const request = acceptInboundConversationMessage({ representativeSlug: "representative", conversationId: "conversation-1", text: "retry", clientMessageId: "same-message" });
+    if (provenance === null) await expect(request).resolves.toMatchObject({ run: { id: existing.id }, replayed: true });
+    else await expect(request).rejects.toMatchObject({ code: "identity_provenance_invalid" });
+    expect(mocks.tx.outboxEvent.upsert).not.toHaveBeenCalled();
+    expect(mocks.reserveConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
+  it("rejects exhausted credits without queuing a model classification", async () => {
     mocks.tx.conversation.findFirst.mockResolvedValue({
       id: "conversation-1",
       audienceIdentityId: "audience-1",
@@ -1395,7 +1408,7 @@ describe("generation wallet reservation lifecycle", () => {
       new InsufficientAgentUsageCreditsError(),
     );
 
-    const accepted = await acceptInboundConversationMessage({
+    await expect(acceptInboundConversationMessage({
       representativeSlug: "representative",
       conversationId: "conversation-1",
       text: "no balance",
@@ -1407,30 +1420,19 @@ describe("generation wallet reservation lifecycle", () => {
         tokenAmount: 1,
         idempotencyKey: "reserve:client-no-balance",
       },
-    });
-    expect(accepted).toMatchObject({
-      run: expect.objectContaining({ id: "run-new" }),
-      walletReservation: null,
-    });
+    })).rejects.toBeInstanceOf(ServiceCreditRequiredError);
+    expect(mocks.tx.outboxEvent.upsert).not.toHaveBeenCalled();
+  });
 
-    expect(mocks.tx.message.upsert).toHaveBeenCalledTimes(1);
-    expect(mocks.tx.generationRun.upsert).toHaveBeenCalledTimes(1);
-    expect(
-      mocks.tx.generationRun.upsert.mock.invocationCallOrder[0]!,
-    ).toBeLessThan(
-      mocks.reserveConversationWalletUsage.mock.invocationCallOrder[0]!,
-    );
-    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
-      where: { id: "run-new" },
-      data: {
-        runtimePolicySnapshot: {
-          billingMode: "service_credit_pending",
-          accessMode: "TRIAL_THEN_CREDITS",
-          effectiveFreeReplyLimit: 3,
-        },
-      },
+  it("keeps a legacy pending-credit run out of the free lane", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      id: "legacy-pending", conversationId: "conversation-1",
+      runtimePolicySnapshot: { billingMode: "service_credit_pending", accessMode: "TRIAL_THEN_CREDITS", effectiveFreeReplyLimit: 0 },
+      conversation: { freeRepliesUsed: 0 },
     });
-    expect(mocks.tx.outboxEvent.upsert).toHaveBeenCalledTimes(1);
+    mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
+    await expect(authorizeGenerationRunFreeUsage({ runId: "legacy-pending", outboxId: "outbox", leaseAttempt: 1, freeReplyLimit: 1000 })).resolves.toBe(false);
+    expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
   });
 
   it("releases a reserved wallet unit and marks an MCP generation no-charge", async () => {

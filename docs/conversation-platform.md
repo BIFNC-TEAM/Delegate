@@ -3,7 +3,7 @@
 Delegate uses a channel-neutral conversation domain for public web, Matrix, Telegram, and future adapters.
 
 Planning and capability execution use the single-authority
-[Agent Runtime V3](./agent-runtime-v3.md). The Conversation Platform owns
+[Agent Runtime V3](agent-v2-cleanup.md#历史实现). The Conversation Platform owns
 channel acceptance, identity, messages, GenerationRun, human control, and
 delivery; TurnPlan V3 owns goal/action execution truth. The states are linked,
 not duplicated.

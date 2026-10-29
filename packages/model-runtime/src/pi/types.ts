@@ -1,18 +1,9 @@
 import type {
-  AgentMessage,
-  AgentTool,
-  StreamFn,
+  StreamFn
 } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 
-export const PI_RUNTIME_VERSION = "delegate-pi-runtime.1" as const;
 
-export type PiRunStatus =
-  | "completed"
-  | "partial"
-  | "failed"
-  | "cancelled"
-  | "waiting_user";
 
 export type PiSpanStatus = "ok" | "error" | "timeout" | "cancelled";
 
@@ -67,6 +58,8 @@ export type PiRuntimeEvent = {
     | "model.started"
     | "model.first_event"
     | "response.delta"
+    | "response.review_started"
+    | "response.review_rejected"
     | "retrieval.completed"
     | "skill.discovered"
     | "skill.loaded"
@@ -92,12 +85,6 @@ export type PiRuntimeEvent = {
   data?: Record<string, unknown>;
 };
 
-export type PiHistoryMessage = {
-  role: "user" | "assistant";
-  text: string;
-  timestamp?: number;
-};
-
 export type PiAttachment = {
   id: string;
   fileName: string;
@@ -113,6 +100,7 @@ export type PiSource = {
   provider?: string;
   url?: string;
   dataTime?: string;
+  observedAt?: string;
   version?: string;
 };
 
@@ -134,9 +122,20 @@ export type PiCapabilityResult = {
   sources?: PiSource[];
   artifacts?: PiArtifact[];
   resultRef?: string;
+  contextSourceRef?: string;
   status?: string;
-  /** Optional user-safe summary whose deterministic facts must not be rewritten by the model. */
+  /** Bounded host-verified stdout or result summary; evidence data for the main model. */
   authoritativeSummary?: string;
+  observation?: {
+    state: "available" | "empty" | "blocked" | "unavailable" | "unknown";
+    /** Host-classified result kind; not inferred from text, URLs or a model-selected tool name. */
+    evidenceKind?: "search_results";
+    reason?: string;
+    httpStatus?: number;
+    observedAt?: string;
+    sourceTime?: string;
+    retryAfterMs?: number;
+  };
 };
 
 export type PiToolContext = {
@@ -150,6 +149,7 @@ export type PiToolContext = {
   timezone: string;
   attachments: PiAttachment[];
   idempotencyKey: string;
+  logicalAction?: { version: 1; ordinal: number };
 };
 
 export type PiKnowledgeAdapter = {
@@ -162,6 +162,8 @@ export type PiKnowledgeAdapter = {
 };
 
 export type PiWebAdapter = {
+  /** Trusted host description of actual provider coverage/freshness, if known. */
+  description?: string;
   search(input: {
     query: string;
     localDate?: string;
@@ -175,8 +177,12 @@ export type PiMcpToolDescriptor = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Trusted host classification; legacy adapters may omit it. */
+  effectClassification?: "read" | "write" | "unknown";
   readOnly: boolean;
   idempotent: boolean;
+  /** Host-verified permission metadata; absence is not permission to parallelize. */
+  approvalRequired?: boolean;
 };
 
 export type PiMcpAdapter = {
@@ -222,6 +228,14 @@ export type PiSkillAdapter = {
 };
 
 export type PiSandboxAdapter = {
+  /** Trusted host description of the actual execution/output contract. */
+  executionDescription?: string;
+  /** Uses the broker's managed browser, including its runtime launch settings. */
+  browse?(input: {
+    url: string;
+    context: PiToolContext;
+    signal: AbortSignal;
+  }): Promise<PiCapabilityResult>;
   execute(input: {
     language: "python" | "javascript" | "shell";
     code: string;
@@ -231,32 +245,12 @@ export type PiSandboxAdapter = {
     context: PiToolContext;
     signal: AbortSignal;
     onProgress?: (message: string) => void;
-  }): Promise<PiCapabilityResult>;
-};
-
-export type PiArtifactAdapter = {
-  register(input: {
-    sandboxResultRef: string;
-    paths: string[];
-    context: PiToolContext;
-    signal: AbortSignal;
-  }): Promise<PiCapabilityResult>;
-};
-
-export type PiHandoffAdapter = {
-  request(input: {
-    reason: string;
-    summary: string;
-    priority?: number;
-    context: PiToolContext;
-    signal: AbortSignal;
-  }): Promise<PiCapabilityResult>;
-  cancel?(input: {
-    transferId?: string;
-    queueId?: string;
-    context: PiToolContext;
-    signal: AbortSignal;
-  }): Promise<PiCapabilityResult>;
+  }): Promise<PiCapabilityResult & {
+    /** Host-verified only: never infer from stdout or accept from remote MCP data.
+     * Program/output recovery requires a terminal receipt from the isolated no-egress
+     * Python profile, with no deliverable file published. */
+    recovery?: { kind: "not_dispatched" | "isolated_output_rejected" | "isolated_program_failed"; reason: string };
+  }>;
 };
 
 export type PiCapabilityAdapters = {
@@ -265,27 +259,12 @@ export type PiCapabilityAdapters = {
   mcp?: PiMcpAdapter;
   skills?: PiSkillAdapter;
   sandbox?: PiSandboxAdapter;
-  artifacts?: PiArtifactAdapter;
-  handoff?: PiHandoffAdapter;
-};
-
-export type PiAttachmentEvidenceRecovery = {
-  skill: {
-    id: string;
-    version: string;
-    instructionsDigest: string;
-    resource: string;
-  };
-  execute(input: {
-    context: PiToolContext;
-    signal: AbortSignal;
-  }): Promise<PiCapabilityResult>;
 };
 
 export type PiModelBinding = {
   model: Model<any>;
   streamFn: StreamFn;
-  createObservedStreamFn?: ((observer: (event: PiModelAttemptEvent) => void) => StreamFn) | undefined;
+  createObservedStreamFn?: ((observer: (event: PiModelAttemptEvent) => void, beforeRequest?: () => Promise<void>) => StreamFn) | undefined;
   provider: string;
   modelId: string;
 };
@@ -298,93 +277,4 @@ export type PiModelAttemptEvent = {
   httpStatus?: number;
   error?: string;
   willRetry?: boolean;
-};
-
-export type PiAgentRunInput = {
-  runId: string;
-  sessionId: string;
-  userText: string;
-  representative: {
-    id?: string;
-    versionId?: string;
-    name: string;
-    /** The person or organization that authorized this public representative. */
-    ownerName?: string;
-    role: string;
-    instructions?: string;
-    capabilities?: string[];
-  };
-  audience?: {
-    kind: "external_visitor" | "authenticated_visitor" | "owner" | "operator";
-    displayName?: string;
-    /** Relationship to the representative owner is unverified unless supplied by trusted product state. */
-    relationshipToOwner?: "unverified" | "customer" | "partner" | "employee" | "owner" | "operator";
-  };
-  model: PiModelBinding;
-  capabilities?: PiCapabilityAdapters;
-  /**
-   * Optional fail-closed recovery compiled from a server-trusted, immutable Skill
-   * resource. It runs only after Pi ignores both bounded attachment corrections.
-   */
-  attachmentEvidenceRecovery?: PiAttachmentEvidenceRecovery;
-  history?: PiHistoryMessage[];
-  attachments?: PiAttachment[];
-  /** Trusted product state for a tool that completed after owner approval. */
-  approvedToolResult?: {
-    approvalId: string;
-    toolName: string;
-    status: "completed";
-    text: string;
-    artifacts?: PiArtifact[];
-  };
-  conversationId?: string;
-  userId?: string;
-  timezone?: string;
-  /** Deterministic clock for regression/control tests; production omits it. */
-  currentTime?: string;
-  caseId?: string;
-  maxSteps?: number;
-  timeoutMs?: number;
-  maxToolRetries?: number;
-  signal?: AbortSignal;
-  onEvent?: (event: PiRuntimeEvent) => void | Promise<void>;
-};
-
-export type PiAgentRunResult = {
-  runtime: typeof PI_RUNTIME_VERSION;
-  traceId: string;
-  runId: string;
-  sessionId: string;
-  status: PiRunStatus;
-  text: string;
-  messages: AgentMessage[];
-  events: PiRuntimeEvent[];
-  spans: PiSpan[];
-  sources: PiSource[];
-  artifacts: PiArtifact[];
-  handoff?: { status: string; transferId?: string; queueId?: string };
-  firstModelEventMs?: number;
-  firstTextMs?: number;
-  totalDurationMs: number;
-  modelCalls: number;
-  toolCalls: number;
-  error?: string;
-};
-
-export type PiToolBuildResult = {
-  tools: AgentTool<any>[];
-  sources: PiSource[];
-  artifacts: PiArtifact[];
-  getHandoff: () => PiAgentRunResult["handoff"];
-  getPendingApproval: () => boolean;
-  getKnowledgeAttempts: () => number;
-  getKnowledgeOutcome: () => "not_attempted" | "found" | "missing" | "unavailable";
-  getCurrentInformationAttempts: () => number;
-  getMcpWriteAttempts: () => number;
-  getAuthoritativeSummary: () => string | undefined;
-  getSandboxAttempts: () => number;
-  getSandboxEvidenceResults: () => number;
-  getSandboxConclusiveResults: () => number;
-  getSandboxSuccesses: () => number;
-  acceptSandboxRecoveryResult: (result: PiCapabilityResult) => boolean;
 };

@@ -224,7 +224,6 @@ type RepresentativeIdentity = {
           decision: string;
           resourceScopeCondition: string | null;
           channelCondition: string | null;
-          requiredPlanTier: string | null;
           priority: number;
           requiresHumanApproval: boolean;
         }>;
@@ -245,7 +244,6 @@ type RepresentativeIdentity = {
         decision: string;
         resourceScopeCondition: string | null;
         channelCondition: string | null;
-        requiredPlanTier: string | null;
         priority: number;
         requiresHumanApproval: boolean;
       }>;
@@ -267,7 +265,6 @@ type RepresentativeIdentity = {
       decision: string;
       resourceScopeCondition: string | null;
       channelCondition: string | null;
-      requiredPlanTier: string | null;
       priority: number;
     }>;
   }>;
@@ -322,7 +319,6 @@ type RepresentativeIdentity = {
         decision: string;
         resourceScopeCondition: string | null;
         channelCondition: string | null;
-        requiredPlanTier: string | null;
         priority: number;
         requiresHumanApproval: boolean;
       }>;
@@ -365,7 +361,6 @@ export type RepresentativeComputeSnapshot = {
         browserRequiresApproval: boolean;
         mcpDecision: "allow" | "ask" | "deny";
         mcpRequiresApproval: boolean;
-        requiredPlanTier: "pass" | "deep_help";
       };
       trustedCustomer: {
         enabled: boolean;
@@ -374,7 +369,6 @@ export type RepresentativeComputeSnapshot = {
         browserRequiresApproval: boolean;
         mcpDecision: "allow" | "ask" | "deny";
         mcpRequiresApproval: boolean;
-        requiredPlanTier: "pass" | "deep_help";
       };
     };
     governance: OrganizationGovernanceOverlays;
@@ -1080,6 +1074,7 @@ export async function getRepresentativeComputeArtifacts(
 export async function getRepresentativeComputeArtifactDetail(
   representativeSlug: string,
   artifactId: string,
+  options: { maxChars?: number } = {},
 ): Promise<RepresentativeComputeArtifactDetail | null> {
   const artifact = await getRepresentativeArtifactRecord(representativeSlug, artifactId);
 
@@ -1095,7 +1090,7 @@ export async function getRepresentativeComputeArtifactDetail(
     artifact.kind === "STDERR" ||
     artifact.kind === "TRACE";
   const text = isTextArtifact ? buffer.toString("utf8") : null;
-  const maxChars = 20000;
+  const maxChars = Math.min(128_000, Math.max(1, options.maxChars ?? 20_000));
   const contentText = text ? text.slice(0, maxChars) : null;
 
   return {
@@ -1470,9 +1465,9 @@ export async function updateRepresentativeManagedPolicyOverlays(
           decision: parsed.baseline.browserDecision.toUpperCase() as "ALLOW" | "ASK" | "DENY",
           resourceScopeCondition: "BROWSER_LANE",
           channelCondition: "PRIVATE_CHAT",
-          requiredPlanTier: parsed.baseline.requiredPlanTier.toUpperCase() as "PASS" | "DEEP_HELP",
+          requiredPlanTier: null,
           priority: 160,
-          requiresPaidPlan: true,
+          requiresPaidPlan: false,
           requiresHumanApproval: parsed.baseline.browserRequiresApproval,
         },
         {
@@ -1496,11 +1491,9 @@ export async function updateRepresentativeManagedPolicyOverlays(
             | "DENY",
           resourceScopeCondition: "BROWSER_LANE",
           channelCondition: "PRIVATE_CHAT",
-          requiredPlanTier: parsed.trustedCustomer.requiredPlanTier.toUpperCase() as
-            | "PASS"
-            | "DEEP_HELP",
+          requiredPlanTier: null,
           priority: 170,
-          requiresPaidPlan: true,
+          requiresPaidPlan: false,
           requiresHumanApproval: parsed.trustedCustomer.browserRequiresApproval,
         },
         {
@@ -2167,7 +2160,6 @@ async function getRepresentativeIdentity(
                       decision: true,
                       resourceScopeCondition: true,
                       channelCondition: true,
-                      requiredPlanTier: true,
                       priority: true,
                       requiresHumanApproval: true,
                     },
@@ -2198,7 +2190,6 @@ async function getRepresentativeIdentity(
                   decision: true,
                   resourceScopeCondition: true,
                   channelCondition: true,
-                  requiredPlanTier: true,
                   priority: true,
                   requiresHumanApproval: true,
                 },
@@ -2230,7 +2221,6 @@ async function getRepresentativeIdentity(
               decision: true,
               resourceScopeCondition: true,
               channelCondition: true,
-              requiredPlanTier: true,
               priority: true,
             },
           },
@@ -2305,7 +2295,6 @@ async function getRepresentativeIdentity(
                   decision: true,
                   resourceScopeCondition: true,
                   channelCondition: true,
-                  requiredPlanTier: true,
                   priority: true,
                   requiresHumanApproval: true,
                 },
@@ -2926,11 +2915,10 @@ function serializeRepresentativeIdentity(representative: RepresentativeIdentity)
       ruleCount: profile.rules.length,
       highlights: profile.rules.slice(0, 3).map((rule) => {
         const channel = rule.channelCondition ? ` @ ${rule.channelCondition.toLowerCase()}` : "";
-        const plan = rule.requiredPlanTier ? ` / ${rule.requiredPlanTier.toLowerCase()}` : "";
         const scope = rule.resourceScopeCondition
           ? ` / ${rule.resourceScopeCondition.toLowerCase()}`
           : "";
-        return `${rule.capability.toLowerCase()} -> ${rule.decision.toLowerCase()}${scope}${channel}${plan}`;
+        return `${rule.capability.toLowerCase()} -> ${rule.decision.toLowerCase()}${scope}${channel}`;
       }),
     })),
     ownerManagedOverlays: serializeOwnerManagedOverlays(representative.owner.capabilityProfiles),
@@ -2954,7 +2942,6 @@ function serializeOwnerManagedOverlays(
       browserRequiresApproval: resolveOverlayRuleApproval(baselineProfile, "BROWSER", true),
       mcpDecision: resolveOverlayRuleDecision(baselineProfile, "MCP", "ASK"),
       mcpRequiresApproval: resolveOverlayRuleApproval(baselineProfile, "MCP", true),
-      requiredPlanTier: resolveOverlayRulePlanTier(baselineProfile, "BROWSER", "PASS"),
     },
     trustedCustomer: {
       enabled: trustedProfile?.enabled ?? true,
@@ -2963,7 +2950,6 @@ function serializeOwnerManagedOverlays(
       browserRequiresApproval: resolveOverlayRuleApproval(trustedProfile, "BROWSER", true),
       mcpDecision: resolveOverlayRuleDecision(trustedProfile, "MCP", "ALLOW"),
       mcpRequiresApproval: resolveOverlayRuleApproval(trustedProfile, "MCP", false),
-      requiredPlanTier: resolveOverlayRulePlanTier(trustedProfile, "BROWSER", "PASS"),
     },
   });
 }
@@ -2990,7 +2976,6 @@ function serializeOrganizationGovernance(representative: RepresentativeIdentity)
       browserRequiresApproval: resolveOverlayRuleApproval(organizationBaseline, "BROWSER", true),
       mcpDecision: resolveOverlayRuleDecision(organizationBaseline, "MCP", "ASK"),
       mcpRequiresApproval: resolveOverlayRuleApproval(organizationBaseline, "MCP", true),
-      requiredPlanTier: resolveOverlayRulePlanTier(organizationBaseline, "BROWSER", "PASS"),
     },
     customerAccounts: representative.organizationCustomerAccounts.map((account) => {
       const customerProfile = account.capabilityProfiles.find(
@@ -3005,7 +2990,6 @@ function serializeOrganizationGovernance(representative: RepresentativeIdentity)
         browserRequiresApproval: resolveOverlayRuleApproval(customerProfile, "BROWSER", true),
         mcpDecision: resolveOverlayRuleDecision(customerProfile, "MCP", "ALLOW"),
         mcpRequiresApproval: resolveOverlayRuleApproval(customerProfile, "MCP", false),
-        requiredPlanTier: resolveOverlayRulePlanTier(customerProfile, "BROWSER", "PASS"),
         contactIds: account.contacts.map((contact) => contact.id),
       };
     }),
@@ -3043,15 +3027,6 @@ function resolveOverlayRuleApproval(
   return rule?.requiresHumanApproval ?? fallback;
 }
 
-function resolveOverlayRulePlanTier(
-  profile: RepresentativeIdentity["owner"]["capabilityProfiles"][number] | undefined,
-  capability: "BROWSER" | "MCP",
-  fallback: "PASS" | "DEEP_HELP",
-) {
-  const rule = profile?.rules.find((candidate) => candidate.capability === capability);
-  return (rule?.requiredPlanTier ?? fallback).toLowerCase() as "pass" | "deep_help";
-}
-
 function resolveOverlayTrustTier(
   value: string | null | undefined,
 ): "standard" | "verified" | "vip" | "restricted" {
@@ -3076,7 +3051,6 @@ function buildManagedOverlayRules(params: {
     browserRequiresApproval: boolean;
     mcpDecision: "allow" | "ask" | "deny";
     mcpRequiresApproval: boolean;
-    requiredPlanTier: "pass" | "deep_help";
   };
 }) {
   return [
@@ -3087,9 +3061,9 @@ function buildManagedOverlayRules(params: {
       decision: params.config.browserDecision.toUpperCase() as "ALLOW" | "ASK" | "DENY",
       resourceScopeCondition: "BROWSER_LANE" as const,
       channelCondition: "PRIVATE_CHAT" as const,
-      requiredPlanTier: params.config.requiredPlanTier.toUpperCase() as "PASS" | "DEEP_HELP",
+      requiredPlanTier: null,
       priority: params.precedenceBase,
-      requiresPaidPlan: true,
+      requiresPaidPlan: false,
       requiresHumanApproval: params.config.browserRequiresApproval,
     },
     {

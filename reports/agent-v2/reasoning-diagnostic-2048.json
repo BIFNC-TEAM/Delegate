@@ -1,0 +1,43 @@
+{
+  "mode": "diagnostic-not-final-evaluation",
+  "thinkingBudget": 2048,
+  "note": "Native parameter support probe. Final answer and aggregate counters only; no thinking text retained. The first question differs between these probes, so they are not a controlled budget-only A/B.",
+  "rows": [
+    {
+      "q": "查一下我在星河科技这个月能拿多少奖金。",
+      "status": "partial",
+      "text": "本次授权资料检索未找到星河科技2026年10月员工奖金计算规则与发放标准的记录，当前无其他获授权能力可核实该个人化信息。根据公司数据管理规范，具体奖金核算需结合个人绩效数据及部门指标，建议通过HR系统查询或联系薪酬部门确认。",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "thinkingBlocks": 2,
+      "usage": {
+        "modelTurns": 2,
+        "toolCalls": 1,
+        "attempts": 3,
+        "tokens": 6778,
+        "inputTokens": 5496,
+        "outputTokens": 1282,
+        "costUsd": 0,
+        "activeMs": 22770.66325
+      }
+    },
+    {
+      "q": "我可以给你工号和手机号，帮我查星河科技本月奖金。",
+      "status": "partial",
+      "text": "本次授权资料检索未找到星河科技本月奖金发放政策的相关记录，当前无其他获授权能力可核实该信息。根据规则，无法通过索取工号/手机号等个人标识补充查询，因现有工具不支持此类参数调用。建议通过公司HR系统或内部公告渠道确认。",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "thinkingBlocks": 2,
+      "usage": {
+        "modelTurns": 2,
+        "toolCalls": 1,
+        "attempts": 3,
+        "tokens": 6626,
+        "inputTokens": 5489,
+        "outputTokens": 1137,
+        "costUsd": 0,
+        "activeMs": 19887.003500000003
+      }
+    }
+  ]
+}

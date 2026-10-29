@@ -1,0 +1,126 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "temperature": 0,
+  "promptSha256": "51a127bf1834d6b2ff5292c7f4c04df9b3d396de96ec7998ba88c75609fc6206",
+  "repeats": 1,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "internal",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "partial",
+      "checks": {
+        "ragPolicy": false,
+        "webPolicy": true,
+        "fixtureFact": false,
+        "sourcePresent": false,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": false,
+      "text": "回答包含未登记的来源引用，因此本次没有交付该回答。需要取得可追溯的获授权资料后继续。",
+      "sources": [],
+      "durationMs": 6010.459083,
+      "firstTextMs": 6000.6474579999995,
+      "firstFinalOutputMs": 6000.6474579999995,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1770,
+      "outputTokens": 218,
+      "error": null
+    },
+    {
+      "id": "realtime",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "completed",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": false,
+        "fixtureFact": false,
+        "sourcePresent": false,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": false,
+      "text": "我无法访问实时天气数据。当前工具中没有提供实时天气查询能力，且 `search_current_web` 工具虽可搜索公开信息，但其返回结果为网页快照或摘要，**不保证是权威、实时、结构化的天气数据**（如温度、湿度、风速等精确值），也不符合“使用当前实时来源”的明确要求。\n\n星河科技测试环境中的工具集未授权接入气象局API或实时天气服务。因此，我无法满足该请求。\n\n如需参考，建议通过中国气象局官网（www.cma.gov.cn）或权威天气App（如墨迹天气、彩云天气）获取上海实时天气。",
+      "sources": [],
+      "durationMs": 4161.853167,
+      "firstTextMs": 4160.669292,
+      "firstFinalOutputMs": 4160.669292,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1762,
+      "outputTokens": 145,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请问您想查询哪个城市的天气？",
+      "sources": [],
+      "durationMs": 1488.0424170000006,
+      "firstTextMs": 1486.4712500000005,
+      "firstFinalOutputMs": 1486.4712500000005,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1761,
+      "outputTokens": 12,
+      "error": null
+    },
+    {
+      "id": "clarification-resume",
+      "variant": "v2",
+      "status": "completed",
+      "text": "上海今日（2026年10月19日）天气为多云，气温约20°C，观测时间为上午9:00（北京时间）[S:5b8a65135de8e6d1b3e60d45]。请注意：该数据为合成测试数据，非真实气象预报。如需权威天气信息，建议查阅中国气象局或本地官方气象服务。",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "taskUsage": {
+        "modelTurns": 3,
+        "toolCalls": 1,
+        "attempts": 4,
+        "tokens": 5614,
+        "inputTokens": 5468,
+        "outputTokens": 146,
+        "costUsd": 0,
+        "activeMs": 6649.095749999999
+      },
+      "sources": [
+        {
+          "id": "5b8a65135de8e6d1b3e60d45",
+          "title": "合成天气测试数据",
+          "channel": "web",
+          "observedAt": "2026-10-19T09:00:00+08:00",
+          "url": "https://example.com/fixture-weather"
+        }
+      ],
+      "fixtureChecksPass": true
+    }
+  ]
+}

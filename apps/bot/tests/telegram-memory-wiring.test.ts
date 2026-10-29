@@ -22,7 +22,7 @@ describe("Telegram memory runtime wiring", () => {
   it("keeps group memory off and delivers the notice before private ingestion", () => {
     const handler = source.slice(source.indexOf('bot.on("message:text"'));
     const groupGate = handler.indexOf(
-      'conversationPlatformMode === "worker" && !isPrivate',
+      '!isPrivate',
     );
     const privateDisclosure = handler.indexOf(
       "if (isPrivate) {\n    try {\n      await deliverTelegramMemoryDisclosure",

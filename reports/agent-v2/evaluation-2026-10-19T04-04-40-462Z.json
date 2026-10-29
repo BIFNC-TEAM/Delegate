@@ -1,0 +1,107 @@
+{
+  "mode": "real-model-controlled-tools",
+  "provider": "agicto",
+  "model": "qwen-plus",
+  "temperature": 0,
+  "promptSha256": "a1495a51684cfba1114065a0e143e420a87cafac0b300faab57bf637d4348d3e",
+  "repeats": 1,
+  "conditions": "Synthetic internal policy, weather and calculator tools. No production credentials/data sent to tools. No semantic judge model. Checks below are fixture/path checks, not proof of arbitrary answer entailment. Alternating variant order; no global performance claim.",
+  "rows": [
+    {
+      "id": "realtime",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "completed",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "上海今日天气为20°C，多云。观测时间为2026-10-19T09:00:00+08:00 [S:5b8a65135de8e6d1b3e60d45]。",
+      "sources": [
+        {
+          "id": "5b8a65135de8e6d1b3e60d45",
+          "title": "合成天气测试数据",
+          "channel": "web",
+          "observedAt": "2026-10-19T09:00:00+08:00",
+          "url": "https://example.com/fixture-weather"
+        }
+      ],
+      "durationMs": 5485.74975,
+      "firstTextMs": 5475.314582999999,
+      "firstFinalOutputMs": 5475.314582999999,
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "toolNames": [
+        "search_current_web"
+      ],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 3927,
+      "outputTokens": 142,
+      "error": null
+    },
+    {
+      "id": "clarify",
+      "repeat": 0,
+      "variant": "v2",
+      "status": "waiting_user",
+      "checks": {
+        "ragPolicy": true,
+        "webPolicy": true,
+        "fixtureFact": true,
+        "sourcePresent": true,
+        "clarification": true,
+        "computation": true,
+        "internalMiss": true
+      },
+      "fixtureChecksPass": true,
+      "text": "请提供您所在的城市或地区，以便查询当地天气。",
+      "sources": [],
+      "durationMs": 1150.248791,
+      "firstTextMs": 1149.6236250000002,
+      "firstFinalOutputMs": 1149.6236250000002,
+      "modelCalls": 1,
+      "toolCalls": 0,
+      "toolNames": [],
+      "ragCalls": 0,
+      "ragDurationMs": 0,
+      "inputTokens": 1843,
+      "outputTokens": 17,
+      "error": null
+    },
+    {
+      "id": "clarification-resume",
+      "variant": "v2",
+      "status": "completed",
+      "text": "上海今日天气：20°C，多云。观测时间为 2026-10-19T09:00:00+08:00 [S:5b8a65135de8e6d1b3e60d45]。",
+      "modelCalls": 2,
+      "toolCalls": 1,
+      "taskUsage": {
+        "modelTurns": 3,
+        "toolCalls": 1,
+        "attempts": 4,
+        "tokens": 5835,
+        "inputTokens": 5714,
+        "outputTokens": 121,
+        "costUsd": 0,
+        "activeMs": 5268.313542
+      },
+      "sources": [
+        {
+          "id": "5b8a65135de8e6d1b3e60d45",
+          "title": "合成天气测试数据",
+          "channel": "web",
+          "observedAt": "2026-10-19T09:00:00+08:00",
+          "url": "https://example.com/fixture-weather"
+        }
+      ],
+      "fixtureChecksPass": true
+    }
+  ]
+}

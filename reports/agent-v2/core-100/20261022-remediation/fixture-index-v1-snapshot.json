@@ -1,0 +1,116 @@
+{
+  "fixtureVersion": 1,
+  "note": "Static bytes only. DB readiness and execution results are tracked separately.",
+  "files": [
+    {
+      "path": "fixtures/data/subjects.json",
+      "bytes": 839,
+      "sha256": "bea36e627e170b315d6a5819be3e1df7301bab46957ec0edb972330fd7f62dff"
+    },
+    {
+      "path": "fixtures/data/entitlements.json",
+      "bytes": 662,
+      "sha256": "b4a944025ef00601fed5483daf9c7059fb6532e6b4186d54ea15eca4d7d8529a"
+    },
+    {
+      "path": "fixtures/data/time-location.json",
+      "bytes": 228,
+      "sha256": "aec5f6aaf79bb12db64ba6bdfa12e256da10a3328a7bccb7401474159cd8216c"
+    },
+    {
+      "path": "fixtures/data/knowledge/current-leave.md",
+      "bytes": 165,
+      "sha256": "1fff92e5fcf0c5d1678c73a4a3e822caee145b7c48de1be8021afad3cedd5c89"
+    },
+    {
+      "path": "fixtures/data/knowledge/travel.md",
+      "bytes": 250,
+      "sha256": "850fccafe6d73d2ec991a10473280d9bb502f1a3ff2a88ffed37787f4ae7affc"
+    },
+    {
+      "path": "fixtures/data/knowledge/restricted.md",
+      "bytes": 156,
+      "sha256": "4010eea769d7eaaf67e25451bd73ab903aea8a666286d613f0c43872cfc9a174"
+    },
+    {
+      "path": "fixtures/data/knowledge/missing-bonus.json",
+      "bytes": 259,
+      "sha256": "61010358d8afebf91c2f69e61448636c9cde4a0153b29a495557402fa8b85993"
+    },
+    {
+      "path": "fixtures/data/text-tasks.json",
+      "bytes": 412,
+      "sha256": "717bcfc9ba26290b86403f34742e2e08ea77cc7c26c57e28ff3e1d62dcbab9b8"
+    },
+    {
+      "path": "fixtures/data/tool-observations.json",
+      "bytes": 273,
+      "sha256": "78c0dc3db0f731bcb992d11f87d70ece93561410bb89fb49f0bd68b8c7d04ae6"
+    },
+    {
+      "path": "fixtures/files/temperatures.csv",
+      "bytes": 42,
+      "sha256": "15049cd60404b967cf0f0e90362b94e3426b4773268deb4801a4eeb40e45f22e"
+    },
+    {
+      "path": "fixtures/files/amounts.csv",
+      "bytes": 79,
+      "sha256": "b08f24bfc54373c25aa63a23df60f3d07550618633f0d69ec82f411206c29454"
+    },
+    {
+      "path": "fixtures/files/amounts-edge.csv",
+      "bytes": 131,
+      "sha256": "4b7f7a9a33568666752f29621419c03dad4402d62de191fe20d178235a0875fc"
+    },
+    {
+      "path": "fixtures/files/empty.csv",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "fixtures/files/headers-only.csv",
+      "bytes": 10,
+      "sha256": "0cfb8bf36572c5acdaecaed61c52d27dcaf612b9c5c0cef5732a1fd5e63d01b0"
+    },
+    {
+      "path": "fixtures/files/天气记录（合成）.csv",
+      "bytes": 82,
+      "sha256": "89e8ee7fa3fc0e64b7b2267ac1b3632b5c9f098db1557fb232a4d74406eb4170"
+    },
+    {
+      "path": "fixtures/files/collision-A/input.txt",
+      "bytes": 29,
+      "sha256": "6938218851d259aa2ca79ac233edf2c6cfcd9ff269cb462916d95f4b6e2b2ea3"
+    },
+    {
+      "path": "fixtures/files/collision-B/input.txt",
+      "bytes": 29,
+      "sha256": "7433a2fd42db631147dbbe7b533a6c0b1b8acf6e062cea5418c5d36c882fe6d4"
+    },
+    {
+      "path": "expected/temperature.json",
+      "bytes": 189,
+      "sha256": "c667292ed0c8c5ce3701a5c8d3430390be4c70eb4c8f3adb3df0840b1da04d75"
+    },
+    {
+      "path": "expected/amounts.json",
+      "bytes": 166,
+      "sha256": "ae802bc7a2827f852a20110e873e81fcc08b525c96461bec7eaba04f0e9ca2fc"
+    },
+    {
+      "path": "expected/unicode-csv.json",
+      "bytes": 99,
+      "sha256": "94c0394196a8eef47368158f3b97476eff6b2b91034c98c1db9a7d1a7a0f8f3c"
+    },
+    {
+      "path": "fixtures/data/canaries.json",
+      "bytes": 160,
+      "sha256": "dec26e7aaf898c5194f2795fffa25712fbb024c07fa385a2ec06f37acb993e9e"
+    },
+    {
+      "path": "fixtures/data/faults/execution-receipts.json",
+      "bytes": 534,
+      "sha256": "f4391998d3baf7a095d1a36a6149c536f5cea101ea3fe9e5f9a61806922adad5"
+    }
+  ]
+}

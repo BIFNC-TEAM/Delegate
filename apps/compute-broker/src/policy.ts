@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { evaluateCodeExecutionPreflight, evaluatePythonExecutionPreflight } from "./code-preflight";
+import { validatePythonRequest } from "./isolated-python/request";
 
 import { evaluateCapabilityPolicyStack } from "@delegate/capability-policy";
 import {
@@ -11,10 +13,10 @@ import {
 } from "@delegate/compute-protocol";
 import {
   resolveServerOwnedMcpCapabilityPolicy,
+  assertAgentContextForExecution,
   type RepresentativeRuntimeMcpBindingGrant,
 } from "@delegate/web-data";
 import {
-  deriveConversationComputeEntitlements,
   requireAudienceGenerationRunAuthorization,
 } from "./entitlements";
 import { loadRepresentativeMcpBinding, resolveMcpToolName } from "./mcp-bindings";
@@ -148,6 +150,7 @@ export async function loadSessionPolicyContext(sessionId: string) {
       conversationId: session.conversationId,
       generationRunId: session.generationRunId,
     });
+  if (audienceAuthorization && session.generationRunId) await assertAgentContextForExecution(session.generationRunId);
   const effectiveExpiresAt = resolveComputeSessionExpiryCeiling({
     storedExpiresAt: session.expiresAt,
     createdAt: session.createdAt,
@@ -211,22 +214,42 @@ export async function loadSessionPolicyContext(sessionId: string) {
   };
 }
 
-export async function evaluateExecutionRequest(sessionId: string, rawInput: unknown) {
+export async function getCodeExecutionPreflight(sessionId: string) {
+  // Applies the same current session/audience/published-policy checks as execution.
+  const context = await loadSessionPolicyContext(sessionId);
+  return context.audienceAuthorization && context.session.runtimeClass === "CODE" && context.session.generationRunId
+    ? evaluatePythonExecutionPreflight(context.profile) : evaluateCodeExecutionPreflight(context.profile);
+}
+
+export async function evaluateExecutionRequest(sessionId: string, rawInput: unknown, trusted?: { approvedExecutionId: string }) {
   const input = toolExecutionRequestSchema.parse(rawInput);
   const normalizedPath =
     (input.capability === "read" || input.capability === "write") && input.path
       ? normalizeContainerPath(input.path)
       : input.path;
   const context = await loadSessionPolicyContext(sessionId);
-  const serverVerifiedCompiledTask = verifyInlineCompiledTask({
+  if (input.isolatedPython) {
+    if (input.capability !== "exec" || input.command || input.compiledTask || input.path || input.content
+      || context.session.runtimeClass !== "CODE" || !context.audienceAuthorization || !context.session.generationRunId) {
+      throw new SessionError(400, "isolated_python_route_invalid");
+    }
+    input.isolatedPython = validatePythonRequest(input.isolatedPython);
+    if (input.isolatedPython.timeoutMs > context.profile.maxCommandSeconds * 1000) throw new SessionError(400, "isolated_python_timeout_exceeds_policy");
+    if (!trusted?.approvedExecutionId) {
+      const lease = input.generationWorkLease;
+      const current = lease ? await prisma.outboxEvent.findFirst({ where: {
+        id: lease.outboxId, aggregateType: "generation_run", aggregateId: context.session.generationRunId,
+        eventType: "generation.requested", status: "PROCESSING", attemptCount: lease.leaseAttempt, availableAt: { gt: new Date() },
+      }, select: { id: true } }) : null;
+      if (!current) throw new SessionError(409, "isolated_python_work_lease_lost");
+    }
+  }
+  const inlineCodeIntegrityVerified = verifyInlineCodeIntegrity({
     input,
     ...(context.session.generationRun?.inputMessage.text !== undefined
       ? { generationInputText: context.session.generationRun.inputMessage.text }
       : {}),
   });
-  const entitlements = deriveConversationComputeEntitlements(
-    context.audienceAuthorization,
-  );
   const mcpBinding =
     input.capability === "mcp"
       ? await loadRepresentativeMcpBinding({
@@ -244,14 +267,15 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
         }).toolName
       : undefined;
   const bindingDomain = mcpBinding ? new URL(mcpBinding.serverUrl).hostname : undefined;
-  const serverVerifiedReadOnlyMcp =
+  const mcpBehavior =
     input.capability === "mcp" && mcpBinding && mcpToolName
-      ? resolveServerVerifiedReadOnlyMcp({
+      ? resolveServerVerifiedMcpBehavior({
           binding: mcpBinding,
           runtimeGrants: context.runtimeAuthority.mcpBindings,
           toolName: mcpToolName,
         })
-      : false;
+      : "unknown";
+  const serverVerifiedReadOnlyMcp = input.capability === "mcp" && mcpBehavior === "read";
   const estimatedTokens = Math.max(
     input.estimatedTokens ?? 0,
     mcpBinding?.estimatedTokensPerCall ?? 0,
@@ -260,7 +284,7 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     [...context.managedProfiles, context.profile],
     {
       capability: input.capability,
-      command: input.capability === "mcp" ? mcpToolName : input.command,
+      command: input.capability === "mcp" ? mcpToolName : input.isolatedPython ? "python" : input.command,
       path: normalizedPath,
       domain: input.capability === "mcp" ? bindingDomain : input.domain,
       resourceScope: resolvePolicyResourceScope(input.capability),
@@ -273,9 +297,7 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
               | "channel_entry",
           }
         : {}),
-      ...(entitlements.activePlanTier ? { activePlanTier: entitlements.activePlanTier } : {}),
       estimatedTokens,
-      hasPaidEntitlement: entitlements.hasPaidEntitlement,
       contactTrustTier: normalizeContactTrustTier(context.session.contact?.computeTrustTier),
       ...(context.session.contact?.customerAccountId
         ? { customerAccountId: context.session.contact.customerAccountId }
@@ -288,12 +310,20 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
   );
   const publishedCapabilityMode =
     context.runtimeAuthority.compute.capabilityModes[input.capability];
-  const decision = restrictEvaluatedDecision(
-    policyDecision,
-    serverVerifiedReadOnlyMcp && publishedCapabilityMode === "ask"
-      ? "allow"
-      : publishedCapabilityMode,
-  );
+  let decision = input.capability === "mcp" && mcpBehavior === "unknown"
+    ? { decision: "deny" as const, reason: "mcp_tool_behavior_unclassified" }
+    : restrictEvaluatedDecision(policyDecision, publishedCapabilityMode);
+  if (input.isolatedPython?.outputFileName) {
+    const outputDecision = evaluateCapabilityPolicyStack([...context.managedProfiles, context.profile], {
+      capability: "write", path: `/workspace/outputs/${input.isolatedPython.outputFileName}`,
+      resourceScope: resolvePolicyResourceScope("write"), estimatedTokens,
+      contactTrustTier: normalizeContactTrustTier(context.session.contact?.computeTrustTier),
+      ...(context.session.conversation?.channel ? { channel: context.session.conversation.channel.toLowerCase() as "private_chat" | "group_mention" | "group_reply" | "channel_entry" } : {}),
+      ...(context.session.contact?.customerAccountId ? { customerAccountId: context.session.contact.customerAccountId } : {}),
+    });
+    const writeDecision = restrictEvaluatedDecision(outputDecision, context.runtimeAuthority.compute.capabilityModes.write);
+    if (writeDecision.decision === "deny" || (decision.decision === "allow" && writeDecision.decision === "ask")) decision = writeDecision;
+  }
   if (
     process.env.NODE_ENV === "test"
     && process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS === "true"
@@ -330,15 +360,14 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     },
     context,
     decision,
-    entitlements,
     mcpBinding,
     serverVerifiedReadOnlyMcp,
-    serverVerifiedCompiledTask,
+    inlineCodeIntegrityVerified,
     sessionSubagentId,
   };
 }
 
-export function verifyInlineCompiledTask(input: {
+export function verifyInlineCodeIntegrity(input: {
   input: ToolExecutionRequest;
   generationInputText?: string | null;
 }) {
@@ -356,6 +385,9 @@ export function verifyInlineCompiledTask(input: {
   return metadata.instructionHash === sha256Text(input.generationInputText.trim())
     && metadata.codeHash === sha256Text(source);
 }
+
+// Compatibility for existing diagnostic probes; this proves consistency only.
+export const verifyInlineCompiledTask = verifyInlineCodeIntegrity;
 
 function decodeInlineProgram(command: string) {
   const patterns = [
@@ -377,7 +409,7 @@ function sha256Text(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-export function resolveServerVerifiedReadOnlyMcp(input: {
+export function resolveServerVerifiedMcpBehavior(input: {
   binding: {
     id: string;
     serverUrl: string;
@@ -386,11 +418,11 @@ export function resolveServerVerifiedReadOnlyMcp(input: {
   };
   runtimeGrants: RepresentativeRuntimeMcpBindingGrant[];
   toolName: string;
-}) {
+}): "read" | "write" | "unknown" {
   const grant = input.runtimeGrants.find(
     (candidate) => candidate.id === input.binding.id,
   );
-  if (!grant) return false;
+  if (!grant || (grant.allowedToolNames.length > 0 && !grant.allowedToolNames.includes(input.toolName))) return "unknown";
   if (
     isConfiguredTestReadOnlyMcp(input.binding.id, input.toolName)
     && (
@@ -398,14 +430,14 @@ export function resolveServerVerifiedReadOnlyMcp(input: {
       || grant.allowedToolNames.includes(input.toolName)
     )
   ) {
-    return true;
+    return "read";
   }
   const definition = grant?.toolDefinitions?.find(
     (candidate) =>
       candidate.exactToolName === input.toolName
       && candidate.bindingRevision === input.binding.configRevision,
   );
-  if (!definition) return false;
+  if (!definition) return "unknown";
   const policy = resolveServerOwnedMcpCapabilityPolicy({
     serverUrl: input.binding.serverUrl,
     transportKind: input.binding.transportKind,
@@ -413,11 +445,14 @@ export function resolveServerVerifiedReadOnlyMcp(input: {
     toolSchemaHash: definition.toolSchemaHash,
     inputSchema: definition.inputSchema,
   });
-  return Boolean(
-    policy
-    && policy.effect.mutation === "none"
-    && policy.idempotency === "naturally_idempotent",
-  );
+  if (!policy) return "unknown";
+  return policy.effect.mutation === "none" ? "read" : "write";
+}
+
+export function resolveServerVerifiedReadOnlyMcp(
+  input: Parameters<typeof resolveServerVerifiedMcpBehavior>[0],
+) {
+  return resolveServerVerifiedMcpBehavior(input) === "read";
 }
 
 function isConfiguredTestReadOnlyMcp(bindingId: string, toolName: string) {
@@ -441,10 +476,7 @@ export function applyServerVerifiedReadOnlyMcpDecision(
   if (
     serverVerifiedReadOnlyMcp
     && decision.decision === "ask"
-    && (
-      decision.reason === "managed_human_approval_required"
-      || decision.reason === "auto_approve_token_limit_exceeded"
-    )
+    && decision.reason === "managed_human_approval_required"
   ) {
     return {
       decision: "allow",

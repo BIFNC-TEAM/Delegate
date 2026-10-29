@@ -10,6 +10,7 @@ import {
   resolveComputeSubagentIdForCapability,
   resolveApprovalRequestSchema,
   resolveApprovalResponseSchema,
+  toolExecutionRequestSchema,
   type CapabilityKind,
   type CompiledSandboxTaskMetadata,
   type BrowserExecutionMode,
@@ -18,10 +19,15 @@ import {
   type ExecuteToolResponse,
   type NativeComputerProvider,
   type ToolExecutionRequest,
+  type IsolatedPythonRequest,
 } from "@delegate/compute-protocol";
 import { Prisma } from "@prisma/client";
+import { auditErrorCode, auditReference, isAgentContextAuthorizationError } from "@delegate/runtime";
 import {
   finalizeComputeApprovalConversation,
+  assertAgentContextForExecution,
+  captureAgentExecutionSources,
+  persistAgentExecutionSourceReceipt,
 } from "@delegate/web-data";
 
 import { createApprovalRequestForExecution } from "./approvals";
@@ -44,7 +50,6 @@ import {
   persistFileArtifact,
   persistJsonArtifact,
   persistScreenshotArtifact,
-  readPersistedArtifactObject,
 } from "./artifacts";
 import { computeLifecycleHooks } from "./lifecycle-hooks";
 import {
@@ -62,6 +67,7 @@ import {
 } from "./mcp";
 import { assertLiveMcpToolSchemaPin } from "./mcp-tool-definitions";
 import { executeNativeComputerUseLoop } from "./native-browser";
+import { loadLatestNativeBrowserSeed } from "./native-browser-seed";
 import { extractHostname, isHostnameAllowed, normalizeNetworkAllowlist } from "./network-allowlist";
 import { normalizeContainerPath } from "./path-utils";
 import { prisma } from "./prisma";
@@ -80,6 +86,11 @@ import {
   serializeSession,
 } from "./serializers";
 import { SessionError } from "./session-error";
+import { assertMcpProviderOperationCurrent, pinMcpProviderOperation } from "./mcp-provider-operation";
+import { assertLogicalActionDispatch, logicalPayloadHash, prepareLogicalAction, type ActionEffect } from "./logical-actions";
+import { evaluateCodeExecutionPreflight, evaluatePythonExecutionPreflight, requiresGeneralCodeProfile } from "./code-preflight";
+import { pythonActionId, validatePythonRequest, verifyPythonInputManifest } from "./isolated-python/request";
+import { runBrokerPythonExecution } from "./isolated-python/broker-execution";
 
 type PolicyExecutionContext = Awaited<ReturnType<typeof loadSessionPolicyContext>>;
 type LeasedSessionRecord = {
@@ -94,6 +105,8 @@ type LeasedSessionRecord = {
   startedAt: Date | null;
 };
 type NormalizedExecutionInput = {
+  logicalAction?: ToolExecutionRequest["logicalAction"];
+  rejectApprovalWait?: boolean;
   capability: CapabilityKind;
   subagentId: ComputeSubagentId;
   browserMode: BrowserExecutionMode;
@@ -115,7 +128,9 @@ type NormalizedExecutionInput = {
   estimatedTokens: number | undefined;
   hasPaidEntitlement: boolean;
   compiledTask?: CompiledSandboxTaskMetadata;
-  serverVerifiedCompiledTask?: boolean;
+  isolatedPython?: IsolatedPythonRequest;
+  generationWorkLease?: ToolExecutionRequest["generationWorkLease"];
+  inlineCodeIntegrityVerified?: boolean;
   serverVerifiedReadOnlyMcp?: boolean;
 };
 
@@ -161,6 +176,8 @@ type RuntimeExecutionResult = {
   browserCapture?: BrowserCaptureSummary | undefined;
   transport: "docker" | "mcp";
   transportOutcome?: "response_received" | "confirmed_not_sent" | "outcome_unknown";
+  semanticOutcome?: "succeeded" | "failed" | "unknown";
+  canceled?: boolean;
   remoteUrl?: string | undefined;
   providerCostCents?: number | undefined;
   browserCostCents?: number | undefined;
@@ -177,6 +194,39 @@ type RuntimeExecutionResult = {
     | undefined;
 };
 
+async function replayPythonAction(id: string, generationRunId: string, input: NormalizedExecutionInput) {
+  const previous = await prisma.toolExecution.findUnique({ where: { id }, include: { session: true } });
+  if (!previous) return null;
+  if (previous.session?.generationRunId !== generationRunId || previous.requestPayloadHash !== hashRequestPayload(buildExecutionRequestPayload(input))) {
+    throw new SessionError(409, "isolated_python_action_parameters_changed");
+  }
+  const saved = executeToolResponseSchema.safeParse(previous.responseSnapshot);
+  if (saved.success) return saved.data;
+  const approval = previous.approvalRequestId ? await prisma.approvalRequest.findUnique({ where: { id: previous.approvalRequestId } }) : null;
+  return executeToolResponseSchema.parse({ outcome: approval?.status === "PENDING" ? "pending_approval" : "failed",
+    session: serializeSession(previous.session),
+    execution: serializeExecution({ ...previous, transportOutcome: previous.transportOutcome ?? "outcome_unknown", semanticOutcome: previous.semanticOutcome ?? "unknown" }),
+    ...(approval?.status === "PENDING" ? { approvalRequest: serializeApprovalRequest(approval) } : {}), artifacts: [] });
+}
+
+function actionEffect(input: NormalizedExecutionInput): ActionEffect {
+  return input.capability === "read" || (input.capability === "browser" && !input.allowMutations)
+    || (input.capability === "mcp" && input.serverVerifiedReadOnlyMcp) ? "read" : "write";
+}
+async function replayLogicalAction(previous: Awaited<ReturnType<typeof prisma.toolExecution.findUniqueOrThrow>>) {
+  if (["RUNNING", "QUEUED"].includes(previous.status)) throw new SessionError(409, "logical_action_in_progress");
+  const session = await prisma.computeSession.findUniqueOrThrow({ where: { id: previous.sessionId! } });
+  const approval = previous.approvalRequestId ? await prisma.approvalRequest.findUnique({ where: { id: previous.approvalRequestId } }) : null;
+  if (previous.status === "BLOCKED" && !approval) throw new SessionError(409, "logical_action_in_progress");
+  if (approval?.status === "PENDING") return executeToolResponseSchema.parse({ outcome: "pending_approval", session: serializeSession(session),
+    execution: serializeExecution(previous), approvalRequest: serializeApprovalRequest(approval), artifacts: [] });
+  const saved = executeToolResponseSchema.safeParse(previous.responseSnapshot);
+  if (saved.success && saved.data.outcome !== "pending_approval") return saved.data;
+  const artifacts = previous.status === "SUCCEEDED" ? await prisma.artifact.findMany({ where: { toolExecutionId: previous.id } }) : [];
+  return executeToolResponseSchema.parse({ outcome: previous.status === "SUCCEEDED" ? "completed" : "failed", session: serializeSession(session),
+    execution: serializeExecution(previous), artifacts: artifacts.map(serializeArtifact) });
+}
+
 export async function executeTool(sessionId: string, rawInput: unknown) {
   const {
     input,
@@ -184,7 +234,7 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     decision,
     mcpBinding,
     serverVerifiedReadOnlyMcp,
-    serverVerifiedCompiledTask,
+    inlineCodeIntegrityVerified,
     sessionSubagentId,
   } =
     await evaluateExecutionRequest(sessionId, rawInput);
@@ -192,13 +242,26 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     input,
     mcpBinding,
     serverVerifiedReadOnlyMcp,
-    serverVerifiedCompiledTask,
+    inlineCodeIntegrityVerified,
   );
   const effectiveDecision = resolveEffectiveDecision({
     context,
     input: normalized,
     decision,
   });
+  if (normalized.isolatedPython && effectiveDecision.decision !== "deny") {
+    await verifyPythonInputManifest(context.session.generationRunId!, normalized.isolatedPython);
+  }
+  if (normalized.isolatedPython && !normalized.logicalAction && effectiveDecision.decision !== "deny") {
+    const id = pythonActionId(context.session.generationRunId!, normalized.isolatedPython.actionKey);
+    const previous = await replayPythonAction(id, context.session.generationRunId!, normalized);
+    if (previous) return previous;
+    const unresolved = await prisma.toolExecution.findFirst({ where: {
+      id: { startsWith: "py_" }, session: { generationRunId: context.session.generationRunId },
+      OR: [{ status: "RUNNING" }, { transportOutcome: "outcome_unknown" }],
+    }, select: { id: true } });
+    if (unresolved) throw new SessionError(409, "isolated_python_previous_action_unresolved");
+  }
   await computeLifecycleHooks.emit({
     kind: "tool_preflight",
     scope: {
@@ -212,6 +275,11 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     capability: normalized.capability,
     decision: effectiveDecision.decision,
     reason: effectiveDecision.reason,
+    ...(requiresGeneralCodeProfile(normalized) ? {
+      codeClassification: "untrusted_code" as const,
+      inlineCodeIntegrityVerified: Boolean(normalized.inlineCodeIntegrityVerified),
+      codeExecutionProfileId: (normalized.isolatedPython ? evaluatePythonExecutionPreflight(context.profile) : evaluateCodeExecutionPreflight(context.profile)).profileId,
+    } : {}),
     ...(normalized.command ? { requestedCommand: normalized.command } : {}),
     ...(normalized.path ? { requestedPath: normalized.path } : {}),
     ...(normalized.workingDirectory ? { workingDirectory: normalized.workingDirectory } : {}),
@@ -239,10 +307,23 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     });
   }
 
+  const requestPayload = buildExecutionRequestPayload(normalized);
+  const reservation = await prepareLogicalAction({ session: context.session, effect: actionEffect(normalized),
+    ...(normalized.logicalAction ? { action: normalized.logicalAction } : {}),
+    ...(normalized.generationWorkLease ? { workLease: normalized.generationWorkLease } : {}),
+    payloadHash: hashRequestPayload(requestPayload), needsApproval: effectiveDecision.decision === "ask",
+    executionData: { sessionId, capability: mapCapabilityToDb(normalized.capability), subagentId: sessionSubagentId,
+      requestedCommand: normalized.isolatedPython ? "isolated_python" : getPersistedCommand(normalized) ?? null, requestedPath: normalized.path ?? null, requestPayload,
+      workingDirectory: normalized.workingDirectory ?? null, mcpBindingId: normalized.bindingId ?? null,
+      policyDecision: mapPolicyDecisionToDb(effectiveDecision.decision) },
+  });
+  if (reservation?.kind === "replay") return replayLogicalAction(reservation.execution);
+
   if (effectiveDecision.decision === "ask") {
     const requestPayload = buildExecutionRequestPayload(normalized);
-    const execution = await prisma.toolExecution.create({
+    const execution = reservation?.execution ?? await prisma.toolExecution.create({
         data: {
+          ...(normalized.isolatedPython ? { id: pythonActionId(context.session.generationRunId!, normalized.isolatedPython.actionKey), requestPayloadHash: hashRequestPayload(requestPayload) } : {}),
           sessionId,
           capability: mapCapabilityToDb(normalized.capability),
           subagentId: sessionSubagentId,
@@ -254,6 +335,11 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
           mcpBindingId: normalized.bindingId ?? null,
           policyDecision: mapPolicyDecisionToDb("ask"),
         },
+      }).catch(async error => {
+        if (normalized.isolatedPython && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+          throw new SessionError(409, "isolated_python_action_already_recorded");
+        }
+        throw error;
       });
 
     const approval = await createApprovalRequestForExecution({
@@ -286,7 +372,7 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
           executionId: execution.id,
           subagentId: sessionSubagentId,
           decision: "ask",
-          reason: effectiveDecision.reason,
+          reasonRef: auditReference(effectiveDecision.reason),
           approvalRequestId: approval.id,
         },
       },
@@ -307,10 +393,17 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
 
   return runAllowedExecution({
     context,
+    ...(reservation?.kind === "reserved" ? { existingExecutionId: reservation.execution.id, expectedExecutionLeaseToken: reservation.executionLeaseToken! } : {}),
     input: {
       ...normalized,
       subagentId: sessionSubagentId,
     },
+  }).catch(async error => {
+    if (normalized.isolatedPython && !normalized.logicalAction && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      const replay = await replayPythonAction(pythonActionId(context.session.generationRunId!, normalized.isolatedPython.actionKey), context.session.generationRunId!, normalized);
+      if (replay) return replay;
+    }
+    throw error;
   });
 }
 
@@ -701,12 +794,13 @@ export async function processNextApprovedExecution() {
     const evaluated = await evaluateExecutionRequest(
       requireExecutionSessionId(executionForRun),
       rawRequest,
+      { approvedExecutionId: executionForRun.id },
     );
     const normalized = normalizeExecutionInput(
       evaluated.input,
       evaluated.mcpBinding,
       evaluated.serverVerifiedReadOnlyMcp,
-      evaluated.serverVerifiedCompiledTask,
+      evaluated.inlineCodeIntegrityVerified,
     );
     const decision = resolveEffectiveDecision({
       context: evaluated.context,
@@ -763,8 +857,8 @@ export async function processNextApprovedExecution() {
       outcome: result.outcome === "completed" ? "completed" : "failed",
       artifacts: result.artifacts.map((artifact) => ({
         ...artifact,
-        ...(artifact.kind === "file" && normalized.path
-          ? { fileName: normalized.path.split("/").pop() || "result.txt" }
+        ...(artifact.kind === "file" && (normalized.isolatedPython?.outputFileName || normalized.path)
+          ? { fileName: normalized.isolatedPython?.outputFileName ?? (normalized.path?.split("/").pop() || "result.txt") }
           : {}),
       })),
       ...(result.session.failureReason ? { failureReason: result.session.failureReason } : {}),
@@ -861,7 +955,7 @@ async function persistGenerationExecutionResponse(
   await prisma.toolExecution.updateMany({
     where: {
       id: executionId,
-      generationOutboxId: { not: null },
+      OR: [{ generationOutboxId: { not: null } }, { id: { startsWith: "py_" } }, { actionIdentity: { not: Prisma.DbNull } }],
     },
     data: {
       responseSnapshot: response as Prisma.InputJsonValue,
@@ -877,6 +971,12 @@ async function runAllowedExecution(params: {
 }) {
   const startedAt = new Date();
   const executionContext = params.context;
+  const sourceKind = params.input.isolatedPython ? "derived_python" as const
+    : params.input.capability === "browser" && params.input.browserMode === "deterministic" && !params.input.allowMutations ? "anonymous_browser" as const
+    : params.input.capability === "mcp" ? "public_mcp" as const : undefined;
+  const sourceCapture = sourceKind && executionContext.session.requestedBy === "AUDIENCE" && executionContext.session.generationRunId
+    ? await captureAgentExecutionSources({ runId: executionContext.session.generationRunId, kind: sourceKind,
+        ...(params.input.bindingId ? { bindingId: params.input.bindingId } : {}), ...(params.input.toolName ? { toolName: params.input.toolName } : {}) }) : undefined;
   const executionDescriptor = describeExecution(executionContext, params.input);
   const requestPayload = buildExecutionRequestPayload(params.input);
   const existingExecutionId = params.existingExecutionId;
@@ -922,6 +1022,7 @@ async function runAllowedExecution(params: {
       })()
       : await prisma.toolExecution.create({
         data: {
+          ...(params.input.isolatedPython ? { id: pythonActionId(params.context.session.generationRunId!, params.input.isolatedPython.actionKey), requestPayloadHash: hashRequestPayload(requestPayload) } : {}),
           sessionId: params.context.session.id,
           capability: mapCapabilityToDb(executionDescriptor.capability),
           subagentId: params.input.subagentId,
@@ -936,7 +1037,10 @@ async function runAllowedExecution(params: {
           executionLeaseToken,
         },
       });
-  const leasedSession = await resolveExecutionSessionForCapability({
+  let leasedSession: LeasedSessionRecord = executionContext.session;
+  let preparationFailure: string | undefined;
+  try {
+    leasedSession = params.input.isolatedPython ? executionContext.session : await resolveExecutionSessionForCapability({
     capability: params.input.capability,
     session: executionContext.session,
     ensureLeasedSession: () => ensureComputeSessionLease({
@@ -944,8 +1048,17 @@ async function runAllowedExecution(params: {
       networkMode: executionContext.profile.networkMode,
       networkAllowlist: executionContext.profile.networkAllowlist,
       filesystemMode: resolveExecutionFilesystemMode(executionContext),
+      recoverMissingBrowserRuntime: sourceKind === "anonymous_browser" && executionContext.session.requestedBy === "AUDIENCE",
     }),
   });
+  } catch (error) {
+    // No URL/command was dispatched. Continue through the normal fenced
+    // finalizer rather than leaving an execution RUNNING after startup fails.
+    preparationFailure = `sandbox_preparation_failed:${auditErrorCode(error)}`;
+  }
+
+  if (!preparationFailure) {
+  await assertLogicalActionDispatch(executionContext.session, actionEffect(params.input), execution.id);
 
   await prisma.computeSession.update({
     where: { id: leasedSession.id },
@@ -957,16 +1070,38 @@ async function runAllowedExecution(params: {
       failureReason: null,
     },
   });
+  }
 
   const runtimeStartedAt = Date.now();
-  const runtimeResult =
+  const runtimeResult: RuntimeExecutionResult =
     await (async () => {
+      if (preparationFailure) return {
+        exitCode: 1, wallMs: 0, bytesRead: 0, artifacts: [], failureSummary: preparationFailure,
+        browserCapture: undefined, transport: "docker" as const,
+        transportOutcome: "confirmed_not_sent" as const, semanticOutcome: "failed" as const,
+        remoteUrl: undefined,
+      } satisfies RuntimeExecutionResult;
       try {
-        return params.input.capability === "mcp"
+        return params.input.isolatedPython
+          ? await runBrokerPythonExecution({ context: executionContext, request: params.input.isolatedPython, executionId: execution.id, executionLeaseToken,
+              assertCurrentPermission: async () => {
+                const current = await evaluateExecutionRequest(executionContext.session.id, toToolExecutionRequest(params.input),
+                  execution.approvalRequestId ? { approvedExecutionId: execution.id } : undefined);
+                const checked = normalizeExecutionInput(current.input, current.mcpBinding, current.serverVerifiedReadOnlyMcp, current.inlineCodeIntegrityVerified);
+                const permission = resolveEffectiveDecision({ context: current.context, input: checked, decision: current.decision });
+                if (permission.decision === "deny" || (permission.decision === "ask" && !execution.approvalRequestId)) throw new SessionError(403, "isolated_python_authorization_changed");
+                if (permission.decision === "ask" && execution.approvalRequestId) {
+                  const approved = await prisma.approvalRequest.findUnique({ where: { id: execution.approvalRequestId } });
+                  if ((permission.matchedRuleId ?? null) !== approved?.matchedPolicyRuleId) throw new SessionError(403, "isolated_python_approval_scope_changed");
+                }
+              },
+            })
+          : params.input.capability === "mcp"
           ? await runMcpExecution({
               context: executionContext,
               leasedSession,
               executionId: execution.id,
+              executionLeaseToken,
               input: params.input,
             })
           : await runContainerExecution({
@@ -1025,7 +1160,8 @@ async function runAllowedExecution(params: {
     });
   }
 
-  const computeCostCents = Math.max(1, Math.ceil(runtimeResult.wallMs / 1000));
+  const computeCostCents = preparationFailure || (params.input.isolatedPython && runtimeResult.transportOutcome !== "response_received")
+    ? 0 : Math.max(1, Math.ceil(runtimeResult.wallMs / 1000));
   const storageCostCents = totalArtifactBytes > 0 ? Math.max(1, Math.ceil(totalArtifactBytes / 65536)) : 0;
   const billing = await recordExecutionCosts({
     representativeId: params.context.session.representativeId,
@@ -1110,7 +1246,7 @@ async function runAllowedExecution(params: {
           executionLeaseToken,
         },
         data: {
-          status: runtimeResult.exitCode === 0 ? "SUCCEEDED" as const : "FAILED" as const,
+          status: runtimeResult.canceled ? "CANCELED" as const : runtimeResult.exitCode === 0 ? "SUCCEEDED" as const : "FAILED" as const,
           finishedAt,
           executionLeaseToken: null,
           exitCode: runtimeResult.exitCode,
@@ -1118,10 +1254,19 @@ async function runAllowedExecution(params: {
           cpuMs: null,
           bytesRead: runtimeResult.bytesRead,
           bytesWritten: totalArtifactBytes,
+          ...(preparationFailure || params.input.isolatedPython || params.input.logicalAction || params.input.capability === "mcp" ? {
+            transportOutcome: runtimeResult.transportOutcome ?? (params.input.isolatedPython ? "outcome_unknown" : "response_received"),
+            semanticOutcome: runtimeResult.semanticOutcome ?? (runtimeResult.transportOutcome === "outcome_unknown"
+              || (params.input.capability === "mcp" && actionEffect(params.input) === "write" && runtimeResult.exitCode !== 0 && runtimeResult.transportOutcome !== "confirmed_not_sent")
+              ? "unknown" : runtimeResult.exitCode === 0 ? "succeeded" : "failed"),
+          } : {}),
         },
       });
       if (finalized.count !== 1) {
         throw new SessionError(409, "compute_execution_claim_lost");
+      }
+      if (sourceCapture && runtimeResult.exitCode === 0 && !runtimeResult.canceled && runtimeResult.artifacts.length) {
+        await persistAgentExecutionSourceReceipt(tx, execution.id, sourceCapture);
       }
       const updatedExecution = await tx.toolExecution.findUniqueOrThrow({
         where: { id: execution.id },
@@ -1203,6 +1348,8 @@ function describeExecution(
   context: PolicyExecutionContext,
   input: NormalizedExecutionInput,
 ) {
+  if (input.isolatedPython) return { capability: "exec" as const, subagentId: input.subagentId,
+    requestedCommand: "isolated_python", requestedPath: input.isolatedPython.outputFileName, workingDirectory: "/workspace" };
   if (input.capability === "mcp") {
     return {
       capability: "mcp" as const,
@@ -1239,6 +1386,7 @@ async function runContainerExecution(params: {
   executionId: string;
   input: NormalizedExecutionInput;
 }): Promise<RuntimeExecutionResult> {
+  if (params.context.audienceAuthorization && params.context.session.generationRunId) await assertAgentContextForExecution(params.context.session.generationRunId);
   if (params.input.capability === "browser" && params.input.browserMode === "native") {
     return runNativeBrowserExecution(params);
   }
@@ -1450,6 +1598,10 @@ async function runNativeBrowserExecution(params: {
     sandboxIdentityId: await resolveSandboxIdentityId(params.leasedSession),
   });
   const nativeResult = await executeNativeComputerUseLoop({
+    authorizeContext: async () => {
+      await seed.revalidate();
+      if (params.context.audienceAuthorization && params.context.session.generationRunId) await assertAgentContextForExecution(params.context.session.generationRunId);
+    },
     task: params.input.task ?? "Inspect the retained browser session.",
     maxSteps: params.input.maxSteps,
     allowMutations: params.input.allowMutations,
@@ -1460,6 +1612,8 @@ async function runNativeBrowserExecution(params: {
     screenshotMimeType: seed.screenshotMimeType,
     ...(params.input.nativeProvider ? { provider: params.input.nativeProvider } : {}),
     executeActionBatch: async ({ transportKind, actions, currentUrl }) => {
+      await seed.revalidate();
+      if (params.context.audienceAuthorization && params.context.session.generationRunId) await assertAgentContextForExecution(params.context.session.generationRunId);
       const runnerResult = await runSandboxAwareExecution({
         leasedSession: params.leasedSession,
         command: buildPlaywrightNativeCommand({
@@ -1486,6 +1640,9 @@ async function runNativeBrowserExecution(params: {
       return payload;
     },
     executeOpenCodeComputerUse: async (input) => {
+      const preflight = evaluateCodeExecutionPreflight(params.context.profile);
+      if (!preflight.available) throw new SessionError(409, preflight.reason);
+      await seed.revalidate();
       const openCodeResult = await runSandboxAwareExecution({
         leasedSession: params.leasedSession,
         command: buildOpenCodeComputerUseCommand({
@@ -1547,6 +1704,8 @@ async function runNativeBrowserExecution(params: {
 
   const artifacts: Awaited<ReturnType<typeof persistExecutionArtifacts>> = [];
   let browserCapture: BrowserCaptureSummary | undefined;
+  await seed.revalidate();
+  if (params.context.audienceAuthorization && params.context.session.generationRunId) await assertAgentContextForExecution(params.context.session.generationRunId);
   if (nativeResult.capture) {
     const captureArtifacts = await persistBrowserExecutionArtifacts({
       representativeId: params.context.session.representativeId,
@@ -1616,72 +1775,6 @@ async function runNativeBrowserExecution(params: {
   };
 }
 
-async function loadLatestNativeBrowserSeed(input: {
-  computeSessionId: string;
-  sandboxIdentityId?: string | null | undefined;
-}): Promise<{
-  currentUrl?: string | null;
-  currentTitle?: string | null;
-  textSnippet?: string | null;
-  screenshotBase64: string;
-  screenshotMimeType: "image/png" | "image/jpeg";
-}> {
-  const browserSession = input.sandboxIdentityId
-    ? await prisma.browserSession.findFirst({
-        where: {
-          sandboxIdentityId: input.sandboxIdentityId,
-        },
-        orderBy: [{ updatedAt: "desc" }],
-        include: {
-          navigations: {
-            orderBy: [{ createdAt: "desc" }],
-            take: 1,
-          },
-        },
-      })
-    : await prisma.browserSession.findUnique({
-        where: {
-          computeSessionId: input.computeSessionId,
-        },
-        include: {
-          navigations: {
-            orderBy: [{ createdAt: "desc" }],
-            take: 1,
-          },
-        },
-      });
-
-  const latestNavigation = browserSession?.navigations[0];
-  if (!browserSession || !latestNavigation?.screenshotArtifactId) {
-    throw new SessionError(409, "native_browser_seed_missing");
-  }
-
-  const screenshotArtifact = await prisma.artifact.findUnique({
-    where: {
-      id: latestNavigation.screenshotArtifactId,
-    },
-    select: {
-      objectKey: true,
-      mimeType: true,
-    },
-  });
-
-  if (!screenshotArtifact) {
-    throw new SessionError(409, "native_browser_screenshot_missing");
-  }
-
-  const screenshotBuffer = await readPersistedArtifactObject(screenshotArtifact.objectKey);
-
-  return {
-    currentUrl: browserSession.currentUrl,
-    currentTitle: browserSession.currentTitle,
-    textSnippet: latestNavigation.textSnippet,
-    screenshotBase64: screenshotBuffer.toString("base64"),
-    screenshotMimeType:
-      screenshotArtifact.mimeType === "image/png" ? "image/png" : "image/jpeg",
-  };
-}
-
 async function persistBrowserExecutionArtifacts(params: {
   representativeId: string;
   representativeSlug: string;
@@ -1717,6 +1810,8 @@ async function persistBrowserExecutionArtifacts(params: {
         finalUrl: parsed.finalUrl,
         textSnippet: parsed.textSnippet,
         contentSnippet: parsed.contentSnippet,
+        ...(parsed.httpStatus !== undefined ? { httpStatus: parsed.httpStatus } : {}),
+        ...(parsed.observedAt ? { observedAt: parsed.observedAt } : {}),
         links: parsed.links,
       },
       summary,
@@ -1764,6 +1859,7 @@ async function runMcpExecution(params: {
   context: PolicyExecutionContext;
   leasedSession: LeasedSessionRecord;
   executionId: string;
+  executionLeaseToken: string;
   input: NormalizedExecutionInput;
 }): Promise<RuntimeExecutionResult> {
   const binding = await loadRepresentativeMcpBinding({
@@ -1792,6 +1888,15 @@ async function runMcpExecution(params: {
   let toolResult: Awaited<ReturnType<typeof callRemoteMcpTool>>;
   let externalCallStarted = false;
   try {
+    if (params.context.audienceAuthorization && params.context.session.generationRunId) await assertAgentContextForExecution(params.context.session.generationRunId);
+    const operation = await pinMcpProviderOperation({ executionId: params.executionId, sessionId: params.context.session.id,
+      executionLeaseToken: params.executionLeaseToken, bindingId: binding.id, toolName: resolved.toolName,
+      ...(runtimeDefinition ? { toolSchemaHash: runtimeDefinition.toolSchemaHash } : {}), toolArguments: params.input.toolArguments ?? {} });
+    if (operation.contract.mode === "keyed" && operation.contract.query) {
+      const query = operation.contract.query;
+      const queryGrant = params.context.runtimeAuthority.mcpBindings.find(grant => grant.id === binding.id)?.toolDefinitions?.find(definition => definition.exactToolName === query.toolName);
+      if ((Array.isArray(binding.allowedToolNames) && binding.allowedToolNames.length && !binding.allowedToolNames.includes(query.toolName)) || queryGrant?.toolSchemaHash.replace(/^sha256:/u, "") !== query.toolSchemaHash) throw new SessionError(409, "mcp_provider_scope_changed");
+    }
     toolResult = await callRemoteMcpTool({
       binding: {
         ...binding,
@@ -1800,6 +1905,7 @@ async function runMcpExecution(params: {
       requestedToolName: resolved.toolName,
       toolArguments: params.input.toolArguments,
       retrySafe: params.input.serverVerifiedReadOnlyMcp ?? false,
+      providerOperation: operation,
       ...(runtimeDefinition
         ? {
             onToolsListed: async (tools: Array<{
@@ -1815,12 +1921,27 @@ async function runMcpExecution(params: {
             },
           }
         : {}),
-      onBeforeToolCall: async () => {
-        externalCallStarted = true;
+      authorize: async () => {
+        try {
+          await assertMcpProviderOperationCurrent(operation, params.executionLeaseToken);
+          const stored = await prisma.toolExecution.findUniqueOrThrow({ where: { id: params.executionId }, select: { approvalRequestId: true } });
+          const live = await evaluateExecutionRequest(params.context.session.id, toToolExecutionRequest(params.input), stored.approvalRequestId ? { approvedExecutionId: params.executionId } : undefined);
+          const permission = resolveEffectiveDecision({ context: live.context, input: normalizeExecutionInput(live.input, live.mcpBinding, live.serverVerifiedReadOnlyMcp, live.inlineCodeIntegrityVerified), decision: live.decision });
+          if (permission.decision === "deny" || (permission.decision === "ask" && !stored.approvalRequestId)) throw new SessionError(409, "mcp_provider_scope_changed");
+          if (stored.approvalRequestId) {
+            const approval = await prisma.approvalRequest.findUnique({ where: { id: stored.approvalRequestId } });
+            if (approval?.status !== "APPROVED" || (permission.decision === "ask" && (permission.matchedRuleId ?? null) !== approval.matchedPolicyRuleId)) throw new SessionError(409, "mcp_provider_scope_changed");
+          }
+          if (params.context.audienceAuthorization && params.context.session.generationRunId) await assertAgentContextForExecution(params.context.session.generationRunId);
+        } catch (error) {
+          if (isAgentContextAuthorizationError(error)) throw error;
+          throw new SessionError(409, "mcp_provider_scope_changed");
+        }
       },
+      onBeforeToolCall: async () => { externalCallStarted = true; },
     });
   } catch (error) {
-    if (healthObservation) {
+    if (healthObservation && !isAgentContextAuthorizationError(error) && !(error instanceof SessionError && error.message.startsWith("mcp_provider_"))) {
       await recordRepresentativeMcpBindingFailure({
         observation: healthObservation,
         failureReason: toMcpHealthFailureCode(error),
@@ -1857,6 +1978,7 @@ async function runMcpExecution(params: {
     },
     arguments: params.input.toolArguments ?? {},
     result: toolResult.result,
+    ...(toolResult.providerState ? { recovery: { state: toolResult.providerState, recoveredByQuery: toolResult.recoveredByQuery, queryAttempts: toolResult.queryAttempts } } : {}),
   };
   const artifact = await persistJsonArtifact({
     representativeId: params.context.session.representativeId,
@@ -1870,9 +1992,13 @@ async function runMcpExecution(params: {
     summary: toolResult.summary,
   });
   const semanticError = isMcpToolErrorResult(toolResult.result);
+  const providerState = toolResult.providerState;
+  const semanticOutcome = providerState ? providerState === "succeeded" ? "succeeded" as const
+    : providerState === "failed_no_effect" ? "failed" as const : "unknown" as const : undefined;
 
   return {
-    exitCode: semanticError ? 1 : 0,
+    exitCode: semanticError || (semanticOutcome && semanticOutcome !== "succeeded") ? 1 : 0,
+    ...(semanticOutcome ? { semanticOutcome } : {}),
     wallMs: Date.now() - startedAt.getTime(),
     bytesRead: Buffer.byteLength(JSON.stringify(payload), "utf8"),
     artifacts: [artifact],
@@ -1994,7 +2120,7 @@ async function blockExecution(params: {
         executionId: execution.id,
         subagentId: params.subagentId,
         decision: params.policyDecision,
-        reason: params.reason,
+        reasonRef: auditReference(params.reason),
       },
     },
   });
@@ -2013,7 +2139,14 @@ async function blockExecution(params: {
   return response;
 }
 
-export function resolveEffectiveDecision(params: {
+export function resolveEffectiveDecision(params: Parameters<typeof resolveEffectiveDecisionBase>[0]) {
+  const decision = resolveEffectiveDecisionBase(params);
+  return params.input.rejectApprovalWait && decision.decision === "ask"
+    ? { decision: "deny" as const, reason: "caller_cannot_resume_approval" }
+    : decision;
+}
+
+function resolveEffectiveDecisionBase(params: {
   context: PolicyExecutionContext;
   input: NormalizedExecutionInput;
   decision: {
@@ -2026,16 +2159,12 @@ export function resolveEffectiveDecision(params: {
     return params.decision;
   }
 
-  if (
-    (params.input.capability === "exec" || params.input.capability === "process") &&
-    params.input.command &&
-    !isSimpleExecCommand(params.input.command) &&
-    !params.input.serverVerifiedCompiledTask
-  ) {
-    return {
-      decision: "ask" as const,
-      reason: "complex_shell_command",
-    };
+  if (requiresGeneralCodeProfile(params.input)) {
+    if (params.input.compiledTask && !params.input.inlineCodeIntegrityVerified) {
+      return { decision: "deny" as const, reason: "inline_code_integrity_mismatch" };
+    }
+    const preflight = params.input.isolatedPython ? evaluatePythonExecutionPreflight(params.context.profile) : evaluateCodeExecutionPreflight(params.context.profile);
+    if (!preflight.available) return { decision: "deny" as const, reason: preflight.reason };
   }
 
   if (params.input.capability === "browser" && params.context.profile.networkMode === "no_network") {
@@ -2111,8 +2240,7 @@ export function resolveEffectiveDecision(params: {
     typeof params.input.estimatedTokens === "number" &&
     params.input.estimatedTokens >
       params.context.runtimeAuthority.compute.autoApproveTokenLimit &&
-    params.decision.decision === "allow" &&
-    !params.input.serverVerifiedReadOnlyMcp
+    params.decision.decision === "allow"
   ) {
     return {
       decision: "ask" as const,
@@ -2134,7 +2262,7 @@ export function resolveEffectiveDecision(params: {
   return params.decision;
 }
 
-function normalizeExecutionInput(
+export function normalizeExecutionInput(
   input: ToolExecutionRequest,
   mcpBinding?: {
     id: string;
@@ -2143,7 +2271,24 @@ function normalizeExecutionInput(
     approvalRequired: boolean;
   } | null,
   serverVerifiedReadOnlyMcp = false,
-  serverVerifiedCompiledTask = false,
+  inlineCodeIntegrityVerified = false,
+): NormalizedExecutionInput {
+  return { ...normalizeExecutionInputBase(input, mcpBinding, serverVerifiedReadOnlyMcp, inlineCodeIntegrityVerified),
+    ...(input.rejectApprovalWait ? { rejectApprovalWait: true } : {}),
+    ...(input.logicalAction ? { logicalAction: input.logicalAction } : {}),
+    ...(input.generationWorkLease ? { generationWorkLease: input.generationWorkLease } : {}) };
+}
+
+function normalizeExecutionInputBase(
+  input: ToolExecutionRequest,
+  mcpBinding?: {
+    id: string;
+    slug: string;
+    serverUrl: string;
+    approvalRequired: boolean;
+  } | null,
+  serverVerifiedReadOnlyMcp = false,
+  inlineCodeIntegrityVerified = false,
 ): NormalizedExecutionInput {
   switch (input.capability) {
     case "read": {
@@ -2171,7 +2316,7 @@ function normalizeExecutionInput(
         workingDirectory: input.workingDirectory,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
-        serverVerifiedCompiledTask: false,
+        inlineCodeIntegrityVerified: false,
       };
     }
     case "write": {
@@ -2203,7 +2348,7 @@ function normalizeExecutionInput(
         workingDirectory: input.workingDirectory,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
-        serverVerifiedCompiledTask: false,
+        inlineCodeIntegrityVerified: false,
       };
     }
     case "browser": {
@@ -2237,7 +2382,7 @@ function normalizeExecutionInput(
         workingDirectory: undefined,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
-        serverVerifiedCompiledTask: false,
+        inlineCodeIntegrityVerified: false,
       };
     }
     case "mcp": {
@@ -2271,20 +2416,18 @@ function normalizeExecutionInput(
         bindingSlug,
         toolName,
         toolArguments: input.toolArguments,
-        approvalRequired: serverVerifiedReadOnlyMcp
-          ? false
-          : mcpBinding?.approvalRequired ?? true,
+        approvalRequired: mcpBinding?.approvalRequired ?? true,
         workingDirectory: undefined,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
-        serverVerifiedCompiledTask: false,
+        inlineCodeIntegrityVerified: false,
         serverVerifiedReadOnlyMcp,
       };
     }
     case "process":
     case "exec":
     default: {
-      if (!input.command) {
+      if (!input.command && !input.isolatedPython) {
         throw new SessionError(400, "command_required_for_exec");
       }
       return {
@@ -2309,7 +2452,9 @@ function normalizeExecutionInput(
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
         ...(input.compiledTask ? { compiledTask: input.compiledTask } : {}),
-        serverVerifiedCompiledTask,
+        ...(input.isolatedPython ? { isolatedPython: validatePythonRequest(input.isolatedPython) } : {}),
+        ...(input.generationWorkLease ? { generationWorkLease: input.generationWorkLease } : {}),
+        inlineCodeIntegrityVerified,
       };
     }
   }
@@ -2381,6 +2526,20 @@ function reconstructExecutionInput(execution: {
   requestPayload: unknown;
   workingDirectory: string | null;
 }) {
+  const restored = reconstructExecutionInputBase(execution);
+  const payload = typeof execution.requestPayload === "string" ? safeParseExecutionPayload(execution.requestPayload) : execution.requestPayload as Record<string, unknown> | null;
+  return normalizeExecutionInput(toolExecutionRequestSchema.parse({ ...toToolExecutionRequest(restored), ...(payload?.logicalAction ? { logicalAction: payload.logicalAction } : {}) }));
+}
+
+function reconstructExecutionInputBase(execution: {
+  capability: string;
+  subagentId: string | null;
+  mcpBindingId: string | null;
+  requestedCommand: string | null;
+  requestedPath: string | null;
+  requestPayload: unknown;
+  workingDirectory: string | null;
+}) {
   const capability = mapCapabilityFromDb(execution.capability);
   const subagentId = resolveStoredExecutionSubagentId(execution.subagentId, capability);
   const persistedPayload =
@@ -2402,6 +2561,10 @@ function reconstructExecutionInput(execution: {
   const compiledTask = compiledTaskResult.success
     ? compiledTaskResult.data
     : undefined;
+  if (persistedPayload?.isolatedPython) {
+    if (capability !== "exec") throw new SessionError(409, "isolated_python_route_invalid");
+    return normalizeExecutionInput(toolExecutionRequestSchema.parse({ ...persistedPayload, capability, subagentId }));
+  }
 
   if (capability === "read") {
     if (!execution.requestedPath) {
@@ -2526,6 +2689,7 @@ function reconstructExecutionInput(execution: {
 
 function toToolExecutionRequest(input: NormalizedExecutionInput): ToolExecutionRequest {
   return {
+    ...(input.rejectApprovalWait ? { rejectApprovalWait: true } : {}),
     capability: input.capability,
     subagentId: input.subagentId,
     ...(input.command ? { command: input.command } : {}),
@@ -2539,6 +2703,9 @@ function toToolExecutionRequest(input: NormalizedExecutionInput): ToolExecutionR
     ...(input.toolArguments ? { toolArguments: input.toolArguments } : {}),
     ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
     ...(input.compiledTask ? { compiledTask: input.compiledTask } : {}),
+    ...(input.isolatedPython ? { isolatedPython: input.isolatedPython } : {}),
+    ...(input.generationWorkLease ? { generationWorkLease: input.generationWorkLease } : {}),
+    ...(input.logicalAction ? { logicalAction: input.logicalAction } : {}),
     ...(typeof input.estimatedTokens === "number"
       ? { estimatedTokens: input.estimatedTokens }
       : {}),
@@ -2608,6 +2775,7 @@ function buildExecutionPlan(
         command: buildPlaywrightBrowseCommand({
           url: input.url!,
           playwrightVersion: computeBrokerConfig.browserPlaywrightVersion,
+          anonymous: context.session.requestedBy === "AUDIENCE",
         }),
         networkMode: context.profile.networkMode,
         filesystemMode: resolveExecutionFilesystemMode(context),
@@ -2672,6 +2840,17 @@ function normalizePersistedRequestPayload(value: unknown) {
 }
 
 function hashRequestPayload(value: string) {
+  const payload = safeParseExecutionPayload(value);
+  if (payload?.logicalAction) {
+    delete payload.generationWorkLease;
+    return logicalPayloadHash(payload);
+  }
+  if (payload?.isolatedPython) {
+    // Worker lease is execution ownership, not the approved business action.
+    // Reclaiming delivery work must neither invalidate nor recreate that action.
+    delete payload.generationWorkLease;
+    value = JSON.stringify(payload);
+  }
   return createHash("sha256").update(value).digest("hex");
 }
 
@@ -2715,6 +2894,7 @@ function buildRiskSummary(reason: string): string {
 }
 
 function summarizeAction(input: NormalizedExecutionInput) {
+  if (input.isolatedPython) return `Run offline Python with ${input.isolatedPython.inputs.length} fixed input files${input.isolatedPython.outputFileName ? ` and deliver ${input.isolatedPython.outputFileName}` : ""}.`;
   switch (input.capability) {
     case "read":
       return `Read "${truncate(input.path ?? "", 120)}".`;
@@ -2730,8 +2910,8 @@ function summarizeAction(input: NormalizedExecutionInput) {
       return `Run process "${truncate(input.command ?? "", 120)}"${input.workingDirectory ? ` in ${input.workingDirectory}` : ""}.`;
     case "exec":
     default:
-      if (input.serverVerifiedCompiledTask) {
-        return "Run a server-compiled self-contained sandbox computation.";
+      if (input.inlineCodeIntegrityVerified) {
+        return "Run agent-submitted code with verified integrity; integrity does not classify its effects.";
       }
       return `Run "${truncate(input.command ?? "", 120)}"${input.workingDirectory ? ` in ${input.workingDirectory}` : ""}.`;
   }
@@ -2777,8 +2957,4 @@ function shellQuote(value: string) {
 
 function truncate(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
-}
-
-function isSimpleExecCommand(value: string) {
-  return !/[;&|><`$()\\\n\r]/.test(value);
 }

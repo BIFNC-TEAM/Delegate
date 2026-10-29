@@ -1,4 +1,5 @@
 import { createLifecycleHookBus, type LifecycleEvent } from "@delegate/lifecycle-hooks";
+import { auditErrorCode, auditReference } from "@delegate/runtime";
 
 import { prisma } from "./prisma";
 
@@ -19,14 +20,19 @@ export const computeLifecycleHooks = createLifecycleHookBus(
                   sessionId: event.sessionId,
                   subagentId: event.subagentId ?? null,
                   capability: event.capability,
-                  requestedCommand: event.requestedCommand ?? null,
-                  requestedPath: event.requestedPath ?? null,
-                  workingDirectory: event.workingDirectory ?? null,
+                  commandPresent: Boolean(event.requestedCommand),
+                  requestedPathRef: event.requestedPath ? auditReference(event.requestedPath) : null,
+                  workingDirectoryRef: event.workingDirectory ? auditReference(event.workingDirectory) : null,
                   decision: event.decision,
-                  reason: event.reason,
+                  reasonRef: auditReference(event.reason),
+                  ...(event.codeClassification ? {
+                    codeClassification: event.codeClassification,
+                    inlineCodeIntegrityVerified: event.inlineCodeIntegrityVerified === true,
+                    codeExecutionProfileId: event.codeExecutionProfileId ?? null,
+                  } : {}),
                   transport: event.transport ?? null,
                   bindingId: event.bindingId ?? null,
-                  remoteUrl: event.remoteUrl ?? null,
+                  remoteUrlRef: event.remoteUrl ? auditReference(event.remoteUrl) : null,
                 },
               },
             });
@@ -48,7 +54,7 @@ export const computeLifecycleHooks = createLifecycleHookBus(
                   artifactCount: event.artifactCount,
                   transport: event.transport ?? null,
                   bindingId: event.bindingId ?? null,
-                  remoteUrl: event.remoteUrl ?? null,
+                  remoteUrlRef: event.remoteUrl ? auditReference(event.remoteUrl) : null,
                 },
               },
             });
@@ -62,7 +68,7 @@ export const computeLifecycleHooks = createLifecycleHookBus(
                 type: "COMPUTE_SESSION_TERMINATED",
                 payload: {
                   sessionId: event.sessionId,
-                  reason: event.reason,
+                  reasonRef: auditReference(event.reason),
                   finalStatus: event.finalStatus,
                 },
               },
@@ -78,7 +84,7 @@ export const computeLifecycleHooks = createLifecycleHookBus(
     onError(error, event, handler) {
       console.warn(
         `Compute lifecycle hook "${handler.name ?? "anonymous"}" failed for ${event.kind}:`,
-        error,
+        auditErrorCode(error),
       );
     },
   },

@@ -4,6 +4,8 @@ import type { ObsidianReadResult } from "./knowledge-obsidian-types";
 import { useEffect, useRef, useState } from "react";
 import { KnowledgeObsidianSync } from "./knowledge-obsidian-sync";
 import { KnowledgeObsidianPublish } from "./knowledge-obsidian-publish";
+import { KnowledgeNotionImport } from "./knowledge-notion-import";
+import type { NotionDocument } from "@delegate/web-data/notion-types";
 import { KnowledgeObsidianSelection } from "./knowledge-obsidian-selection";
 import {
   KNOWLEDGE_TITLE_MAX_LENGTH, renameKnowledgeMarkdownFile,
@@ -14,12 +16,13 @@ import {
 
 export type ObsidianUpload = { file: File; metadata: ObsidianImportMetadata; previewText: string };
 type NoteFile = ObsidianReadResult["files"][number];
-export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, onBusyChange, initialSource = "local", onSourceChange }: {
+export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, onNotionPrepared, onBusyChange, initialSource = "local", onSourceChange }: {
   activeSlug: string; zh: boolean; disabled: boolean;
   onPrepared: (items: ObsidianUpload[], removeSelection?: (path: string) => void) => void; onBusyChange: (busy: boolean) => void;
-  initialSource?: "local" | "sync" | "publish"; onSourceChange?: (source: "local" | "sync" | "publish") => void;
+  initialSource?: "local" | "sync" | "publish" | "notion"; onSourceChange?: (source: "local" | "sync" | "publish" | "notion") => void;
+  onNotionPrepared: (documents: NotionDocument[]) => void;
 }) {
-  const [source, setSource] = useState<"local" | "sync" | "publish">(initialSource);
+  const [source, setSource] = useState<"local" | "sync" | "publish" | "notion">(initialSource);
   const [syncBusy, setSyncBusy] = useState(false);
   const remotePaths = useRef<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -134,10 +137,11 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
     }
   }
 
-  return <section className="knowledge-obsidian-import" aria-busy={busy || syncBusy} aria-label={source === "local" ? (zh ? "Obsidian 本地导入" : "Obsidian local import") : source === "sync" ? "Obsidian Sync import" : "Obsidian Publish import"}>
+  return <section className="knowledge-obsidian-import" aria-busy={busy || syncBusy} aria-label={source === "local" ? (zh ? "Obsidian 本地导入" : "Obsidian local import") : source === "sync" ? "Obsidian Sync import" : source === "notion" ? "Notion import" : "Obsidian Publish import"}>
     <nav className="knowledge-sync-tabs" aria-label={zh ? "导入来源" : "Import source"}>
-      {(["local", "sync", "publish"] as const).map(value => <button key={value} type="button" disabled={locked} aria-pressed={source === value} onClick={() => { setSource(value); onSourceChange?.(value); }}>{value === "local" ? (zh ? "本地笔记" : "Local notes") : value === "sync" ? "Obsidian Sync" : "Obsidian Publish"}</button>)}
+      {(["local", "sync", "publish", "notion"] as const).map(value => <button key={value} type="button" disabled={locked} aria-pressed={source === value} onClick={() => { setSource(value); onSourceChange?.(value); }}>{value === "local" ? (zh ? "本地笔记" : "Local notes") : value === "sync" ? "Obsidian Sync" : value === "notion" ? "Notion" : "Obsidian Publish"}</button>)}
     </nav>
+    {source === "notion" ? <KnowledgeNotionImport activeSlug={activeSlug} zh={zh} disabled={disabled || busy} onPrepared={onNotionPrepared} onBusyChange={setSyncBusy} /> : null}
     {source === "sync" ? <KnowledgeObsidianSync activeSlug={activeSlug} zh={zh} disabled={disabled || busy} onRead={acceptSync} onBusyChange={setSyncBusy} /> : null}
     {source === "publish" ? <KnowledgeObsidianPublish activeSlug={activeSlug} zh={zh} disabled={disabled || busy} onRead={acceptSync} onBusyChange={setSyncBusy} /> : null}
     <div hidden={source !== "local"}>
@@ -153,7 +157,7 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
       {ignoredCount ? <p>{zh ? `已排除 ${ignoredCount} 个附件、配置或其他非笔记文件。` : `${ignoredCount} attachments, settings, or other non-note files excluded.`}</p> : null}
     </KnowledgeObsidianSelection> : null}
     {errors.length ? <div className="knowledge-form-error" role="alert">{errors.map(displayMessage).join("\n")}<button type="button" disabled={locked || !selected.size} onClick={() => void prepare(files, selected)}>{zh ? "重新准备" : "Retry preparation"}</button></div> : null}
-    {renames.length || requestedPaths.length ? <div className="knowledge-obsidian-preview">
+    {source !== "notion" && (renames.length || requestedPaths.length) ? <div className="knowledge-obsidian-preview">
       {renames.length ? <div className="knowledge-obsidian-notice" role="status"><p>{zh ? "下列上传文件与已有文件或本批其他文件重名，已自动更改名称，也可自行修改名称：" : "These filenames have been renamed to avoid duplicates. You can also edit them:"}</p><ul>{renames.map((note) => <li key={note.path} className="knowledge-rename-item"><span>{note.path.split("/").pop()} →</span><label className="knowledge-rename-input"><input key={note.fileName} aria-label={zh ? `修改 ${note.path.split("/").pop()} 的名称` : `Rename ${note.path.split("/").pop()}`} disabled={locked} maxLength={KNOWLEDGE_TITLE_MAX_LENGTH} defaultValue={note.fileName.replace(/\.[^.]+$/, "")} onBlur={(event) => saveName(note, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /><span>{note.fileName.match(/\.[^.]+$/)?.[0]}</span></label>{nameErrors[note.path] ? <small role="alert">{nameErrors[note.path]}</small> : null}</li>)}</ul></div> : null}
       {requestedPaths.length ? <div className="knowledge-obsidian-notice"><p>{zh ? "以下引用笔记尚未获准导入。可以逐项允许，待上传内容会自动更新；未允许的内容不会上传。" : "These referenced notes are not selected. Allow individual notes to update the upload automatically; unselected content is never uploaded."}</p><ul>{requestedPaths.map((path) => <li key={path}><span>{path.split("/").pop()}</span>{files.some(file => file.path === path) ? <button type="button" disabled={locked} onClick={() => selectPaths([path], true)}>{zh ? "允许并勾选" : "Allow and select"}</button> : <small>{zh ? "请在来源笔记列表中勾选并上传" : "Select and upload this note in the source list"}</small>}</li>)}</ul></div> : null}
 

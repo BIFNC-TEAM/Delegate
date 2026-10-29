@@ -1054,6 +1054,8 @@
 .knowledge-conflict-policy small { color: var(--v2-muted); font-size: .56rem; line-height: 1.45; }
 .knowledge-conflict-policy select { flex: 0 0 auto; min-width: 175px; min-height: 36px; padding: 7px 30px 7px 10px; border: 1px solid var(--v2-line); border-radius: 8px; outline: 0; color: var(--v2-copy); background: #fff; font-size: .62rem; font-weight: 700; }
 .knowledge-conflict-policy select:focus { border-color: var(--v2-teal); box-shadow: 0 0 0 3px rgba(22,163,148,.1); }
+.knowledge-conflict-policy.knowledge-notion-include-children { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; }
+.knowledge-notion-include-children > input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
 .knowledge-upload-queue { display: grid; gap: 9px; overflow: hidden; border: 1px solid var(--v2-line); border-radius: 10px; background: #fff; }
 .knowledge-upload-queue > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 13px 2px; }
 .knowledge-upload-queue > header > div { display: flex; align-items: baseline; gap: 8px; }

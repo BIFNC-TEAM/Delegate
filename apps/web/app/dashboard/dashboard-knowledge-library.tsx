@@ -11,6 +11,8 @@ import type { Locale } from "@delegate/web-ui";
 import { knowledgeBrowserCaptureSchema, type KnowledgeBrowserCapture } from "@delegate/web-data/knowledge-web-capture";
 import dynamic from "next/dynamic";
 import type { ObsidianImportMetadata } from "@delegate/web-data/knowledge-obsidian";
+import { KNOWLEDGE_TITLE_MAX_LENGTH, renameKnowledgeMarkdownFile } from "@delegate/web-data/knowledge-obsidian";
+import type { NotionDocument, NotionImportMetadata } from "@delegate/web-data/notion-types";
 import type { ObsidianUpload } from "./knowledge-obsidian-import";
 import { KnowledgeBrowserCaptureForm } from "./knowledge-browser-capture";
 
@@ -29,6 +31,7 @@ type UploadQueueItem = {
   id: string;
   file: File;
   obsidianImport?: ObsidianImportMetadata;
+  notionImport?: NotionImportMetadata;
   previewText?: string;
   displayName?: string;
   status: UploadQueueStatus;
@@ -72,6 +75,10 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
   const [visibility, setVisibility] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("notionImport") === "1") setImportOpen(true);
+  }, []);
   const [captureAsset, setCaptureAsset] = useState<KnowledgeAssetRecord | null>(null);
   const loadAbortRef = useRef<AbortController | null>(null);
 
@@ -245,7 +252,8 @@ function FilterSelect({ label, value, onChange, options }: { label: string; valu
 
 function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, onCreated, repairAsset }: { repairAsset?: KnowledgeAssetRecord | undefined; activeSlug: string; locale: Locale; representatives: KnowledgeRepresentativeOption[]; onClose: () => void; onCreated: (asset: KnowledgeAssetRecord) => void }) {
   const zh = locale === "zh";
-  const [mode, setMode] = useState<ImportMode>(repairAsset ? "url" : "file");
+  const returningFromNotion = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("notionImport") === "1";
+  const [mode, setMode] = useState<ImportMode>(repairAsset ? "url" : returningFromNotion ? "obsidian" : "file");
   const [title, setTitle] = useState(repairAsset?.title ?? "");
   const [sourceUrl, setSourceUrl] = useState(repairAsset?.sourceUrl ?? "");
   const [urlMethod, setUrlMethod] = useState<"browser" | "direct">("browser");
@@ -257,7 +265,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
   const [obsidianBatch, setObsidianBatch] = useState(0);
-  const [obsidianSource, setObsidianSource] = useState<"local" | "sync" | "publish">("local");
+  const [obsidianSource, setObsidianSource] = useState<"local" | "sync" | "publish" | "notion">(returningFromNotion ? "notion" : "local");
   const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [obsidianQueue, setObsidianQueue] = useState<UploadQueueItem[]>([]);
   const queue = mode === "obsidian" ? obsidianQueue : fileQueue;
@@ -288,10 +296,26 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     setQueue((current) => current.map((item) => item.id === itemId ? { ...item, ...patch } : item));
   }
 
+  function preparedNotion(documents: NotionDocument[]) {
+    setObsidianQueue(current => {
+      const next = [...current];
+      for (const document of documents) {
+        const id = `notion:${document.metadata.workspaceId}:${document.id}`;
+        const index = next.findIndex(item => item.id === id);
+        if (index >= 0 && ["uploading", "processing"].includes(next[index]!.status)) continue;
+        if (index >= 0) next.splice(index, 1);
+        const stem = document.title.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim().replace(/[. ]+$/, "").slice(0, KNOWLEDGE_TITLE_MAX_LENGTH) || "Notion";
+        const name = renameKnowledgeMarkdownFile("Notion.md", stem);
+        next.push({ id, file: new File([document.text], name, { type: "text/markdown" }), notionImport: document.metadata, previewText: document.text, status: "queued", progress: 0 });
+      }
+      return next;
+    });
+  }
+
   function preparedObsidian(items: ObsidianUpload[], removeSelection?: (path: string) => void) {
     removeObsidianSelection.current = removeSelection;
     setPreviewingId((current) => items.some(({ metadata }) => metadata.sourcePath === current) ? current : null);
-    setObsidianQueue((current) => [...current.filter((item) => item.status !== "queued"), ...items.map(({ file, metadata, previewText }): UploadQueueItem => ({ id: metadata.sourcePath, file, obsidianImport: metadata, previewText, status: "queued", progress: 0 }))]);
+    setObsidianQueue((current) => [...current.filter((item) => item.status !== "queued" || item.notionImport), ...items.map(({ file, metadata, previewText }): UploadQueueItem => ({ id: metadata.sourcePath, file, obsidianImport: metadata, previewText, status: "queued", progress: 0 }))]);
   }
 
   function removeQueueItem(item: UploadQueueItem) {
@@ -364,8 +388,9 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     const representativeLinks = linkedIds.map((representativeId) => ({ representativeId, usageMode: visibility === "public_material" ? "both" : "qa_source", reviewStatus: "approved", enabled: true, priority: 50 }));
     const form = new FormData();
     form.set("file", item.file);
-    form.set("title", !item.obsidianImport && queue.length === 1 ? title.trim() : "");
+    form.set("title", !item.obsidianImport && !item.notionImport && queue.length === 1 ? title.trim() : "");
     if (item.obsidianImport) form.set("obsidianImport", JSON.stringify(item.obsidianImport));
+    if (item.notionImport) form.set("notionImport", JSON.stringify(item.notionImport));
     form.set("visibility", visibility);
     form.set("tags", JSON.stringify(parseTags(tags)));
     form.set("representativeLinks", JSON.stringify(representativeLinks));
@@ -389,7 +414,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
           : (zh ? "上传完成，正在处理知识" : "Upload complete; processing knowledge"),
       });
       // Vaults can contain many notes: keep their parsing/indexing bounded too.
-      if (item.obsidianImport) await watchProcessing(item.id, payload.asset.id);
+      if (item.obsidianImport || item.notionImport) await watchProcessing(item.id, payload.asset.id);
       else void watchProcessing(item.id, payload.asset.id);
     } catch (uploadError) {
       updateQueueItem(item.id, { status: "failed", progress: 100, message: messageOf(uploadError, zh ? "上传失败" : "Upload failed") });
@@ -422,7 +447,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       });
       const { asset } = await readResponse<{ asset: KnowledgeAssetRecord }>(response);
       onCreated(asset);
-      if (item.obsidianImport) await watchProcessing(item.id, item.assetId);
+      if (item.obsidianImport || item.notionImport) await watchProcessing(item.id, item.assetId);
       else void watchProcessing(item.id, item.assetId);
     } catch (retryError) {
       updateQueueItem(item.id, { status: "failed", progress: 100, message: messageOf(retryError, zh ? "重新处理失败" : "Reprocessing failed") });
@@ -494,7 +519,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       <header><div><span>Knowledge Intake</span><h2>{zh ? "导入新的知识" : "Import new knowledge"}</h2><p>{zh ? "支持批量上传、进度跟踪和失败重试；导入后会自动提取正文、生成摘要与标签。" : "Batch upload with progress and retry; Delegate then extracts, summarizes, tags, and indexes every source."}</p></div><button aria-label={zh ? "关闭" : "Close"} disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">×</button></header>
       <nav className="knowledge-import-tabs">{((repairAsset ? ["url"] : ["file", "url", "text", "obsidian"]) as ImportMode[]).map((item) => <button className={mode === item ? "is-active" : undefined} disabled={submitting || isUploading || preparing} key={item} onClick={() => setMode(item)} type="button"><span>{item === "file" ? "▤" : item === "url" ? "↗" : item === "obsidian" ? "⇥" : "Aa"}</span>{item === "file" ? (zh ? "上传文件" : "Upload files") : item === "url" ? (zh ? "导入网址" : "Import URL") : item === "obsidian" ? (zh ? "第三方导入" : "Third-party import") : (zh ? "手工文本" : "Manual text")}</button>)}</nav>
       <form onSubmit={submit}>
-        {!repairAsset ? <div hidden={mode !== "obsidian"}><KnowledgeObsidianImport key={obsidianBatch} initialSource={obsidianSource} onSourceChange={setObsidianSource} activeSlug={activeSlug} zh={zh} disabled={submitting || obsidianQueue.some((item) => item.status === "uploading" || item.status === "processing")} onPrepared={preparedObsidian} onBusyChange={setPreparing} /></div> : null}
+        {!repairAsset ? <div hidden={mode !== "obsidian"}><KnowledgeObsidianImport key={obsidianBatch} initialSource={obsidianSource} onSourceChange={setObsidianSource} activeSlug={activeSlug} zh={zh} disabled={submitting || obsidianQueue.some((item) => item.status === "uploading" || item.status === "processing")} onPrepared={preparedObsidian} onNotionPrepared={preparedNotion} onBusyChange={setPreparing} /></div> : null}
         {fileMode ? <>
           {mode === "file" ? <>
           <div className={`knowledge-dropzone${queue.length ? " has-file" : ""}`} onClick={() => { if (!submitting) fileRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!submitting) addFiles(Array.from(event.dataTransfer.files)); }}>
@@ -505,6 +530,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
           </div>
           <label className="knowledge-conflict-policy"><div><span>{zh ? "重复文件处理" : "Duplicate handling"}</span><small>{conflictPolicyDescription(conflictPolicy, zh)}</small></div><select disabled={submitting || isUploading || preparing} onChange={(event) => setConflictPolicy(event.target.value as UploadConflictPolicy)} value={conflictPolicy}><option value="skip_duplicates">{zh ? "跳过完全重复内容" : "Skip identical content"}</option><option value="keep_both">{zh ? "始终保留为新副本" : "Always keep a new copy"}</option><option value="replace_existing">{zh ? "覆盖已有文件" : "Replace existing file"}</option></select></label>
           </> : null}
+          {mode === "obsidian" && (obsidianSource === "notion" || queue.some(item => item.notionImport)) ? <label className="knowledge-conflict-policy"><div><span>{zh ? "重复文件处理" : "Duplicate handling"}</span><small>{conflictPolicyDescription(conflictPolicy, zh)}</small></div><select disabled={submitting || isUploading || preparing} value={conflictPolicy} onChange={event => setConflictPolicy(event.target.value as UploadConflictPolicy)}><option value="skip_duplicates">{zh ? "跳过完全重复内容" : "Skip identical content"}</option><option value="keep_both">{zh ? "始终保留为新副本" : "Always keep a new copy"}</option><option value="replace_existing">{zh ? "覆盖已有文件" : "Replace existing file"}</option></select></label> : null}
           {queue.length ? <section className="knowledge-upload-queue" aria-label={zh ? "上传队列" : "Upload queue"}>
             <header><div><span>{zh ? "上传队列" : "Upload queue"}</span><small>{completedCount}/{queue.length} {zh ? "已完成" : "complete"}{failedCount ? ` · ${failedCount} ${zh ? "失败" : "failed"}` : ""}</small></div><strong>{queueProgress}%</strong></header>
             <div className="knowledge-upload-overall"><i style={{ width: `${queueProgress}%` }} /></div>
@@ -536,6 +562,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       <section className="knowledge-import-dialog knowledge-preview-dialog" role="dialog" aria-modal="true" aria-label={zh ? "笔记预览" : "Note preview"}>
         <header><div><span>{zh ? "笔记预览" : "Note preview"}</span><h2>{previewItem.displayName ?? previewItem.file.name}</h2></div><button type="button" aria-label={zh ? "关闭预览" : "Close preview"} onClick={() => setPreviewingId(null)}>×</button></header>
         <div className="knowledge-preview-content knowledge-obsidian-preview">
+                {previewItem.notionImport?.warnings.length ? <ul className="knowledge-obsidian-warnings">{previewItem.notionImport.warnings.map(w => <li key={w}>{w}</li>)}</ul> : null}
                 {previewItem.obsidianImport?.warnings.length ? <ul className="knowledge-obsidian-warnings">{previewItem.obsidianImport.warnings.map((warning) => <li key={warning}>{warning.replace(/selected\/[^/]+\//g, "").replace("引用重名，请明确路径", "引用重名，请区分笔记名称后重新选择")}</li>)}</ul> : null}
                 <pre>{previewItem.previewText}</pre>
                 {previewItem.obsidianImport && Object.keys(previewItem.obsidianImport.properties).length ? <details><summary>{zh ? "笔记属性" : "Note properties"}</summary><pre>{JSON.stringify(previewItem.obsidianImport.properties, null, 2)}</pre></details> : null}
@@ -583,7 +610,7 @@ function KnowledgeDetailDrawer({ activeSlug, asset, locale, representatives, onC
 function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: Locale }) {
   const zh = locale === "zh";
   const facts = [
-    [zh ? "来源类型" : "Source type", asset.obsidianImport?.publishSource ? "Obsidian Publish" : asset.obsidianImport ? "Obsidian" : kindLabel(asset.kind)],
+    [zh ? "来源类型" : "Source type", asset.notionImport ? "Notion" : asset.obsidianImport?.publishSource ? "Obsidian Publish" : asset.obsidianImport ? "Obsidian" : kindLabel(asset.kind)],
     [zh ? "文件大小" : "File size", asset.sizeBytes ? formatBytes(asset.sizeBytes) : "—"],
     [zh ? "处理版本" : "Processing version", `v${asset.processingVersion}`],
     [zh ? "最近处理" : "Last processed", asset.processedAt ? formatDate(asset.processedAt, locale) : "—"],
@@ -592,6 +619,7 @@ function DetailFacts({ asset, locale }: { asset: KnowledgeAssetRecord; locale: L
   ];
   return <>
     <section className="knowledge-detail-facts">{facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>
+    {asset.notionImport ? <section className="knowledge-obsidian-preview"><details open><summary>{zh ? "Notion 来源信息" : "Notion source"}</summary><p>{asset.notionImport.workspaceName} · {formatDateTime(asset.notionImport.importedAt, locale)}</p><a href={asset.notionImport.sourceUrl} target="_blank" rel="noreferrer">{zh ? "打开原文" : "Open original"} ↗</a>{asset.notionImport.warnings.length ? <ul className="knowledge-obsidian-warnings">{asset.notionImport.warnings.map(w => <li key={w}>{w}</li>)}</ul> : null}</details></section> : null}
     {asset.obsidianImport ? <section className="knowledge-obsidian-preview">
       <details><summary>{zh ? "Obsidian 来源与属性" : "Obsidian source and properties"}</summary>
         {asset.obsidianImport.publishSource ? <><p>{asset.obsidianImport.publishSource.siteName} · {formatDateTime(asset.obsidianImport.publishSource.importedAt, locale)}</p><a href={asset.obsidianImport.publishSource.sourceUrl} target="_blank" rel="noreferrer">{zh ? "打开原文" : "Open original"} ↗</a></> : null}

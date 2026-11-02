@@ -6,6 +6,8 @@ import test from "node:test";
 const stackPath = fileURLToPath(new URL("../stack.yml", import.meta.url));
 const stack = readFileSync(stackPath, "utf8");
 const logtoBlock = stack.match(/\n  logto:\n[\s\S]*?\n  temporal:\n/u)?.[0] ?? "";
+const dashboardBlock = stack.match(/\n  dashboard:\n[\s\S]*?\n  reps:\n/u)?.[0] ?? "";
+const workflowBlock = stack.match(/\n  workflow-runner:\n[\s\S]*?\n  conversation-worker:\n/u)?.[0] ?? "";
 
 test("Logto Admin ingress does not intercept application Authorization headers", () => {
   assert.doesNotMatch(
@@ -98,4 +100,9 @@ test("staging reconciles the unified Logto experience after connector setup", ()
   assert.ok(
     deploy.includes('echo "Reconciling the unified Logto sign-in and registration experience."'),
   );
+});
+
+test("Dashboard and workflow-runner receive their scoped Owner profile environments", () => {
+  assert.match(dashboardBlock, /\/dashboard\.env/u);
+  assert.match(workflowBlock, /\/workflow\.env/u);
 });

@@ -166,6 +166,28 @@ test("staging generates the Dashboard MinerU runtime contract", () => {
   );
 });
 
+test("staging wires the Owner profile internal service with one persistent token", () => {
+  const token = "owner-profile-internal-test-token-0123456789abcdef";
+  const generated = prepareStagingEnv({ OWNER_PROFILE_INTERNAL_TOKEN: token });
+
+  assert.equal(generated.state.OWNER_PROFILE_INTERNAL_TOKEN, token);
+  assert.equal(
+    generated.dashboard.OWNER_PROFILE_INTERNAL_ENDPOINT,
+    "http://workflow-runner:4020",
+  );
+  assert.equal(generated.dashboard.OWNER_PROFILE_INTERNAL_TOKEN, token);
+  assert.equal(generated.workflow.OWNER_PROFILE_INTERNAL_TOKEN, token);
+  assert.equal(generated.workflow.OWNER_PROFILE_INTERNAL_ENDPOINT, undefined);
+  assert.equal(generated.app.OWNER_PROFILE_INTERNAL_TOKEN, undefined);
+});
+
+test("staging rejects an undersized Owner profile internal token", () => {
+  assert.throws(
+    () => prepareStagingEnv({ OWNER_PROFILE_INTERNAL_TOKEN: "too-short" }),
+    /OWNER_PROFILE_INTERNAL_TOKEN must contain at least 32 characters/u,
+  );
+});
+
 test("staging does not emit retired Agent planner configuration", () => {
   for (const key of [
     "DELEGATE_MODEL_PLANNER_PROVIDER",
@@ -282,6 +304,10 @@ test("legacy planner removal drains only inert drafts before enforcing guards", 
 });
 
 function prepareDashboardEnv(extra = {}) {
+  return prepareStagingEnv(extra).dashboard;
+}
+
+function prepareStagingEnv(extra = {}) {
   const root = mkdtempSync(join(tmpdir(), "delegate-staging-env-"));
   const sourcePath = join(root, "source.env");
   const outputPath = join(root, "output");
@@ -300,7 +326,12 @@ function prepareDashboardEnv(extra = {}) {
       "--output",
       outputPath,
     ]);
-    return parseEnv(readFileSync(join(outputPath, "dashboard.env"), "utf8"));
+    return Object.fromEntries(
+      ["app", "dashboard", "workflow", "state"].map((name) => [
+        name,
+        parseEnv(readFileSync(join(outputPath, `${name}.env`), "utf8")),
+      ]),
+    );
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

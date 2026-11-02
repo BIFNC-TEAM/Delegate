@@ -72,6 +72,10 @@ const state = {
   PUBLIC_CHAT_RATE_LIMIT_SECRET: secret("PUBLIC_CHAT_RATE_LIMIT_SECRET", () => hex(48)),
   PUBLIC_MATERIAL_LINK_SECRET: secret("PUBLIC_MATERIAL_LINK_SECRET", () => hex(48)),
   COMPUTE_BROKER_INTERNAL_TOKEN: secret("COMPUTE_BROKER_INTERNAL_TOKEN", () => hex(48)),
+  OWNER_PROFILE_INTERNAL_TOKEN: secret(
+    "OWNER_PROFILE_INTERNAL_TOKEN",
+    () => sourceValue("OWNER_PROFILE_INTERNAL_TOKEN") || hex(48),
+  ),
   ARTIFACT_STORE_ACCESS_KEY: secret("ARTIFACT_STORE_ACCESS_KEY", () => `delegate${hex(6)}`),
   ARTIFACT_STORE_SECRET_KEY: secret("ARTIFACT_STORE_SECRET_KEY", () => base64(36)),
   KNOWLEDGE_OBJECT_STORE_ACCESS_KEY: secret("KNOWLEDGE_OBJECT_STORE_ACCESS_KEY", () => `knowledge${hex(6)}`),
@@ -84,6 +88,10 @@ const state = {
   LOGIN_ADMIN_PASSWORD: secret("LOGIN_ADMIN_PASSWORD", () => base64(24).replaceAll("/", "A")),
   OPENVIKING_ADMIN_PASSWORD: secret("OPENVIKING_ADMIN_PASSWORD", () => base64(24).replaceAll("/", "V")),
 };
+
+if (state.OWNER_PROFILE_INTERNAL_TOKEN.length < 32) {
+  throw new Error("OWNER_PROFILE_INTERNAL_TOKEN must contain at least 32 characters.");
+}
 
 writeEnv(statePath, state);
 
@@ -283,6 +291,8 @@ const minerUEnv = minerUApiBaseUrl
 writeEnv(`${values.output}/dashboard.env`, {
   ...paymentEnv,
   ...minerUEnv,
+  OWNER_PROFILE_INTERNAL_ENDPOINT: "http://workflow-runner:4020",
+  OWNER_PROFILE_INTERNAL_TOKEN: state.OWNER_PROFILE_INTERNAL_TOKEN,
   CHANNEL_CREDENTIAL_MASTER_KEY: state.CHANNEL_CREDENTIAL_MASTER_KEY,
   CHANNEL_CREDENTIAL_MASTER_KEY_VERSION: "staging-v1",
   PAYOUT_CREDENTIAL_MASTER_KEY: state.PAYOUT_CREDENTIAL_MASTER_KEY,
@@ -293,6 +303,7 @@ writeEnv(`${values.output}/reps.env`, paymentEnv);
 
 writeEnv(`${values.output}/workflow.env`, {
   ...paymentEnv,
+  OWNER_PROFILE_INTERNAL_TOKEN: state.OWNER_PROFILE_INTERNAL_TOKEN,
   WECHAT_PAY_RECONCILIATION_POLL_MS: "5000",
   WECHAT_PAY_RECONCILIATION_BATCH_SIZE: "10",
   WECHAT_PAY_RECONCILIATION_LEASE_MS: "75000",

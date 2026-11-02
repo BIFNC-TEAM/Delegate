@@ -7,7 +7,7 @@ import {
   RechargeOrderStatus,
   RepresentativeHandoffAccessMode,
 } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   acceptConversationHandoffInTransaction,
@@ -17,6 +17,14 @@ import {
   grantPurchasedHandoffEntitlement,
   resolveHandoffRequestInTransaction,
 } from "../src/handoff-entitlements";
+
+// Keep both fixed-date priority fixtures active regardless of the CI run date.
+const entitlementTestNow = new Date("2026-09-01T00:00:00.000Z");
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(entitlementTestNow);
+});
+afterEach(() => vi.useRealTimers());
 
 describe("purchased handoff entitlements", () => {
   it("grants limited access from the paid snapshot exactly once", async () => {
@@ -206,6 +214,30 @@ describe("handoff request entitlement state machine", () => {
         consumedAfter: 0,
       }),
     ]);
+  });
+
+  it.each([-1, 0, 1])("respects the expiry boundary at now + %i ms", async (offsetMs) => {
+    const client = new FakeRuntimeHandoffClient({
+      handoffAccessMode: RepresentativeHandoffAccessMode.PACKAGE_REQUIRED,
+      grants: [runtimeGrant({
+        id: "grant_boundary",
+        expiresAt: new Date(entitlementTestNow.getTime() + offsetMs),
+      })],
+    });
+
+    const result = await client.transaction((tx) =>
+      createOrReuseHandoffRequestInTransaction(requestDraft(), tx)
+    );
+
+    if (offsetMs > 0) {
+      expect(result).toMatchObject({ outcome: "created", access: "package" });
+      expect(client.grant("grant_boundary")).toMatchObject({ remainingUses: 1, reservedUses: 1 });
+      expect(client.ledger).toHaveLength(1);
+    } else {
+      expect(result).toEqual({ outcome: "entitlement_required", request: null });
+      expect(client.grant("grant_boundary")).toMatchObject({ remainingUses: 2, reservedUses: 0 });
+      expect(client.ledger).toHaveLength(0);
+    }
   });
 
   it("reserves unlimited access without fabricating a remaining counter", async () => {

@@ -16,9 +16,16 @@ export default async function createMainlandTencentSmsConnector({ getConfig }) {
       logo: "../@logto-connector-tencent-sms/logo.svg",
       readme: "./README.md",
     },
-    sendMessage: withMainlandRecipients(upstream.sendMessage, () => new ConnectorError(
-      ConnectorErrorCodes.General,
-      "Only mainland China +86 mobile numbers are supported.",
-    )),
+    sendMessage: withMainlandRecipients(
+      upstream.sendMessage,
+      () => new ConnectorError(
+        ConnectorErrorCodes.General,
+        "Only mainland China +86 mobile numbers are supported.",
+      ),
+      () => new ConnectorError(
+        ConnectorErrorCodes.General,
+        "A verification code is required.",
+      ),
+    ),
   };
 }

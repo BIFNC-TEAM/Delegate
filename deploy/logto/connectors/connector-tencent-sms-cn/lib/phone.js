@@ -9,7 +9,11 @@ export function mainlandMobileNumber(value) {
   return value.startsWith("+") ? value : `+${value}`;
 }
 
-export function withMainlandRecipients(sendMessage, invalidRecipient) {
+export function withMainlandRecipients(
+  sendMessage,
+  invalidRecipient,
+  invalidPayload = () => new Error("A verification code is required."),
+) {
   return async (data, config) => {
     let to;
     try {
@@ -17,7 +21,14 @@ export function withMainlandRecipients(sendMessage, invalidRecipient) {
     } catch {
       throw invalidRecipient();
     }
+    const code = data?.payload?.code;
+    if (typeof code !== "string" || !code) {
+      throw invalidPayload();
+    }
     // Keep OTP creation, expiry, retries and single-use enforcement in Logto.
-    return sendMessage({ ...data, to }, config);
+    // Logto 1.41 adds UI context such as `uiLocales` to the message payload.
+    // The reviewed Tencent template has exactly one placeholder, so forward
+    // only the verification code and never turn UI metadata into SMS params.
+    return sendMessage({ ...data, to, payload: { code } }, config);
   };
 }

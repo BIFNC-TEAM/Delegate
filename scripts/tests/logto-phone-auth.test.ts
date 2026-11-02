@@ -53,11 +53,36 @@ describe("mainland Tencent SMS adapter", () => {
     await expect(withMainlandRecipients(send, () => new Error("unsupported phone"))({ to: phone })).rejects.toThrow("unsupported phone");
     expect(send).not.toHaveBeenCalled();
   });
-  it("preserves the upstream OTP payload and propagates provider rejection", async () => {
+  it("forwards only the code to a single-placeholder Tencent template", async () => {
+    const send = vi.fn().mockResolvedValue({ ok: true });
+    const data = {
+      to: "8613800138000",
+      type: "Register",
+      payload: { code: "123456", locale: "zh-CN", uiLocales: "zh-CN" },
+    };
+    await withMainlandRecipients(send, () => new Error("invalid"))(data, { test: true });
+    expect(send).toHaveBeenCalledWith(
+      { ...data, to: "+8613800138000", payload: { code: "123456" } },
+      { test: true },
+    );
+  });
+  it("rejects missing verification codes before contacting Tencent", async () => {
+    const send = vi.fn();
+    const wrapped = withMainlandRecipients(
+      send,
+      () => new Error("invalid recipient"),
+      () => new Error("invalid payload"),
+    );
+    await expect(
+      wrapped({ to: "8613800138000", payload: { uiLocales: "zh-CN" } }),
+    ).rejects.toThrow("invalid payload");
+    expect(send).not.toHaveBeenCalled();
+  });
+  it("propagates provider rejection after sanitizing the OTP payload", async () => {
     const send = vi.fn().mockRejectedValue(new Error("provider rejected"));
-    const data = { to: "8613800138000", type: "Register", payload: { code: "123456", locale: "zh-CN" } };
+    const data = { to: "8613800138000", type: "Register", payload: { code: "123456", uiLocales: "zh-CN" } };
     await expect(withMainlandRecipients(send, () => new Error("invalid"))(data, { test: true })).rejects.toThrow("provider rejected");
-    expect(send).toHaveBeenCalledWith({ ...data, to: "+8613800138000" }, { test: true });
+    expect(send).toHaveBeenCalledWith({ ...data, to: "+8613800138000", payload: { code: "123456" } }, { test: true });
   });
 });
 

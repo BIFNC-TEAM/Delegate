@@ -346,6 +346,14 @@ if [[ -f "$sms_env" ]]; then
     >/dev/null
 fi
 
+echo "Reconciling the unified Logto sign-in and registration experience."
+docker run --rm --network delegate-internal \
+  --env-file "$ENV_ROOT/app.env" \
+  --env-file "$ENV_ROOT/auth-apps.env" \
+  "$DELEGATE_APP_IMAGE" \
+  node scripts/logto-unified-auth.mjs --apply \
+  >/dev/null
+
 echo "Migrating Logto application and webhook origins."
 docker run --rm --network delegate-internal \
   --env-file "$ENV_ROOT/app.env" \

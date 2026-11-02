@@ -85,3 +85,17 @@ test("staging applies private Tencent SMS settings with Node dotenv semantics", 
   );
   assert.doesNotMatch(deploy, /--env-file "\$sms_env"/u);
 });
+
+test("staging reconciles the unified Logto experience after connector setup", () => {
+  const deploy = readFileSync(new URL("../server-deploy.sh", import.meta.url), "utf8");
+  const smsConfig = deploy.indexOf(
+    "node --env-file=/run/secrets/tencent-sms.env scripts/logto-phone-auth.mjs --apply",
+  );
+  const unifiedConfig = deploy.indexOf("node scripts/logto-unified-auth.mjs --apply");
+
+  assert.ok(smsConfig >= 0, "SMS connector setup must be present");
+  assert.ok(unifiedConfig > smsConfig, "unified auth must run after the SMS connector is ready");
+  assert.ok(
+    deploy.includes('echo "Reconciling the unified Logto sign-in and registration experience."'),
+  );
+});

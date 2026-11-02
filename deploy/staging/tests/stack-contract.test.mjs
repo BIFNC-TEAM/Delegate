@@ -69,3 +69,19 @@ test("Logto mounts the real Delegate authentication experience from the immutabl
   assert.ok(deploy.includes('mode.mode !== "real"'));
   assert.ok(deploy.includes("mode.localWechatCallback !== null"));
 });
+
+test("staging applies private Tencent SMS settings with Node dotenv semantics", () => {
+  const deploy = readFileSync(new URL("../server-deploy.sh", import.meta.url), "utf8");
+  assert.ok(deploy.includes('sms_env="$STATE_ROOT/tencent-sms.env"'));
+  assert.ok(deploy.includes("Tencent SMS environment must use mode 600"));
+  assert.match(
+    deploy,
+    /--volume "\$sms_env:\/run\/secrets\/tencent-sms\.env:ro"/u,
+  );
+  assert.ok(
+    deploy.includes(
+      "node --env-file=/run/secrets/tencent-sms.env scripts/logto-phone-auth.mjs --apply",
+    ),
+  );
+  assert.doesNotMatch(deploy, /--env-file "\$sms_env"/u);
+});

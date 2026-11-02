@@ -330,6 +330,22 @@ for service in "${services[@]}"; do
   wait_for_service "$service"
 done
 
+sms_env="$STATE_ROOT/tencent-sms.env"
+if [[ -f "$sms_env" ]]; then
+  if [[ "$(stat -c '%a' "$sms_env")" != "600" ]]; then
+    echo "Tencent SMS environment must use mode 600: $sms_env" >&2
+    exit 2
+  fi
+  echo "Applying the private Tencent SMS connector configuration."
+  docker run --rm --network delegate-internal \
+    --env-file "$ENV_ROOT/app.env" \
+    --env-file "$ENV_ROOT/auth-apps.env" \
+    --volume "$sms_env:/run/secrets/tencent-sms.env:ro" \
+    "$DELEGATE_APP_IMAGE" \
+    node --env-file=/run/secrets/tencent-sms.env scripts/logto-phone-auth.mjs --apply \
+    >/dev/null
+fi
+
 echo "Migrating Logto application and webhook origins."
 docker run --rm --network delegate-internal \
   --env-file "$ENV_ROOT/app.env" \

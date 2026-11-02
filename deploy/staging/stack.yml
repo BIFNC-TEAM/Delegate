@@ -434,6 +434,7 @@ services:
   logto:
     image: svhd/logto:1.41.0
     volumes:
+      - ${DELEGATE_AUTH_EXPERIENCE_ROOT:?Set the release authentication experience directory}:/etc/logto/packages/experience/dist:ro
       - ${DELEGATE_LOGTO_CONNECTOR_ROOT:?Set the release connector directory}:/etc/logto/packages/core/connectors/@delegate-connector-tencent-sms-cn:ro
     env_file:
       - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/logto.env

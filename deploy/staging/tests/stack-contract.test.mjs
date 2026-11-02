@@ -53,3 +53,19 @@ test("Logto mounts the mainland SMS adapter from the immutable release directory
   const deploy = readFileSync(new URL("../server-deploy.sh", import.meta.url), "utf8");
   assert.ok(deploy.includes('export DELEGATE_LOGTO_CONNECTOR_ROOT="$REPO_ROOT/deploy/logto/connectors/connector-tencent-sms-cn"'));
 });
+
+test("Logto mounts the real Delegate authentication experience from the immutable release", () => {
+  assert.match(
+    logtoBlock,
+    /DELEGATE_AUTH_EXPERIENCE_ROOT.*\/etc\/logto\/packages\/experience\/dist:ro/u,
+  );
+  const deploy = readFileSync(new URL("../server-deploy.sh", import.meta.url), "utf8");
+  assert.ok(
+    deploy.includes(
+      'export DELEGATE_AUTH_EXPERIENCE_ROOT="$REPO_ROOT/.runtime/auth-experience"',
+    ),
+  );
+  assert.ok(deploy.includes("/app/apps/auth-experience/dist/. /output/"));
+  assert.ok(deploy.includes('mode.mode !== "real"'));
+  assert.ok(deploy.includes("mode.localWechatCallback !== null"));
+});

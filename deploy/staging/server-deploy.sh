@@ -12,6 +12,7 @@ STACK_NAME="${DELEGATE_STACK_NAME:-delegate}"
 STACK_FILE="${SCRIPT_DIR}/stack.yml"
 
 export DELEGATE_ENV_ROOT="$ENV_ROOT"
+export DELEGATE_AUTH_EXPERIENCE_ROOT="$REPO_ROOT/.runtime/auth-experience"
 export DELEGATE_LOGTO_CONNECTOR_ROOT="$REPO_ROOT/deploy/logto/connectors/connector-tencent-sms-cn"
 export DELEGATE_NODE_HOSTNAME="${DELEGATE_NODE_HOSTNAME:-$(hostname)}"
 export DELEGATE_APP_IMAGE="delegate-app:${RELEASE_ID}"
@@ -99,6 +100,30 @@ if ! docker image inspect "$DELEGATE_APP_IMAGE" >/dev/null 2>&1 \
     --build-arg DEBIAN_MIRROR=http://mirrors.cloud.tencent.com \
     --tag "$DELEGATE_APP_IMAGE" --file "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
 fi
+
+echo "Preparing the immutable Logto authentication experience."
+if [[ ! -f "$DELEGATE_AUTH_EXPERIENCE_ROOT/index.html" ]]; then
+  mkdir -p "$DELEGATE_AUTH_EXPERIENCE_ROOT"
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --volume "$DELEGATE_AUTH_EXPERIENCE_ROOT:/output" \
+    --entrypoint sh \
+    "$DELEGATE_APP_IMAGE" \
+    -lc 'cp -R /app/apps/auth-experience/dist/. /output/'
+fi
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/index.html"
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/build-mode.json"
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/assets/delegate-auth.css"
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/assets/delegate-auth.js"
+node -e '
+  const fs = require("node:fs");
+  const mode = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (mode.mode !== "real" || mode.localWechatCallback !== null) {
+    throw new Error("Staging requires a real-verification authentication experience build.");
+  }
+' "$DELEGATE_AUTH_EXPERIENCE_ROOT/build-mode.json"
+find "$DELEGATE_AUTH_EXPERIENCE_ROOT" -type d -exec chmod 0555 {} +
+find "$DELEGATE_AUTH_EXPERIENCE_ROOT" -type f -exec chmod 0444 {} +
 
 if ! docker image inspect "$DELEGATE_OPENVIKING_IMAGE" >/dev/null 2>&1 \
   || [[ "${FORCE_BUILD:-0}" == "1" ]] \

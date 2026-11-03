@@ -130,6 +130,31 @@ test("staging advertises OpenViking model capability without copying its secret"
   assert.doesNotMatch(appEnvBlock, /OPENVIKING_MODEL_API_KEY:/u);
 });
 
+test("staging preserves the dedicated V2 model connection", () => {
+  const generated = prepareStagingEnv({
+    DELEGATE_MODEL_PROVIDER: "agicto",
+    DELEGATE_AGICTO_BASE_URL: "https://legacy-model.example.test/v1",
+    DELEGATE_AGICTO_MODEL: "qwen-plus",
+    DELEGATE_AGICTO_API_KEY: "legacy-model-key",
+    DELEGATE_V2_MODEL_BASE_URL: "http://112.95.75.67:9018/v1",
+    DELEGATE_V2_MODEL_ID: "qwen3.8-27b",
+    DELEGATE_V2_MODEL_API_KEY: "dedicated-v2-key",
+    DELEGATE_V2_REASONING_PROFILE: "qwen-chat-template",
+  });
+
+  assert.equal(
+    generated.app.DELEGATE_V2_MODEL_BASE_URL,
+    "http://112.95.75.67:9018/v1",
+  );
+  assert.equal(generated.app.DELEGATE_V2_MODEL_ID, "qwen3.8-27b");
+  assert.equal(generated.app.DELEGATE_V2_MODEL_API_KEY, "dedicated-v2-key");
+  assert.equal(
+    generated.app.DELEGATE_V2_REASONING_PROFILE,
+    "qwen-chat-template",
+  );
+  assert.equal(generated.app.DELEGATE_AGICTO_MODEL, "qwen-plus");
+});
+
 test("staging emits MinerU settings only from the private-network staging endpoint", () => {
   assert.match(prepareEnv, /sourceValue\("MINERU_STAGING_API_BASE_URL"\)/u);
   assert.match(prepareEnv, /MINERU_API_BASE_URL: minerUApiBaseUrl/u);

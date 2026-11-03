@@ -966,6 +966,7 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
         include: {
           publishedResources: {
             orderBy: { createdAt: "asc" },
+            take: 24,
             select: { citationTitle: true, sourceKind: true },
           },
         },
@@ -1031,6 +1032,7 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
         include: {
           publishedResources: {
             orderBy: { createdAt: "asc" },
+            take: 24,
             select: { citationTitle: true, sourceKind: true },
           },
         },

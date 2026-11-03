@@ -27,6 +27,7 @@ describe("Owner compute policy view using the actual authority resolver", () => 
       include: {
         publishedResources: {
           orderBy: { createdAt: "asc" },
+          take: 24,
           select: { citationTitle: true, sourceKind: true },
         },
       },

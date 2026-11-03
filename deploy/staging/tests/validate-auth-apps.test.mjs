@@ -191,6 +191,37 @@ test("staging generates the Dashboard MinerU runtime contract", () => {
   );
 });
 
+test("staging scopes Notion and Obsidian credentials to Dashboard", () => {
+  const generated = prepareStagingEnv({
+    NOTION_CLIENT_ID: "notion-client-id",
+    NOTION_CLIENT_SECRET: "notion-client-secret",
+    NOTION_REDIRECT_URI: "https://dashboard.rag8.cn/api/dashboard/notion/callback",
+    NOTION_CREDENTIAL_KEY: "notion-credential-key",
+    OBSIDIAN_SYNC_CREDENTIAL_KEY: "obsidian-sync-credential-key",
+  });
+
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(generated.dashboard).filter(([name]) =>
+      name.startsWith("NOTION_") || name === "OBSIDIAN_SYNC_CREDENTIAL_KEY")),
+    {
+      NOTION_CLIENT_ID: "notion-client-id",
+      NOTION_CLIENT_SECRET: "notion-client-secret",
+      NOTION_REDIRECT_URI: "https://dashboard.rag8.cn/api/dashboard/notion/callback",
+      NOTION_CREDENTIAL_KEY: "notion-credential-key",
+      OBSIDIAN_SYNC_CREDENTIAL_KEY: "obsidian-sync-credential-key",
+    },
+  );
+  for (const key of [
+    "NOTION_CLIENT_ID",
+    "NOTION_CLIENT_SECRET",
+    "NOTION_REDIRECT_URI",
+    "NOTION_CREDENTIAL_KEY",
+    "OBSIDIAN_SYNC_CREDENTIAL_KEY",
+  ]) {
+    assert.equal(generated.app[key], undefined);
+  }
+});
+
 test("staging wires the Owner profile internal service with one persistent token", () => {
   const token = "owner-profile-internal-test-token-0123456789abcdef";
   const generated = prepareStagingEnv({ OWNER_PROFILE_INTERNAL_TOKEN: token });

@@ -293,10 +293,18 @@ const minerUEnv = minerUApiBaseUrl
       ...(minerUApiToken ? { MINERU_API_TOKEN: minerUApiToken } : {}),
     }
   : {};
+const dashboardIntegrationKeys = [
+  "NOTION_CLIENT_ID",
+  "NOTION_CLIENT_SECRET",
+  "NOTION_REDIRECT_URI",
+  "NOTION_CREDENTIAL_KEY",
+  "OBSIDIAN_SYNC_CREDENTIAL_KEY",
+];
 
 writeEnv(`${values.output}/dashboard.env`, {
   ...paymentEnv,
   ...minerUEnv,
+  ...sourceSubset(dashboardIntegrationKeys),
   OWNER_PROFILE_INTERNAL_ENDPOINT: "http://workflow-runner:4020",
   OWNER_PROFILE_INTERNAL_TOKEN: state.OWNER_PROFILE_INTERNAL_TOKEN,
   CHANNEL_CREDENTIAL_MASTER_KEY: state.CHANNEL_CREDENTIAL_MASTER_KEY,

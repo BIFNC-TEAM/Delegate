@@ -51,6 +51,7 @@ import { prisma } from "./prisma";
 import { resolveChannelAvailability } from "./channel-availability";
 import { acquireRepresentativeKnowledgePackLock } from "./knowledge-pack-lock";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
+import { buildBuiltinWorkspaceSkillReleaseData } from "./builtin-skill-releases";
 
 const defaultCnyServicePackages = [
   {
@@ -805,6 +806,21 @@ export async function createRepresentative(
                 verificationTier: pack.verificationTier ?? null,
                 capabilityTags: pack.capabilityTags,
                 executesCode: pack.executesCode,
+                ...(pack.source === "builtin"
+                  ? buildBuiltinWorkspaceSkillReleaseData({
+                      version: pack.version ?? "unversioned",
+                      executesCode: pack.executesCode,
+                      ...(pack.instructions ? { instructions: pack.instructions } : {}),
+                      ...(pack.instructionsSha256
+                        ? { instructionsSha256: pack.instructionsSha256 }
+                        : {}),
+                      ...(pack.resources ? { resources: pack.resources } : {}),
+                    })
+                  : {
+                      instructions: pack.instructions ?? null,
+                      instructionsSha256: pack.instructionsSha256 ?? null,
+                      resources: pack.resources ?? [],
+                    }),
                 reviewedBy: owner.id,
                 reviewedAt: now,
                 adoptedAt: now,

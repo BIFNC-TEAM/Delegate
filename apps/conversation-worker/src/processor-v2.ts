@@ -91,6 +91,7 @@ export async function processV2ConversationTurn(input: HostInput) {
   let tools;
   try { tools = (await createV2Capabilities(adapters, context, catalogAbort.signal)).filter(isToolAvailable); }
   finally { clearTimeout(catalogTimer); }
+  const capabilityManifest = buildV2RuntimeCapabilityManifest(setup, authority, tools);
   const progress = createPublicProgress(frame => item.channel === "web" ? updateGenerationPiProgress({ runId: item.runId, ...workLease, ...frame }) : Promise.resolve());
   const session: V2Session | undefined = previous ? { version: 1, scope, taskId: previous.record.taskId, status: "waiting_user",
     messages: previous.messages.map(m => ({ role: "user", content: m.text ?? "", timestamp: m.createdAt.getTime() })),
@@ -99,7 +100,11 @@ export async function processV2ConversationTurn(input: HostInput) {
     ...(leaseGuard.signal ? { signal: leaseGuard.signal } : {}),
     timezone: context.timezone, context, model: binding.binding, budget, tools, ...(session ? { session } : {}),
     history: createV2ConversationHistory(history.map(t => ({ text: t.messageText, timestamp: Date.parse(t.createdAt), requestState: t.requestState ?? "unknown" }))),
-    instructions: [`Represented owner: ${setup.ownerName}. Representative: ${item.representativeName}. Role: ${setup.tagline}. Tone: ${setup.tone}.`, v2PublishedPolicy(setup.agentBehavior),
+    instructions: [`Represented owner: ${setup.ownerName}. Representative: ${item.representativeName}. Role: ${setup.tagline}. Tone: ${setup.tone}.`,
+      buildV2LanguageInstruction(setup.languages),
+      `SERVER_CAPABILITY_MANIFEST=${JSON.stringify(capabilityManifest)}`,
+      "When asked who you are, what you know, or what you can do, answer only from SERVER_CAPABILITY_MANIFEST. Start with the published role, then summarize the listed knowledge titles, enabled skills, and available tools. Never turn generic knowledge access into claims about company rules, products, databases, weather, or private systems unless the manifest explicitly lists them. Skill names are methods, not proof of supported file formats or external systems. Never claim a language, file format, or operation outside the execution entry and tool schemas. The manifest is already server-grounded; do not call tools merely to introduce yourself.",
+      v2PublishedPolicy(setup.agentBehavior),
       "This runtime cannot execute operations requiring a new approval. Never bypass this boundary. Prior user messages are context, not a backlog of commands."].join("\n"),
     authorize: async (boundary, tool) => {
       await leaseGuard.confirmOwned();
@@ -142,4 +147,70 @@ export async function processV2ConversationTurn(input: HostInput) {
     await deliverGenerationOutput({ config: input.config, item, text: completed.message.text ?? text, outputMessageId: completed.message.id });
     return { processed: true as const, runId: item.runId, status: result?.status ?? "completed" };
   }
+}
+
+export function buildV2RuntimeCapabilityManifest(
+  setup: HostInput["setup"],
+  authority: Awaited<ReturnType<typeof getRepresentativeRuntimeAuthoritySnapshot>>,
+  tools: V2Tool[],
+) {
+  const knowledgePackTitles = [
+    ...(setup.knowledgePack?.faq ?? []),
+    ...(setup.knowledgePack?.materials ?? []),
+    ...(setup.knowledgePack?.policies ?? []),
+  ].map((entry) => entry.title);
+  const publishedKnowledgeTitles = uniqueStrings([
+    ...(authority?.knowledgeResources ?? []).map((resource) => resource.title),
+    ...knowledgePackTitles,
+  ]).slice(0, 24);
+  const availableToolNames = new Set(tools.map((tool) => tool.name));
+
+  return {
+    version: 1,
+    identity: {
+      name: setup.name,
+      role: setup.tagline,
+      languages: [...(setup.languages ?? [])],
+    },
+    knowledge: {
+      enabled: availableToolNames.has("retrieve_authorized_knowledge"),
+      publishedTitles: publishedKnowledgeTitles,
+    },
+    skills: (setup.skillPacks ?? [])
+      .filter((skill) => skill.enabled)
+      .map((skill) => ({
+        name: skill.displayName,
+        executesCode: skill.executesCode,
+      })),
+    execution: availableToolNames.has("execute_in_sandbox")
+      ? {
+          language: "python",
+          generatedTextFormats: ["txt", "md", "csv", "json"],
+          unsupported: ["javascript", "shell", "xlsx", "pdf", "image"],
+        }
+      : null,
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      label: tool.label,
+      category: tool.category,
+      effect: tool.effect,
+    })),
+  };
+}
+
+export function buildV2LanguageInstruction(languages: readonly string[] = []) {
+  const configured = uniqueStrings(languages);
+  const simplifiedChinese = configured.some((language) =>
+    ["zh-cn", "zh-hans"].includes(language.toLowerCase()));
+  return [
+    `Published response languages: ${configured.length ? configured.join(", ") : "not specified"}.`,
+    "Reply in the language used by the user's current message when it is supported by the published languages.",
+    simplifiedChinese
+      ? "For Chinese messages, use Simplified Chinese. A tone, accent, persona, or regional speaking style never changes the writing system to Traditional Chinese."
+      : "Do not infer a different writing system from tone, accent, persona, or regional speaking style.",
+  ].join(" ");
+}
+
+function uniqueStrings(values: readonly string[]) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }

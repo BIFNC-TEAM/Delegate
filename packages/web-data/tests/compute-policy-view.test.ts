@@ -7,7 +7,7 @@ const modes = { exec: "allow", read: "allow", write: "allow", process: "allow", 
 const compute = { enabled: true, defaultPolicyMode: "allow", baseImage: "test-image", maxSessionMinutes: 15, autoApproveTokenLimit: 1000,
   artifactRetentionDays: 14, networkMode: "full", networkAllowlist: [], filesystemMode: "workspace_only", capabilityModes: modes };
 function fixture() {
-  const version = { id: "version-3", versionNumber: 3, publishedAt: new Date("2026-09-28T00:00:00Z"), snapshot: { compute: structuredClone(compute) } };
+  const version = { id: "version-3", versionNumber: 3, publishedAt: new Date("2026-09-28T00:00:00Z"), snapshot: { compute: structuredClone(compute) }, publishedResources: [] };
   const row = { id: "rep", slug: "test", activeVersion: version, computeEnabled: true, computeDefaultPolicyMode: "ALLOW", computeBaseImage: "test-image",
     computeMaxSessionMinutes: 15, computeAutoApproveTokenLimit: 1000, computeArtifactRetentionDays: 14, computeNetworkMode: "FULL", computeNetworkAllowlist: [],
     computeFilesystemMode: "WORKSPACE_ONLY", capabilityProfiles: [{ rules: Object.keys(modes).map(capability => ({ id: `rep_${capability}_owner_mode`, decision: "ALLOW" })) }], mcpBindings: [] };
@@ -22,7 +22,15 @@ describe("Owner compute policy view using the actual authority resolver", () => 
     const { version } = fixture(); version.snapshot.compute.capabilityModes.browser = "ask";
     const view = await getRepresentativeComputePolicyView("test");
     expect(view).toMatchObject({ state: "ready", publishedVersion: { id: "version-3", number: 3 }, runtimeCeiling: { capabilityModes: { browser: "ask", exec: "allow" } }, codeExecution: { available: false, reason: "code_execution_profile_unverified" } });
-    expect(db.findVersion).toHaveBeenCalledWith({ where: { id: "version-3", representativeId: "rep" } });
+    expect(db.findVersion).toHaveBeenCalledWith({
+      where: { id: "version-3", representativeId: "rep" },
+      include: {
+        publishedResources: {
+          orderBy: { createdAt: "asc" },
+          select: { citationTitle: true, sourceKind: true },
+        },
+      },
+    });
   });
   it("reflects a saved live restriction and token limit without requiring republishing", async () => {
     const { row } = fixture(); row.computeAutoApproveTokenLimit = 0;

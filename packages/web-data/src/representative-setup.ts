@@ -275,6 +275,10 @@ export type RepresentativeRuntimeAuthoritySnapshot = {
   representativeVersionId: string;
   compute: RepresentativeSetupSnapshot["compute"];
   mcpBindings: RepresentativeRuntimeMcpBindingGrant[];
+  knowledgeResources: Array<{
+    title: string;
+    sourceKind: string;
+  }>;
 };
 export type ComputePolicyAuditPayload = {
   changedBy: string;
@@ -951,13 +955,21 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
       representativeVersionId: requestedVersionId || "demo-version",
       compute: cloneComputeSetup(setup.compute),
       mcpBindings: [],
+      knowledgeResources: [],
     };
   }
 
   const representative = await prisma.representative.findUnique({
     where: { slug: representativeSlug },
     include: {
-      activeVersion: true,
+      activeVersion: {
+        include: {
+          publishedResources: {
+            orderBy: { createdAt: "asc" },
+            select: { citationTitle: true, sourceKind: true },
+          },
+        },
+      },
       capabilityProfiles: {
         where: { isDefault: true, isManaged: false },
         orderBy: { createdAt: "asc" },
@@ -1016,6 +1028,12 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
           id: requestedVersionId,
           representativeId: representative.id,
         },
+        include: {
+          publishedResources: {
+            orderBy: { createdAt: "asc" },
+            select: { citationTitle: true, sourceKind: true },
+          },
+        },
       })
     : representative.activeVersion;
   if (!version) return null;
@@ -1048,6 +1066,12 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
       representative.mcpBindings,
       version.snapshot,
     ),
+    knowledgeResources: (version.publishedResources ?? []).flatMap((resource) => {
+      const title = resource.citationTitle?.trim();
+      return title
+        ? [{ title, sourceKind: resource.sourceKind.toLowerCase() }]
+        : [];
+    }),
   };
 }
 

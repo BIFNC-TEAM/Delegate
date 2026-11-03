@@ -149,9 +149,12 @@ describe("V2 worker integration", () => {
     expect(mocks.run).not.toHaveBeenCalled(); expect(mocks.adapters).not.toHaveBeenCalled();
     expect(mocks.complete).toHaveBeenCalledWith(expect.objectContaining({ countUsage: false }));
   });
-  it("does not silently drop a published mandatory semantic review boundary", async () => {
+  it.each([
+    { version: 1, answerScope: "owner_and_domain", knowledgePolicy: "domain_first", commitmentPolicy: "information_only" },
+    { version: 1, answerScope: "open_public", knowledgePolicy: "domain_only", commitmentPolicy: "information_only" },
+  ])("does not silently drop a published mandatory semantic review boundary: %j", async agentBehavior => {
     const host = makeHost() as any;
-    host.setup.agentBehavior = { version: 1, answerScope: "open_public", knowledgePolicy: "domain_only", commitmentPolicy: "information_only" };
+    host.setup.agentBehavior = agentBehavior;
     await processV2ConversationTurn(host);
     expect(mocks.run).not.toHaveBeenCalled(); expect(mocks.complete).toHaveBeenCalledWith(expect.objectContaining({ countUsage: false, replyText: expect.stringContaining("专项语义审核") }));
   });

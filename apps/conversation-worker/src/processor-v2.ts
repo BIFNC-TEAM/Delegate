@@ -6,6 +6,7 @@ import {
   v2PublishedPolicy,
   type V2RunResult, type V2Session, type V2Tool
 } from "@delegate/model-runtime/v2";
+import { isAgentBehaviorSupportedByV2 } from "@delegate/domain";
 import { AgentContextAuthorizationError, auditReference } from "@delegate/runtime";
 import {
   authorizeGenerationRunFreeUsage,
@@ -37,7 +38,7 @@ export async function processV2ConversationTurn(input: HostInput) {
   if (!allowed) allowed = await authorizeGenerationRunFreeUsage({ runId: item.runId, ...workLease, freeReplyLimit: item.effectiveFreeReplyLimit ?? profile.contract.freeReplyLimit });
   if (!allowed && item.audienceIdentityId) allowed = Boolean(await reserveGenerationConversationWalletUsage({ runId: item.runId, ...workLease, audienceIdentityId: item.audienceIdentityId, representativeId: setup.id, tokenAmount: 1 }));
   if (!allowed) return complete("当前没有可用服务额度，尚未启动 V2 Agent 或工具。", false);
-  if (setup.agentBehavior?.answerScope === "owner_and_domain" || setup.agentBehavior?.knowledgePolicy === "domain_only") {
+  if (!isAgentBehaviorSupportedByV2(setup.agentBehavior)) {
     return complete("此代表的配置要求保留专项语义审核，当前 V2 尚未接入该审核边界，因此没有启动模型或工具。", false);
   }
 

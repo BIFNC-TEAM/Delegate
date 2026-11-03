@@ -1,7 +1,11 @@
 import { readPublicAgentProgress, readPublicAnswerSources, readPublicExecution, type PublicExecutionCall, type PublicAnswerSource, type PublicAgentStage } from "./public-agent-presentation";
 import { createHash, randomUUID } from "node:crypto";
 
-import { normalizeRepresentativeHandoffPrompt, readAgentBehavior } from "@delegate/domain";
+import {
+  isAgentBehaviorSupportedByV2,
+  normalizeRepresentativeHandoffPrompt,
+  readAgentBehavior,
+} from "@delegate/domain";
 
 import { revalidateAgentContextDeliveryInTransaction } from "./agent-context-authorization";
 import {
@@ -11725,6 +11729,9 @@ export async function publishRepresentativeVersion(input: {
     const incomplete = readiness.filter((item) => !item.complete);
     if (incomplete.length) {
       throw new Error(`Representative is not publish-ready: ${incomplete.map((item) => item.label).join(", ")}.`);
+    }
+    if (!isAgentBehaviorSupportedByV2(readAgentBehavior(representative.agentBehavior))) {
+      throw new Error("Representative answer policy is not supported by the current V2 runtime.");
     }
 
     const lastVersion = await tx.representativeVersion.findFirst({

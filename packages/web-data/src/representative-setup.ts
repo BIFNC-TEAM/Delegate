@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   agentBehaviorSchema,
+  defaultV2AgentBehavior,
   readAgentBehavior,
   conversationContractSchema,
   demoRepresentative,
@@ -624,12 +625,7 @@ export async function createRepresentative(
           displayName: template.name,
           roleSummary: template.tagline,
           tone: template.tone,
-          agentBehavior: {
-            version: 1,
-            answerScope: "owner_and_domain",
-            knowledgePolicy: "domain_first",
-            commitmentPolicy: "information_only",
-          },
+          agentBehavior: { ...defaultV2AgentBehavior },
           publicMode: template.publicMode,
           groupModeEnabled: true,
           groupActivation: mapGroupActivationToDb(template.groupActivation),

@@ -43,6 +43,20 @@ environment without printing it, generates staging-specific secrets on the
 server, builds commit-tagged images, applies migrations, deploys the stack,
 and writes fresh PostgreSQL and Logto backups.
 
+Each release copies the production-built Delegate authentication experience
+out of the application image and mounts it read-only into Logto. After Logto
+is healthy, deployment applies the private Tencent SMS connector settings when
+`/home/ubuntu/delegate/shared/tencent-sms.env` exists with mode `0600`, then
+reconciles the reviewed phone registration/sign-in and Account Center policy.
+The private SMS file is parsed by Node rather than Docker so quoted Chinese
+signature values do not become literal connector data.
+
+The environment generator persists one `OWNER_PROFILE_INTERNAL_TOKEN` in
+`state.env`, injects it only into Dashboard and workflow-runner, and gives the
+Dashboard the internal `http://workflow-runner:4020` endpoint. This keeps Owner
+profile reads and avatar changes on the private overlay network without
+exposing the token to the browser or unrelated services.
+
 ## Inspect and smoke
 
 ```bash

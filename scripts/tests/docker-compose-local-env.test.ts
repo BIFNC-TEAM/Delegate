@@ -11,6 +11,7 @@ const composeWrapper = readFileSync(
   resolve(projectRoot, "scripts/docker-compose-local.sh"),
   "utf8",
 );
+const compose = readFileSync(resolve(projectRoot, "compose.yml"), "utf8");
 
 describe("local Compose environment loading", () => {
   it("loads the base environment before the optional local WeChat override", () => {
@@ -34,6 +35,17 @@ describe("local Compose environment loading", () => {
       expect(packageJson.scripts?.[scriptName]).toContain(
         "bash scripts/docker-compose-local.sh",
       );
+    }
+  });
+
+  it("passes the dedicated V2 model connection into local app services", () => {
+    for (const key of [
+      "DELEGATE_V2_MODEL_BASE_URL",
+      "DELEGATE_V2_MODEL_ID",
+      "DELEGATE_V2_MODEL_API_KEY",
+      "DELEGATE_V2_REASONING_PROFILE",
+    ]) {
+      expect(compose).toContain(`${key}: \${${key}:-`);
     }
   });
 });

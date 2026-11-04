@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   agentBehaviorSchema,
+  defaultV2AgentBehavior,
   readAgentBehavior,
   conversationContractSchema,
   demoRepresentative,
@@ -51,6 +52,7 @@ import { prisma } from "./prisma";
 import { resolveChannelAvailability } from "./channel-availability";
 import { acquireRepresentativeKnowledgePackLock } from "./knowledge-pack-lock";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
+import { buildBuiltinWorkspaceSkillReleaseData } from "./builtin-skill-releases";
 
 const defaultCnyServicePackages = [
   {
@@ -273,6 +275,10 @@ export type RepresentativeRuntimeAuthoritySnapshot = {
   representativeVersionId: string;
   compute: RepresentativeSetupSnapshot["compute"];
   mcpBindings: RepresentativeRuntimeMcpBindingGrant[];
+  knowledgeResources: Array<{
+    title: string;
+    sourceKind: string;
+  }>;
 };
 export type ComputePolicyAuditPayload = {
   changedBy: string;
@@ -623,12 +629,7 @@ export async function createRepresentative(
           displayName: template.name,
           roleSummary: template.tagline,
           tone: template.tone,
-          agentBehavior: {
-            version: 1,
-            answerScope: "owner_and_domain",
-            knowledgePolicy: "domain_first",
-            commitmentPolicy: "information_only",
-          },
+          agentBehavior: { ...defaultV2AgentBehavior },
           publicMode: template.publicMode,
           groupModeEnabled: true,
           groupActivation: mapGroupActivationToDb(template.groupActivation),
@@ -805,6 +806,21 @@ export async function createRepresentative(
                 verificationTier: pack.verificationTier ?? null,
                 capabilityTags: pack.capabilityTags,
                 executesCode: pack.executesCode,
+                ...(pack.source === "builtin"
+                  ? buildBuiltinWorkspaceSkillReleaseData({
+                      version: pack.version ?? "unversioned",
+                      executesCode: pack.executesCode,
+                      ...(pack.instructions ? { instructions: pack.instructions } : {}),
+                      ...(pack.instructionsSha256
+                        ? { instructionsSha256: pack.instructionsSha256 }
+                        : {}),
+                      ...(pack.resources ? { resources: pack.resources } : {}),
+                    })
+                  : {
+                      instructions: pack.instructions ?? null,
+                      instructionsSha256: pack.instructionsSha256 ?? null,
+                      resources: pack.resources ?? [],
+                    }),
                 reviewedBy: owner.id,
                 reviewedAt: now,
                 adoptedAt: now,
@@ -939,13 +955,22 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
       representativeVersionId: requestedVersionId || "demo-version",
       compute: cloneComputeSetup(setup.compute),
       mcpBindings: [],
+      knowledgeResources: [],
     };
   }
 
   const representative = await prisma.representative.findUnique({
     where: { slug: representativeSlug },
     include: {
-      activeVersion: true,
+      activeVersion: {
+        include: {
+          publishedResources: {
+            orderBy: { createdAt: "asc" },
+            take: 24,
+            select: { citationTitle: true, sourceKind: true },
+          },
+        },
+      },
       capabilityProfiles: {
         where: { isDefault: true, isManaged: false },
         orderBy: { createdAt: "asc" },
@@ -1004,6 +1029,13 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
           id: requestedVersionId,
           representativeId: representative.id,
         },
+        include: {
+          publishedResources: {
+            orderBy: { createdAt: "asc" },
+            take: 24,
+            select: { citationTitle: true, sourceKind: true },
+          },
+        },
       })
     : representative.activeVersion;
   if (!version) return null;
@@ -1036,6 +1068,12 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
       representative.mcpBindings,
       version.snapshot,
     ),
+    knowledgeResources: (version.publishedResources ?? []).flatMap((resource) => {
+      const title = resource.citationTitle?.trim();
+      return title
+        ? [{ title, sourceKind: resource.sourceKind.toLowerCase() }]
+        : [];
+    }),
   };
 }
 

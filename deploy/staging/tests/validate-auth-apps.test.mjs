@@ -130,6 +130,31 @@ test("staging advertises OpenViking model capability without copying its secret"
   assert.doesNotMatch(appEnvBlock, /OPENVIKING_MODEL_API_KEY:/u);
 });
 
+test("staging preserves the dedicated V2 model connection", () => {
+  const generated = prepareStagingEnv({
+    DELEGATE_MODEL_PROVIDER: "agicto",
+    DELEGATE_AGICTO_BASE_URL: "https://legacy-model.example.test/v1",
+    DELEGATE_AGICTO_MODEL: "qwen-plus",
+    DELEGATE_AGICTO_API_KEY: "legacy-model-key",
+    DELEGATE_V2_MODEL_BASE_URL: "http://112.95.75.67:9018/v1",
+    DELEGATE_V2_MODEL_ID: "qwen3.8-27b",
+    DELEGATE_V2_MODEL_API_KEY: "dedicated-v2-key",
+    DELEGATE_V2_REASONING_PROFILE: "qwen-chat-template",
+  });
+
+  assert.equal(
+    generated.app.DELEGATE_V2_MODEL_BASE_URL,
+    "http://112.95.75.67:9018/v1",
+  );
+  assert.equal(generated.app.DELEGATE_V2_MODEL_ID, "qwen3.8-27b");
+  assert.equal(generated.app.DELEGATE_V2_MODEL_API_KEY, "dedicated-v2-key");
+  assert.equal(
+    generated.app.DELEGATE_V2_REASONING_PROFILE,
+    "qwen-chat-template",
+  );
+  assert.equal(generated.app.DELEGATE_AGICTO_MODEL, "qwen-plus");
+});
+
 test("staging emits MinerU settings only from the private-network staging endpoint", () => {
   assert.match(prepareEnv, /sourceValue\("MINERU_STAGING_API_BASE_URL"\)/u);
   assert.match(prepareEnv, /MINERU_API_BASE_URL: minerUApiBaseUrl/u);
@@ -163,6 +188,59 @@ test("staging generates the Dashboard MinerU runtime contract", () => {
       MINERU_LANGUAGE: "en",
       MINERU_BACKEND: "pipeline",
     },
+  );
+});
+
+test("staging scopes Notion and Obsidian credentials to Dashboard", () => {
+  const generated = prepareStagingEnv({
+    NOTION_CLIENT_ID: "notion-client-id",
+    NOTION_CLIENT_SECRET: "notion-client-secret",
+    NOTION_REDIRECT_URI: "https://dashboard.rag8.cn/api/dashboard/notion/callback",
+    NOTION_CREDENTIAL_KEY: "notion-credential-key",
+    OBSIDIAN_SYNC_CREDENTIAL_KEY: "obsidian-sync-credential-key",
+  });
+
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(generated.dashboard).filter(([name]) =>
+      name.startsWith("NOTION_") || name === "OBSIDIAN_SYNC_CREDENTIAL_KEY")),
+    {
+      NOTION_CLIENT_ID: "notion-client-id",
+      NOTION_CLIENT_SECRET: "notion-client-secret",
+      NOTION_REDIRECT_URI: "https://dashboard.rag8.cn/api/dashboard/notion/callback",
+      NOTION_CREDENTIAL_KEY: "notion-credential-key",
+      OBSIDIAN_SYNC_CREDENTIAL_KEY: "obsidian-sync-credential-key",
+    },
+  );
+  for (const key of [
+    "NOTION_CLIENT_ID",
+    "NOTION_CLIENT_SECRET",
+    "NOTION_REDIRECT_URI",
+    "NOTION_CREDENTIAL_KEY",
+    "OBSIDIAN_SYNC_CREDENTIAL_KEY",
+  ]) {
+    assert.equal(generated.app[key], undefined);
+  }
+});
+
+test("staging wires the Owner profile internal service with one persistent token", () => {
+  const token = "owner-profile-internal-test-token-0123456789abcdef";
+  const generated = prepareStagingEnv({ OWNER_PROFILE_INTERNAL_TOKEN: token });
+
+  assert.equal(generated.state.OWNER_PROFILE_INTERNAL_TOKEN, token);
+  assert.equal(
+    generated.dashboard.OWNER_PROFILE_INTERNAL_ENDPOINT,
+    "http://workflow-runner:4020",
+  );
+  assert.equal(generated.dashboard.OWNER_PROFILE_INTERNAL_TOKEN, token);
+  assert.equal(generated.workflow.OWNER_PROFILE_INTERNAL_TOKEN, token);
+  assert.equal(generated.workflow.OWNER_PROFILE_INTERNAL_ENDPOINT, undefined);
+  assert.equal(generated.app.OWNER_PROFILE_INTERNAL_TOKEN, undefined);
+});
+
+test("staging rejects an undersized Owner profile internal token", () => {
+  assert.throws(
+    () => prepareStagingEnv({ OWNER_PROFILE_INTERNAL_TOKEN: "too-short" }),
+    /OWNER_PROFILE_INTERNAL_TOKEN must contain at least 32 characters/u,
   );
 });
 
@@ -282,6 +360,10 @@ test("legacy planner removal drains only inert drafts before enforcing guards", 
 });
 
 function prepareDashboardEnv(extra = {}) {
+  return prepareStagingEnv(extra).dashboard;
+}
+
+function prepareStagingEnv(extra = {}) {
   const root = mkdtempSync(join(tmpdir(), "delegate-staging-env-"));
   const sourcePath = join(root, "source.env");
   const outputPath = join(root, "output");
@@ -300,7 +382,12 @@ function prepareDashboardEnv(extra = {}) {
       "--output",
       outputPath,
     ]);
-    return parseEnv(readFileSync(join(outputPath, "dashboard.env"), "utf8"));
+    return Object.fromEntries(
+      ["app", "dashboard", "workflow", "state"].map((name) => [
+        name,
+        parseEnv(readFileSync(join(outputPath, `${name}.env`), "utf8")),
+      ]),
+    );
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

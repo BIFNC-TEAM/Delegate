@@ -24,6 +24,7 @@ import {
 
 import { prisma } from "./prisma";
 import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
+import { buildBuiltinWorkspaceSkillReleaseData } from "./builtin-skill-releases";
 
 export type WorkspaceSkillRisk = "low" | "medium" | "high";
 
@@ -661,25 +662,7 @@ export async function installBuiltinSkillForWorkspace(input: {
         verificationTier: builtin.verificationTier,
         capabilityTags: [...builtin.capabilityTags],
         executesCode: builtin.executesCode,
-        provenanceDigest: builtin.instructionsSha256,
-        signatureStatus: WorkspaceSkillSignatureStatus.VERIFIED,
-        registryTrustSource: "delegate_builtin",
-        registryVerified: true,
-        registryTrustEligible: true,
-        registryTrustEvidence: {
-          source: "delegate_builtin",
-          version: builtin.version,
-          instructionsSha256: builtin.instructionsSha256,
-        },
-        runtimeRequirements: {
-          requiredBins: ["python"],
-          requiredEnv: [],
-          optionalEnv: [],
-          networkMode: "no_network",
-        },
-        instructions: builtin.instructions,
-        instructionsSha256: builtin.instructionsSha256,
-        resources: [...builtin.resources],
+        ...buildBuiltinWorkspaceSkillReleaseData(builtin),
         reviewedBy: input.installedBy,
         reviewedAt: new Date(),
         adoptedAt: new Date(),
@@ -692,14 +675,7 @@ export async function installBuiltinSkillForWorkspace(input: {
         verificationTier: builtin.verificationTier,
         capabilityTags: [...builtin.capabilityTags],
         executesCode: builtin.executesCode,
-        provenanceDigest: builtin.instructionsSha256,
-        signatureStatus: WorkspaceSkillSignatureStatus.VERIFIED,
-        registryTrustSource: "delegate_builtin",
-        registryVerified: true,
-        registryTrustEligible: true,
-        instructions: builtin.instructions,
-        instructionsSha256: builtin.instructionsSha256,
-        resources: [...builtin.resources],
+        ...buildBuiltinWorkspaceSkillReleaseData(builtin),
       },
     });
     if (!existing) {

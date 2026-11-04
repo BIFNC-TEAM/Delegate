@@ -25,6 +25,7 @@ import {
   SkillPackSource,
 } from "@prisma/client";
 import { pathToFileURL } from "node:url";
+import { reconcileBuiltinWorkspaceSkillReleases } from "../packages/web-data/src/builtin-skill-releases";
 
 try {
   process.loadEnvFile();
@@ -101,6 +102,10 @@ type ContactFixture = (typeof CONTACTS)[number];
 export async function seedDatabase(
   client: PrismaClient = prisma,
 ): Promise<"seeded" | "skipped"> {
+  const builtins = await reconcileBuiltinWorkspaceSkillReleases(client);
+  if (builtins.updated > 0) {
+    console.log(`Reconciled ${builtins.updated} built-in workspace skill release(s).`);
+  }
   // Compose runs the seed command after every migration check. Seed data is an
   // initial workspace fixture, not a reset operation: once the demo
   // representative exists, preserve working drafts, active versions, wallet

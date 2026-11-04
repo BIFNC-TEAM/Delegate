@@ -12,6 +12,7 @@ if (enabled) {
 }
 const suite = enabled ? describe : describe.skip;
 const closed: AgentBehavior = { version: 1, answerScope: "owner_and_domain", knowledgePolicy: "domain_only", commitmentPolicy: "information_only" };
+const supportedDefault: AgentBehavior = { version: 1, answerScope: "open_public", knowledgePolicy: "domain_first", commitmentPolicy: "information_only" };
 const open: AgentBehavior = { version: 1, answerScope: "open_public", knowledgePolicy: "owner_facts", commitmentPolicy: "authorized_terms" };
 
 suite("Agent behavior save/publish/pin against isolated PostgreSQL", () => {
@@ -19,7 +20,7 @@ suite("Agent behavior save/publish/pin against isolated PostgreSQL", () => {
   it("creates a materials-first draft through the product path and preserves an explicit later choice", async () => {
     const owner = await prisma.owner.create({ data: { displayName: "Synthetic default owner" } });
     const created = await createRepresentative({ ownerName: owner.displayName, representativeName: "Default knowledge fixture", slug: `knowledge-default-${randomUUID()}`, tagline: "地理教学" }, { ownerId: owner.id });
-    expect(created.agentBehavior).toEqual({ version: 1, answerScope: "owner_and_domain", knowledgePolicy: "domain_first", commitmentPolicy: "information_only" });
+    expect(created.agentBehavior).toEqual(supportedDefault);
     expect((await prisma.representative.findUniqueOrThrow({ where: { id: created.id } })).agentBehavior).toEqual(created.agentBehavior);
     const saved = await updateRepresentativeSetup({ representativeSlug: created.slug, input: { ...created, agentBehavior: open }, syncOpenViking: false });
     const { agentBehavior: _ignored, ...oldClient } = saved;
@@ -33,21 +34,21 @@ suite("Agent behavior save/publish/pin against isolated PostgreSQL", () => {
     expect((legacy.snapshot as Record<string, unknown>).agentBehavior).toBeUndefined();
     expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug, legacy.id))?.agentBehavior).toBeUndefined();
     const before = await getRepresentativeSetupSnapshot(fixture.slug);
-    const saved = await updateRepresentativeSetup({ representativeSlug: fixture.slug, input: { ...before!, agentBehavior: closed }, syncOpenViking: false });
-    expect(saved.agentBehavior).toEqual(closed);
+    const saved = await updateRepresentativeSetup({ representativeSlug: fixture.slug, input: { ...before!, agentBehavior: open }, syncOpenViking: false });
+    expect(saved.agentBehavior).toEqual(open);
     expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug))?.agentBehavior).toBeUndefined();
     const v2 = await publish(fixture);
-    expect((v2.snapshot as Record<string, unknown>).agentBehavior).toEqual(closed);
-    expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug))?.agentBehavior).toEqual(closed);
-    const changed = await updateRepresentativeSetup({ representativeSlug: fixture.slug, input: { ...saved, agentBehavior: open }, syncOpenViking: false });
-    expect(changed.agentBehavior).toEqual(open);
-    const current = await getRepresentativeRuntimeSetupSnapshot(fixture.slug, v2.id);
-    expect(current?.agentBehavior).toEqual(closed); expect(current?.compute.enabled).toBe(false);
-    const v3 = await publish(fixture);
+    expect((v2.snapshot as Record<string, unknown>).agentBehavior).toEqual(open);
     expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug))?.agentBehavior).toEqual(open);
-    expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug, v2.id))?.agentBehavior).toEqual(closed);
+    const changed = await updateRepresentativeSetup({ representativeSlug: fixture.slug, input: { ...saved, agentBehavior: supportedDefault }, syncOpenViking: false });
+    expect(changed.agentBehavior).toEqual(supportedDefault);
+    const current = await getRepresentativeRuntimeSetupSnapshot(fixture.slug, v2.id);
+    expect(current?.agentBehavior).toEqual(open); expect(current?.compute.enabled).toBe(false);
+    const v3 = await publish(fixture);
+    expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug))?.agentBehavior).toEqual(supportedDefault);
+    expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug, v2.id))?.agentBehavior).toEqual(open);
     await activateRepresentativeVersion({ representativeSlug: fixture.slug, versionId: v2.id, activatedBy: fixture.ownerId, ownerId: fixture.ownerId });
-    expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug))?.agentBehavior).toEqual(closed);
+    expect((await getRepresentativeRuntimeSetupSnapshot(fixture.slug))?.agentBehavior).toEqual(open);
     expect((await prisma.representativeVersion.findUniqueOrThrow({ where: { id: v3.id } })).snapshot).toEqual(v3.snapshot);
     const row = await prisma.representative.findUniqueOrThrow({ where: { id: fixture.id } });
     expect(row.computeEnabled).toBe(false); expect(row.actionGate).toEqual({ fixture: "unchanged" });
@@ -96,13 +97,15 @@ suite("Agent behavior save/publish/pin against isolated PostgreSQL", () => {
   it("blocks legacy or stale publishers from silently dropping or changing a configured policy", async () => {
     const fixture = await createFixture(); const legacy = await publish(fixture);
     const setup = await getRepresentativeSetupSnapshot(fixture.slug);
-    await updateRepresentativeSetup({ representativeSlug: fixture.slug, input: { ...setup!, agentBehavior: closed }, syncOpenViking: false });
+    const closedDraft = await updateRepresentativeSetup({ representativeSlug: fixture.slug, input: { ...setup!, agentBehavior: closed }, syncOpenViking: false });
     for (const snapshot of [legacy.snapshot, { ...(legacy.snapshot as Record<string, any>), agentBehavior: open }]) {
       await expect(prisma.representativeVersion.create({ data: { representativeId: fixture.id, versionNumber: 2, snapshot: snapshot as any } }))
         .rejects.toThrow("representative_agent_behavior_snapshot_mismatch");
     }
     expect(await prisma.representativeVersion.count({ where: { representativeId: fixture.id } })).toBe(1);
     expect((await prisma.representative.findUniqueOrThrow({ where: { id: fixture.id } })).activeVersionId).toBe(legacy.id);
+    await expect(publish(fixture)).rejects.toThrow("not supported by the current V2 runtime");
+    await updateRepresentativeSetup({ representativeSlug: fixture.slug, input: { ...closedDraft, agentBehavior: open }, syncOpenViking: false });
     expect((await publish(fixture)).versionNumber).toBe(2);
   });
 });

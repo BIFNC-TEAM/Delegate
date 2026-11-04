@@ -55,9 +55,9 @@ export async function createV2Capabilities(adapters: PiCapabilityAdapters, conte
     },
   });
   if (adapters.sandbox) tools.push({ name: "execute_in_sandbox", label: "隔离计算", category: "sandbox", effect: "write",
-    description: "Run code in the governed isolated sandbox on authorized attachment IDs. Host language, network, file and approval policies apply. Creates isolated files; must run sequentially and is never automatically retried. Return contains real stdout and artifact handles when successful. Declare every required attachment and desired output file. No host-machine access."
+    description: "Run Python code in the governed isolated sandbox on authorized attachment IDs. JavaScript and shell are not available. Host network, file and approval policies apply. Creates isolated files; must run sequentially and is never automatically retried. Return contains real stdout and artifact handles when successful. Declare every required attachment and desired output file. No host-machine access."
       + (adapters.sandbox.executionDescription ? `\nHost contract: ${adapters.sandbox.executionDescription}` : ""),
-    parameters: Type.Object({ language: Type.Union([Type.Literal("python"), Type.Literal("javascript"), Type.Literal("shell")]), code: Type.String({ minLength: 1, maxLength: 24000 }), attachmentIds: Type.Array(Type.String(), { maxItems: 20 }), expectedOutputs: Type.Array(Type.String(), { maxItems: 10 }), timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 25000 })) }),
+    parameters: Type.Object({ language: Type.Literal("python"), code: Type.String({ minLength: 1, maxLength: 24000 }), attachmentIds: Type.Array(Type.String(), { maxItems: 20 }), expectedOutputs: Type.Array(Type.String(), { maxItems: 10 }), timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 25000 })) }),
     execute: async (_id, args, signal, context) => {
       if (args.attachmentIds.some((id: string) => !context.attachments.some(a => a.id === id))) throw new V2Error("permission_denied");
       const result = await adapters.sandbox!.execute({ ...args, timeoutMs: args.timeoutMs ?? 20000, context, signal });

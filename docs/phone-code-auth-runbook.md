@@ -121,8 +121,18 @@ user table as a substitute for ownership verification.
 `deploy/logto/connectors/connector-tencent-sms-cn` directory. Manual stack deploys
 must set `DELEGATE_LOGTO_CONNECTOR_ROOT` to that absolute directory on the
 scheduled node. Mount it identically on every replica; a changed release path
-causes service replacement and refreshes the connector cache. The deployment
-does not automatically enable SMS or disable legacy login.
+causes service replacement and refreshes the connector cache. After the real
+SMS connector is configured, the deployment reconciles the unified Logto
+experience: phone verification becomes the registration path, optional profile
+fields remain optional, and unconfigured legacy username login is removed.
+
+Store the staging-only Tencent settings at
+`/home/ubuntu/delegate/shared/tencent-sms.env` with mode `0600`. Once Logto is
+healthy, the deployment mounts that file read-only and lets Node parse it with
+`--env-file`; do not pass this private file through Docker `--env-file`, whose
+quote handling can persist literal quote characters in Logto connector values.
+When the private file is absent, deployment leaves the existing connector
+configuration unchanged.
 
 Run the same Management API configuration command using the **staging** private
 environment and reachable Logto endpoint, not the local env files. The tenant

@@ -9,6 +9,23 @@ export const agentBehaviorSchema = z.object({
 }).strict();
 export type AgentBehavior = z.infer<typeof agentBehaviorSchema>;
 
+export const defaultV2AgentBehavior: AgentBehavior = {
+  version: 1,
+  answerScope: "open_public",
+  knowledgePolicy: "domain_first",
+  commitmentPolicy: "information_only",
+};
+
+export function isAgentBehaviorSupportedByV2(
+  value: AgentBehavior | undefined,
+): boolean {
+  return value === undefined
+    || (
+      value.answerScope === "open_public"
+      && value.knowledgePolicy !== "domain_only"
+    );
+}
+
 /** Absence preserves pre-existing behavior; malformed explicit policies never become defaults. */
 export function readAgentBehavior(value: unknown): AgentBehavior | undefined {
   if (value === null || value === undefined) return undefined;

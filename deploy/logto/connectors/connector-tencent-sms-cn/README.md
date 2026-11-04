@@ -3,7 +3,10 @@
 A bounded adapter for the official Tencent SMS connector shipped with Logto
 1.41.0. It rejects non-mainland/mobile recipients before any provider request,
 normalizes Logto's `861...` representation to `+861...`, and otherwise delegates
-to the official connector unchanged. It never generates, logs or stores codes.
+to the official connector. Logto 1.41 may add UI context to verification payloads;
+the adapter removes that context before the official connector converts payload
+values into template parameters, keeping the reviewed one-placeholder template
+bound to the verification code only. It never generates, logs or stores codes.
 
 Mount this directory at
 `/etc/logto/packages/core/connectors/@delegate-connector-tencent-sms-cn` and

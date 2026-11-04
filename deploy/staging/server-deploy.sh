@@ -12,6 +12,7 @@ STACK_NAME="${DELEGATE_STACK_NAME:-delegate}"
 STACK_FILE="${SCRIPT_DIR}/stack.yml"
 
 export DELEGATE_ENV_ROOT="$ENV_ROOT"
+export DELEGATE_AUTH_EXPERIENCE_ROOT="$REPO_ROOT/.runtime/auth-experience"
 export DELEGATE_LOGTO_CONNECTOR_ROOT="$REPO_ROOT/deploy/logto/connectors/connector-tencent-sms-cn"
 export DELEGATE_NODE_HOSTNAME="${DELEGATE_NODE_HOSTNAME:-$(hostname)}"
 export DELEGATE_APP_IMAGE="delegate-app:${RELEASE_ID}"
@@ -99,6 +100,30 @@ if ! docker image inspect "$DELEGATE_APP_IMAGE" >/dev/null 2>&1 \
     --build-arg DEBIAN_MIRROR=http://mirrors.cloud.tencent.com \
     --tag "$DELEGATE_APP_IMAGE" --file "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
 fi
+
+echo "Preparing the immutable Logto authentication experience."
+if [[ ! -f "$DELEGATE_AUTH_EXPERIENCE_ROOT/index.html" ]]; then
+  mkdir -p "$DELEGATE_AUTH_EXPERIENCE_ROOT"
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --volume "$DELEGATE_AUTH_EXPERIENCE_ROOT:/output" \
+    --entrypoint sh \
+    "$DELEGATE_APP_IMAGE" \
+    -lc 'cp -R /app/apps/auth-experience/dist/. /output/'
+fi
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/index.html"
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/build-mode.json"
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/assets/delegate-auth.css"
+require_file "$DELEGATE_AUTH_EXPERIENCE_ROOT/assets/delegate-auth.js"
+node -e '
+  const fs = require("node:fs");
+  const mode = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (mode.mode !== "real" || mode.localWechatCallback !== null) {
+    throw new Error("Staging requires a real-verification authentication experience build.");
+  }
+' "$DELEGATE_AUTH_EXPERIENCE_ROOT/build-mode.json"
+find "$DELEGATE_AUTH_EXPERIENCE_ROOT" -type d -exec chmod 0555 {} +
+find "$DELEGATE_AUTH_EXPERIENCE_ROOT" -type f -exec chmod 0444 {} +
 
 if ! docker image inspect "$DELEGATE_OPENVIKING_IMAGE" >/dev/null 2>&1 \
   || [[ "${FORCE_BUILD:-0}" == "1" ]] \
@@ -304,6 +329,30 @@ done
 for service in "${services[@]}"; do
   wait_for_service "$service"
 done
+
+sms_env="$STATE_ROOT/tencent-sms.env"
+if [[ -f "$sms_env" ]]; then
+  if [[ "$(stat -c '%a' "$sms_env")" != "600" ]]; then
+    echo "Tencent SMS environment must use mode 600: $sms_env" >&2
+    exit 2
+  fi
+  echo "Applying the private Tencent SMS connector configuration."
+  docker run --rm --network delegate-internal \
+    --env-file "$ENV_ROOT/app.env" \
+    --env-file "$ENV_ROOT/auth-apps.env" \
+    --volume "$sms_env:/run/secrets/tencent-sms.env:ro" \
+    "$DELEGATE_APP_IMAGE" \
+    node --env-file=/run/secrets/tencent-sms.env scripts/logto-phone-auth.mjs --apply \
+    >/dev/null
+fi
+
+echo "Reconciling the unified Logto sign-in and registration experience."
+docker run --rm --network delegate-internal \
+  --env-file "$ENV_ROOT/app.env" \
+  --env-file "$ENV_ROOT/auth-apps.env" \
+  "$DELEGATE_APP_IMAGE" \
+  node scripts/logto-unified-auth.mjs --apply \
+  >/dev/null
 
 echo "Migrating Logto application and webhook origins."
 docker run --rm --network delegate-internal \

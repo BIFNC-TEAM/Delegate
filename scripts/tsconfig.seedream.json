@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["avatar-seedream.ts", "lib/seedream-avatar-pilot.ts", "tests/seedream-avatar-pilot.test.ts"]
+}

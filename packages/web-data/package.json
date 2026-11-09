@@ -13,6 +13,7 @@
     "./owner-settings": "./src/owner-settings.ts",
     "./owner-identity-profile": "./src/owner-identity-profile.ts",
     "./owner-avatar-storage": "./src/owner-avatar-storage.ts",
+    "./avatar-reference-images": "./src/avatar-reference-images.ts",
     "./knowledge-web-capture": "./src/knowledge-web-capture.ts",
     "./knowledge-obsidian": "./src/knowledge-obsidian.ts",
     "./obsidian-sync": "./src/obsidian-sync/service.ts",

@@ -541,7 +541,7 @@ export function buildAgentCapabilities(input: {
             generationRunId: input.item.runId,
             queryText: retrievalQuery,
             allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-          }).catch(() => ({ items: [], citations: [], memoryUseRunId: undefined }));
+          }).catch(() => ({ items: [], citations: [], memoryUseRunId: undefined, searchIncomplete: true }));
           if(recalled.items.length && (!recalled.memoryUseRunId || !input.registerKnowledgeSources)) throw new AgentContextAuthorizationError();
           if(recalled.memoryUseRunId && input.registerKnowledgeSources) await input.registerKnowledgeSources(recalled.memoryUseRunId, recalled.items.map(item => item.memoryUseItemId));
           input.onMemoryUse(
@@ -557,12 +557,12 @@ export function buildAgentCapabilities(input: {
           }));
           // Only live authorized ledger entries may supply evidence.
           return {
-            status: recalled.items.length ? "found" : recalled.memoryUseRunId ? "not_found" : "unavailable",
+            status: recalled.items.length ? "found" : recalled.searchIncomplete || !recalled.memoryUseRunId ? "unavailable" : "not_found",
             text: recalled.items.length
-              ? recalled.items.map((entry, index) => `[S:${sources[index]!.id}] ${sources[index]!.title}\n${entry.content || entry.abstract}`).join("\n\n")
-              : recalled.memoryUseRunId ? "授权知识库没有找到支持该问题的资料。" : "授权知识检索当前不可用。",
+              ? `${recalled.searchIncomplete ? "部分知识搜索失败，以下结果可能不完整。\n\n" : ""}${recalled.items.map((entry, index) => `[S:${sources[index]!.id}] ${sources[index]!.title}\n${entry.content || entry.abstract}`).join("\n\n")}`
+              : recalled.searchIncomplete || !recalled.memoryUseRunId ? "授权知识检索当前不可用。" : "授权知识库没有找到支持该问题的资料。",
+            details: { allowedCitationTitles: sources.map(source => source.title), ...(recalled.searchIncomplete ? { searchIncomplete: true } : {}) },
             sources,
-            details: { allowedCitationTitles: sources.map(source => source.title) },
           };
         },
       }

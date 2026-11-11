@@ -320,6 +320,7 @@ describe("governed memory recall fence", () => {
       items: [],
       citations: [],
       memoryUseRunId: "memory-use-run-1",
+      searchIncomplete: true,
     });
     expect(memoryUseMocks.markDegraded).toHaveBeenCalledWith(
       "memory-use-run-1",
@@ -346,6 +347,7 @@ describe("governed memory recall fence", () => {
     const recalled = await recall("web");
 
     expect(recalled.items.map((item) => item.uri)).toEqual([publicUri]);
+    expect(recalled.searchIncomplete).toBe(true);
     expect(memoryUseMocks.markDegraded).toHaveBeenCalledWith(
       "memory-use-run-1",
       "memory_recall_partial",

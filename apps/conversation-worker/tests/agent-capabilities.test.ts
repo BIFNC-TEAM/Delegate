@@ -186,7 +186,7 @@ describe("governed V2 host capabilities", () => {
   it("搜索全部失败但返回召回记录 ID 时的工具状态", async () => {
     const capabilities = await capabilitiesFixture();
     // 下游现有测试表明：所有搜索失败时仍可能返回这个形状。
-    mocks.recallContext.mockResolvedValueOnce({ items: [], citations: [], memoryUseRunId: "memory-use-run-1" });
+    mocks.recallContext.mockResolvedValueOnce({ items: [], citations: [], memoryUseRunId: "memory-use-run-1", searchIncomplete: true });
     const result = await capabilities.knowledge!.retrieve({ query: "服务价格是多少？", maximumResults: 4, context: toolContext, signal: new AbortController().signal });
     console.log("全部搜索失败后的工具状态:", result.status, result.text);
     expect(result.status).toBe("unavailable");

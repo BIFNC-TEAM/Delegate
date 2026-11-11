@@ -1,3 +1,4 @@
+import { KNOWLEDGE_TEXT_CHARACTERS, KNOWLEDGE_RESULT_BYTES, KNOWLEDGE_BATCH_BYTES } from "@delegate/domain/knowledge-limits";
 import { createRequire } from "node:module";
 
 export type Vault = { id: string; name: string; encrypted: boolean };
@@ -93,8 +94,8 @@ export async function unlock(token: string, id: string, password: string): Promi
   } catch (error) { return classify(error); }
 }
 
-const MAX_NOTE_BYTES = 2 * 1024 * 1024;
-const MAX_BATCH_BYTES = 40 * 1024 * 1024;
+const MAX_NOTE_BYTES = KNOWLEDGE_RESULT_BYTES;
+const MAX_BATCH_BYTES = KNOWLEDGE_BATCH_BYTES;
 function isNote(path: string) {
   return path.length <= 1024 && /\.(md|markdown)$/i.test(path) && !/[\\:]/.test(path) &&
     path.split("/").every(p => p && !p.startsWith(".") && !["node_modules", "$recycle.bin"].includes(p.toLowerCase()));
@@ -126,7 +127,7 @@ export async function readVault(
     // Check before upstream allocates the body buffer.
     if (message.op === "pull" && !result.deleted &&
       (!Number.isSafeInteger(result.size) || result.size! < 0 || result.size! > MAX_NOTE_BYTES + 128 ||
-       !Number.isSafeInteger(result.pieces) || result.pieces! < 0 || result.pieces! > 2)) throw new SyncError("LIMIT");
+       !Number.isSafeInteger(result.pieces) || result.pieces! < 0 || result.pieces! > Math.ceil((MAX_NOTE_BYTES + 128) / (2 * 1024 * 1024)))) throw new SyncError("LIMIT");
     return result;
   };
   client.onDisconnect = () => fail(new SyncError("NETWORK"));
@@ -153,7 +154,7 @@ export async function readVault(
       totalBytes += body.byteLength;
       if (body.byteLength > MAX_NOTE_BYTES || totalBytes > MAX_BATCH_BYTES) throw new SyncError("LIMIT");
       const text = new TextDecoder("utf-8", { fatal: true }).decode(body);
-      if (text.length > 400_000) throw new SyncError("LIMIT");
+      if (text.length > KNOWLEDGE_TEXT_CHARACTERS) throw new SyncError("LIMIT");
       files.push({ id: note!.id, path: note!.path, text });
     }
     return { notes, files };

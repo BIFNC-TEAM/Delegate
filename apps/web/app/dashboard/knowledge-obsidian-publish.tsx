@@ -77,7 +77,7 @@ export function KnowledgeObsidianPublish({ activeSlug, zh, disabled, onRead, onB
         for (const note of data.files) {
           const file = new File([note.text], note.path.split("/").pop()!, { type: "text/markdown" });
           bytes += file.size;
-          if (bytes > MAX_OBSIDIAN_SELECTION_BYTES) throw new Error(zh ? "所选正文超过 40 MB，请分批导入。" : "Selection exceeds 40 MB. Import a smaller batch.");
+          if (bytes > MAX_OBSIDIAN_SELECTION_BYTES) throw new Error(zh ? "所选正文超过 150 MB，请分批导入。" : "Selection exceeds 150 MB. Import a smaller batch.");
           files.push({ path: `${root}/${note.path}`, file, publishSource: { siteName: listing.site.name, sourceUrl: note.sourceUrl, originalPath: note.path, importedAt: data.importedAt } });
         }
       }

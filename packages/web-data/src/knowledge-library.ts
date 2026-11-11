@@ -1,3 +1,6 @@
+import { knowledgeIngestionContext, KnowledgeProcessingPending } from "./knowledge-ingestion-context";
+import { readKnowledgeResponse } from "./knowledge-response";
+import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS, knowledgeTextLimitMessage } from "@delegate/domain/knowledge-limits";
 import { knowledgeTitleSchema, knowledgeOriginalFileNameSchema } from "./knowledge-filenames";
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
@@ -33,8 +36,8 @@ import {
 } from "./knowledge-storage";
 import { indexKnowledgeText, removeKnowledgeTextIndex } from "./knowledge-vector";
 
-const MAX_FILE_BYTES = 15 * 1024 * 1024;
-const MAX_SOURCE_CHARACTERS = 400_000;
+const MAX_FILE_BYTES = KNOWLEDGE_FILE_BYTES;
+const MAX_SOURCE_CHARACTERS = KNOWLEDGE_TEXT_CHARACTERS;
 const URL_TIMEOUT_MS = 12_000;
 
 const assetKindSchema = z.enum([
@@ -510,6 +513,7 @@ export async function queueKnowledgeAssetProcessing(
 
   const scopedOwnerId = requireOwnerId(ownerId);
   const existing = await requireDatabaseAsset(scopedOwnerId, assetId);
+  await assertKnowledgeIngestionIdle(assetId);
   if (existing.status === KnowledgeAssetStatus.ARCHIVED) {
     throw new KnowledgeLibraryError(
       "Archived knowledge must be restored before reprocessing.",
@@ -898,6 +902,7 @@ export async function updateKnowledgeAsset(
   }
   const scopedOwnerId = requireOwnerId(ownerId);
   const existingAsset = await requireDatabaseAsset(scopedOwnerId, assetId);
+  await assertKnowledgeIngestionIdle(assetId);
   const previousLinks = parsed.representativeLinks
     ? await prisma.knowledgeAssetRepresentative.findMany({
         where: { assetId, enabled: true },
@@ -965,7 +970,8 @@ export async function processKnowledgeAsset(
   if (asset.status === KnowledgeAssetStatus.ARCHIVED) {
     throw new KnowledgeLibraryError("Archived knowledge must be restored before reprocessing.", 409);
   }
-  await prisma.knowledgeAsset.update({
+  const resumed = knowledgeIngestionContext.getStore()?.checkpoint.extracted === "yes" && Boolean(asset.extractedText);
+  if (!resumed) await prisma.knowledgeAsset.update({
     where: { id: assetId },
     data: {
       status: KnowledgeAssetStatus.PROCESSING,
@@ -975,7 +981,9 @@ export async function processKnowledgeAsset(
     },
   });
   try {
-    const extraction = await resolveAssetText({
+    const extraction = knowledgeIngestionContext.getStore()?.checkpoint.extracted === "yes" && asset.extractedText
+      ? { text: asset.extractedText, backend: "plain_text" as const }
+      : await resolveAssetText({
       kind: fromAssetKind(asset.kind),
       sourceText: asset.sourceText,
       sourceUrl: asset.sourceUrl,
@@ -995,7 +1003,7 @@ export async function processKnowledgeAsset(
       where: { assetId, enabled: true, reviewStatus: KnowledgeAssetReviewStatus.APPROVED },
       include: { representative: { select: { slug: true } } },
     });
-    await prisma.knowledgeAsset.update({
+    if (!resumed) await prisma.knowledgeAsset.update({
       where: { id: assetId },
       data: {
         extractedText: normalized,
@@ -1011,6 +1019,7 @@ export async function processKnowledgeAsset(
         },
       },
     });
+    await knowledgeIngestionContext.getStore()?.save("extracted", "yes");
     const vector = await indexKnowledgeText({
       ownerId: scopedOwnerId,
       assetId,
@@ -1022,6 +1031,7 @@ export async function processKnowledgeAsset(
         ? { staleRepresentativeSlugs: options.staleRepresentativeSlugs }
         : {}),
     });
+    await knowledgeIngestionContext.getStore()?.save("finalizing", "yes");
     await prisma.knowledgeAsset.update({
       where: { id: assetId },
       data: {
@@ -1048,6 +1058,7 @@ export async function processKnowledgeAsset(
       },
     });
   } catch (error) {
+    if (error instanceof KnowledgeProcessingPending) throw error;
     const message = error instanceof Error ? error.message : "知识内容处理失败。";
     await prisma.knowledgeAsset.update({
       where: { id: assetId },
@@ -1095,6 +1106,7 @@ export async function archiveKnowledgeAsset(
   }
   const scopedOwnerId = requireOwnerId(ownerId);
   const asset = await requireDatabaseAsset(scopedOwnerId, assetId);
+  await assertKnowledgeIngestionIdle(assetId);
   const links = await prisma.knowledgeAssetRepresentative.findMany({
     where: { assetId, enabled: true },
     include: { representative: { select: { slug: true } } },
@@ -1157,6 +1169,7 @@ export async function deleteKnowledgeAsset(
   }
   const scopedOwnerId = requireOwnerId(ownerId);
   const asset = await requireDatabaseAsset(scopedOwnerId, assetId);
+  await assertKnowledgeIngestionIdle(assetId);
   if (asset.status !== KnowledgeAssetStatus.ARCHIVED) {
     throw new KnowledgeLibraryError("Archive the knowledge asset before deleting it permanently.", 409);
   }
@@ -1175,7 +1188,10 @@ export async function deleteKnowledgeAsset(
   if (asset.sourceObjectBucket && asset.sourceObjectKey) {
     await deleteKnowledgeSource({ bucket: asset.sourceObjectBucket, objectKey: asset.sourceObjectKey });
   }
-  await prisma.knowledgeAsset.delete({ where: { id: assetId } });
+  await prisma.$transaction([
+    prisma.knowledgeIngestionJob.deleteMany({ where: { assetId } }),
+    prisma.knowledgeAsset.delete({ where: { id: assetId } }),
+  ]);
 }
 
 export async function extractKnowledgeFile(input: {
@@ -1188,7 +1204,7 @@ export async function extractKnowledgeFile(input: {
   extractionBackend?: "mineru" | "pdfjs" | "pdfjs_fallback" | "docx" | "docx_fallback";
 }> {
   if (input.bytes.byteLength > MAX_FILE_BYTES) {
-    throw new KnowledgeLibraryError("文件不能超过 15 MB。", 413);
+    throw new KnowledgeLibraryError("文件不能超过 150 MB。", 413);
   }
   const kind = detectKnowledgeFileKind(input.fileName);
   const extension = input.fileName.toLowerCase().split(".").pop() ?? "";
@@ -1209,13 +1225,14 @@ export async function extractKnowledgeFile(input: {
         if (minerU.text.length > MAX_SOURCE_CHARACTERS) {
           throw new MinerUError(
             "mineru_invalid_response",
-            "MinerU 提取正文超过 400,000 字符，请拆分后导入。",
+            "MinerU 提取正文超过 2,000,000 字符，请拆分后导入。",
             false,
           );
         }
         return { kind, text, extractionBackend: "mineru" };
       }
     } catch (error) {
+      if (error instanceof KnowledgeProcessingPending || (error instanceof KnowledgeLibraryError && error.statusCode === 413)) throw error;
       minerUError = error instanceof MinerUError
         ? error
         : new MinerUError(
@@ -1242,6 +1259,7 @@ export async function extractKnowledgeFile(input: {
           };
         }
       } catch (error) {
+        if (error instanceof KnowledgeLibraryError && error.statusCode === 413) throw error;
         localError = error;
       }
     }
@@ -1260,7 +1278,7 @@ export async function extractKnowledgeFile(input: {
   if (["txt", "md", "markdown"].includes(extension)) {
     return {
       kind: extension === "txt" ? "txt" : "markdown",
-      text: new TextDecoder("utf-8", { fatal: false }).decode(input.bytes),
+      text: normalizeExtractedText(new TextDecoder("utf-8", { fatal: false }).decode(input.bytes)),
     };
   }
   throw new KnowledgeLibraryError(`不支持 ${kind} 类型的知识文件。`, 422);
@@ -1289,6 +1307,7 @@ async function extractPdfTextLocally(bytes: Uint8Array): Promise<string> {
       result.pages.map((page) => page.text).join("\n\n"),
     );
   } catch (error) {
+    if (error instanceof KnowledgeLibraryError) throw error;
     throw new KnowledgeLibraryError(
       error instanceof Error ? `PDF 解析失败：${error.message}` : "PDF 解析失败。",
       422,
@@ -1445,8 +1464,8 @@ async function fetchKnowledgeUrl(rawUrl: string): Promise<string> {
       422,
     );
     const contentLength = Number(response.headers.get("content-length") || 0);
-    if (contentLength > MAX_FILE_BYTES) throw new KnowledgeLibraryError("网址内容超过 15 MB 限制。", 413);
-    const body = await response.text();
+    if (contentLength > MAX_FILE_BYTES) throw new KnowledgeLibraryError("网址内容超过 150 MB 限制。", 413);
+    const body = await readKnowledgeResponse(response, MAX_FILE_BYTES);
     if (body.length > MAX_SOURCE_CHARACTERS * 2) {
       throw new KnowledgeLibraryError("网址正文过长，请拆分后导入。", 413);
     }
@@ -1536,7 +1555,10 @@ function decodeXmlText(xml: string): string {
 }
 
 function normalizeExtractedText(text: string): string {
-  return text.replace(/\r\n/g, "\n").replace(/[\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, MAX_SOURCE_CHARACTERS);
+  if (text.length > MAX_SOURCE_CHARACTERS) {
+    throw new KnowledgeLibraryError(knowledgeTextLimitMessage(text.length), 413);
+  }
+  return text.replace(/\r\n/g, "\n").replace(/[\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function normalizeTags(tags: string[]): string[] {
@@ -1906,4 +1928,11 @@ function makeSeedAsset(input: {
       { id: `${input.id}_complete`, stage: "complete", level: "info", message: "知识资产处理完成，可供已授权代表使用。", metadata: null, createdAt },
     ],
   };
+}
+
+async function assertKnowledgeIngestionIdle(assetId: string): Promise<void> {
+  const job = await prisma.knowledgeIngestionJob.findUnique({ where: { assetId }, select: { status: true } });
+  if (job && ["pending", "running"].includes(job.status)) {
+    throw new KnowledgeLibraryError("该文件仍在后台处理中，请处理完成后再修改或归档。", 409);
+  }
 }

@@ -1,5 +1,8 @@
 "use client";
 
+import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS } from "@delegate/domain/knowledge-limits";
+
+
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import type {
@@ -37,6 +40,7 @@ type UploadQueueItem = {
   status: UploadQueueStatus;
   progress: number;
   assetId?: string;
+  replacement?: boolean;
   message?: string;
 };
 type FileUploadResponse = {
@@ -49,10 +53,10 @@ type FileUploadResponse = {
 };
 
 const MAX_BATCH_FILES = 20;
-const MAX_FILE_BYTES = 15 * 1024 * 1024;
-const UPLOAD_CONCURRENCY = 3;
-const PROCESSING_POLL_INTERVAL_MS = 1_200;
-const PROCESSING_POLL_ATTEMPTS = 550;
+const MAX_FILE_BYTES = KNOWLEDGE_FILE_BYTES;
+const UPLOAD_CONCURRENCY = 1;
+const PROCESSING_POLL_INTERVAL_MS = 3_000;
+const PROCESSING_POLL_ATTEMPTS = 1_200;
 
 const visibilityOptions: Array<{ value: Visibility; zh: string; en: string; detailZh: string; detailEn: string }> = [
   { value: "owner_only", zh: "仅 Owner", en: "Owner only", detailZh: "只有工作区所有者可以使用", detailEn: "Only the workspace owner can use it" },
@@ -232,7 +236,7 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
             </tbody>
           </table>
         </div>
-        <div className="knowledge-panel-footer"><span>{zh ? `显示 ${assets.length} 条知识` : `${assets.length} knowledge assets`}</span><small>{zh ? "文件最大 15 MB · 支持 PDF / Office / 图片 / TXT / MD" : "15 MB max · PDF / Office / images / TXT / MD"}</small></div>
+        <div className="knowledge-panel-footer"><span>{zh ? `显示 ${assets.length} 条知识` : `${assets.length} knowledge assets`}</span><small>{zh ? "文件最大 150 MB · 支持 PDF / Office / 图片 / TXT / MD" : "150 MB max · PDF / Office / images / TXT / MD"}</small></div>
       </section>
 
       </div>
@@ -348,15 +352,15 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
     if (rejected.length) setError(rejected.slice(0, 3).join("\n"));
   }
 
-  async function watchProcessing(itemId: string, assetId: string) {
+  async function watchProcessing(itemId: string, assetId: string, replacement = false) {
     let transientFailures = 0;
     for (let attempt = 0; attempt < PROCESSING_POLL_ATTEMPTS; attempt += 1) {
       await waitFor(PROCESSING_POLL_INTERVAL_MS);
       try {
-        const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets/${assetId}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+        const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets/${assetId}?progress=true`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
         const { asset } = await readResponse<{ asset: KnowledgeAssetRecord }>(response);
         transientFailures = 0;
-        onCreated(asset);
+        if (!replacement || asset.status === "ready") onCreated(asset);
         if (asset.status === "ready") {
           updateQueueItem(itemId, { status: "completed", progress: 100, assetId, message: zh ? "上传和索引均已完成" : "Uploaded and indexed" });
           return;
@@ -375,12 +379,12 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       } catch (pollError) {
         transientFailures += 1;
         if (transientFailures >= 4) {
-          updateQueueItem(itemId, { status: "failed", progress: 100, assetId, message: messageOf(pollError, zh ? "无法读取处理进度" : "Unable to read processing progress") });
+          updateQueueItem(itemId, { status: "processing", assetId, message: zh ? "暂时无法获取进度，可稍后在知识列表查看。" : "Progress temporarily unavailable. Check the library later." });
           return;
         }
       }
     }
-    updateQueueItem(itemId, { status: "failed", progress: 100, assetId, message: zh ? "处理超时，可稍后重试" : "Processing timed out; retry later" });
+    updateQueueItem(itemId, { status: "processing", assetId, message: zh ? "后台继续处理，可稍后在知识列表查看。" : "Processing continues in the background. Check the library later." });
   }
 
   async function uploadQueueItem(item: UploadQueueItem, policy: UploadConflictPolicy) {
@@ -399,7 +403,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       const payload = await uploadKnowledgeFile(activeSlug, form, (progress) => {
         updateQueueItem(item.id, { status: "uploading", progress, message: zh ? `正在上传 ${progress}%` : `Uploading ${progress}%` });
       });
-      onCreated(payload.asset);
+      if (payload.upload.outcome !== "replaced") onCreated(payload.asset);
       updateQueueItem(item.id, { displayName: payload.asset.originalFileName ?? item.file.name });
       if (payload.upload.outcome === "skipped_duplicate") {
         updateQueueItem(item.id, { status: "skipped", progress: 100, assetId: payload.asset.id, message: zh ? "内容完全相同，已跳过" : "Identical content skipped" });
@@ -409,13 +413,14 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
         status: "processing",
         progress: 82,
         assetId: payload.asset.id,
+        replacement: payload.upload.outcome === "replaced",
         message: payload.upload.outcome === "replaced"
-          ? (zh ? "已覆盖源文件，正在重建索引" : "Source replaced; rebuilding index")
+          ? (zh ? "新文件已上传，正在检查并替换" : "New file uploaded; checking and replacing")
           : (zh ? "上传完成，正在处理知识" : "Upload complete; processing knowledge"),
       });
       // Vaults can contain many notes: keep their parsing/indexing bounded too.
-      if (item.obsidianImport || item.notionImport) await watchProcessing(item.id, payload.asset.id);
-      else void watchProcessing(item.id, payload.asset.id);
+      if (item.obsidianImport || item.notionImport) await watchProcessing(item.id, payload.asset.id, payload.upload.outcome === "replaced");
+      else void watchProcessing(item.id, payload.asset.id, payload.upload.outcome === "replaced");
     } catch (uploadError) {
       updateQueueItem(item.id, { status: "failed", progress: 100, message: messageOf(uploadError, zh ? "上传失败" : "Upload failed") });
     }
@@ -434,8 +439,8 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   }
 
   async function retryQueueItem(item: UploadQueueItem) {
-    if (!item.assetId) {
-      await uploadQueueItem(item, conflictPolicy);
+    if (!item.assetId || item.replacement) {
+      await uploadQueueItem(item, item.replacement ? "replace_existing" : conflictPolicy);
       return;
     }
     updateQueueItem(item.id, { status: "processing", progress: 82, message: zh ? "正在重新解析和索引" : "Reprocessing and indexing" });
@@ -526,7 +531,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
             <input accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.txt,.md,.markdown" multiple onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} ref={fileRef} type="file" />
             <span>{queue.length ? String(queue.length).padStart(2, "0") : "↑"}</span>
             <strong>{queue.length ? (zh ? `${queue.length} 个文件已加入上传队列` : `${queue.length} files in the upload queue`) : (zh ? "拖入多个文件，或点击选择" : "Drop files, or click to browse")}</strong>
-            <small>{queue.length ? `${formatBytes(queue.reduce((total, item) => total + item.file.size, 0))} · ${zh ? `单批最多 ${MAX_BATCH_FILES} 个` : `${MAX_BATCH_FILES} files max per batch`}` : (zh ? "PDF、Office、PNG/JPG、TXT、Markdown · 单文件最大 15 MB" : "PDF, Office, PNG/JPG, TXT, Markdown · 15 MB per file")}</small>
+            <small>{queue.length ? `${formatBytes(queue.reduce((total, item) => total + item.file.size, 0))} · ${zh ? `单批最多 ${MAX_BATCH_FILES} 个` : `${MAX_BATCH_FILES} files max per batch`}` : (zh ? "PDF、Office、PNG/JPG、TXT、Markdown · 单文件最大 150 MB" : "PDF, Office, PNG/JPG, TXT, Markdown · 150 MB per file")}</small>
           </div>
           <label className="knowledge-conflict-policy"><div><span>{zh ? "重复文件处理" : "Duplicate handling"}</span><small>{conflictPolicyDescription(conflictPolicy, zh)}</small></div><select disabled={submitting || isUploading || preparing} onChange={(event) => setConflictPolicy(event.target.value as UploadConflictPolicy)} value={conflictPolicy}><option value="skip_duplicates">{zh ? "跳过完全重复内容" : "Skip identical content"}</option><option value="keep_both">{zh ? "始终保留为新副本" : "Always keep a new copy"}</option><option value="replace_existing">{zh ? "覆盖已有文件" : "Replace existing file"}</option></select></label>
           </> : null}
@@ -550,12 +555,12 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
           <label className="knowledge-form-field"><span>{zh ? "来源网址" : "Source URL"}<b>*</b></span><input onChange={(event) => { setSourceUrl(event.target.value); setCapture(null); setCaptureConfirmed(false); }} placeholder="https://example.com/about" required type="url" value={sourceUrl} /><small>{zh ? "浏览器采集支持你有权访问的公网、内网及登录后页面。" : "Browser capture supports public, internal, and signed-in pages you may access."}</small></label>
           {!repairAsset ? <fieldset className="knowledge-url-method"><legend>{zh ? "读取方式" : "Capture method"}</legend><label><input type="radio" name="url-method" checked={urlMethod === "browser"} onChange={() => setUrlMethod("browser")} />{zh ? "浏览器采集（支持登录与人工验证）" : "Browser capture (sign-in and manual verification)"}</label><label><input type="radio" name="url-method" checked={urlMethod === "direct"} onChange={() => setUrlMethod("direct")} />{zh ? "直接读取公开网页" : "Fetch public page directly"}</label></fieldset> : <p>{zh ? `为“${repairAsset.title}”补充正文，保留原知识的标签、权限和代表关联。` : `Replace content for “${repairAsset.title}”, keeping its tags, access, and bindings.`}</p>}
           {urlMethod === "browser" ? <KnowledgeBrowserCaptureForm zh={zh} sourceUrl={sourceUrl} capture={capture} confirmed={captureConfirmed} onConfirmed={setCaptureConfirmed} disabled={submitting} onCapture={(next) => { setCapture(next); if (next) { setSourceUrl(next.sourceUrl); if (!title.trim()) setTitle(next.title); } }} /> : <p className="knowledge-url-hint">{zh ? "直接读取不使用浏览器登录状态。遇到内网限制、登录或验证码时，请切换浏览器采集。" : "Direct fetch does not use your browser session. Use browser capture for internal pages, sign-in, or verification."}</p>}
-        </> : <label className="knowledge-form-field"><span>{zh ? "知识正文" : "Knowledge text"}<b>*</b></span><textarea minLength={20} onChange={(event) => setSourceText(event.target.value)} placeholder={zh ? "粘贴 FAQ、服务说明、政策、品牌信息或其他可复用知识…" : "Paste FAQs, service guidance, policies, brand context, or other reusable knowledge…"} required rows={8} value={sourceText} /><small>{sourceText.length.toLocaleString()} / 400,000</small></label>}
+        </> : <label className="knowledge-form-field"><span>{zh ? "知识正文" : "Knowledge text"}<b>*</b></span><textarea minLength={20} onChange={(event) => setSourceText(event.target.value)} placeholder={zh ? "粘贴 FAQ、服务说明、政策、品牌信息或其他可复用知识…" : "Paste FAQs, service guidance, policies, brand context, or other reusable knowledge…"} required rows={8} value={sourceText} /><small aria-live="polite">{sourceText.length.toLocaleString()} / 2,000,000{sourceText.length > KNOWLEDGE_TEXT_CHARACTERS ? (zh ? " · 正文过长，请拆分后导入。" : " · Split this text before importing.") : ""}</small></label>}
         <div hidden={Boolean(repairAsset)} className="knowledge-form-grid"><label className="knowledge-form-field"><span>{zh ? "知识标题" : "Title"}{!fileMode ? <b>*</b> : null}</span><input disabled={mode === "obsidian" || (mode === "file" && queue.length > 1)} maxLength={180} onChange={(event) => setTitle(event.target.value)} placeholder={fileMode ? (queue.length > 1 ? (zh ? "批量上传使用各自文件名" : "Batch uploads use each filename") : (zh ? "不填则使用文件名" : "Defaults to filename")) : (zh ? "例如：产品与服务 FAQ" : "e.g. Product and service FAQ")} required={!fileMode} value={title} />{fileMode && queue.length > 1 ? <small>{zh ? "批量上传时，每条知识自动使用对应文件名。" : "Each batch item uses its own filename as the title."}</small> : null}</label><label className="knowledge-form-field"><span>{zh ? "手工标签" : "Tags"}</span><input onChange={(event) => setTags(event.target.value)} placeholder={zh ? "产品, FAQ, 价格" : "Product, FAQ, pricing"} value={tags} /><small>{zh ? "用逗号分隔，最多 20 个" : "Comma separated, up to 20"}</small></label></div>
         <fieldset disabled={Boolean(repairAsset)} className="knowledge-visibility-options"><legend>{zh ? "可见范围" : "Visibility"}<b>*</b></legend>{visibilityOptions.map((option) => <label className={visibility === option.value ? "is-selected" : undefined} key={option.value}><input checked={visibility === option.value} name="visibility" onChange={() => setVisibility(option.value)} type="radio" /><span>{visibilityIcon(option.value)}</span><div><strong>{zh ? option.zh : option.en}</strong><small>{zh ? option.detailZh : option.detailEn}</small></div><i /></label>)}</fieldset>
         {!repairAsset && (visibility === "selected_representatives" || visibility === "public_material") ? <fieldset className="knowledge-representative-picker"><legend>{zh ? "关联对外代理" : "Linked representatives"}{visibility === "selected_representatives" ? <b>*</b> : null}</legend>{representatives.map((representative) => <label key={representative.id}><input checked={linkedIds.includes(representative.id)} onChange={(event) => setLinkedIds((current) => event.target.checked ? [...current, representative.id] : current.filter((id) => id !== representative.id))} type="checkbox" /><span>{representative.name.slice(0, 1)}</span><div><strong>{representative.name}</strong><small>/{representative.slug}</small></div></label>)}{!representatives.length ? <p>{zh ? "当前工作区还没有可关联的代表。" : "No representatives are available in this workspace."}</p> : null}</fieldset> : null}
         {error ? <div className="knowledge-form-error">! {error}</div> : null}
-        <footer><button disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">{fileMode && completedCount ? (zh ? "完成" : "Done") : (zh ? "取消" : "Cancel")}</button><button className="is-primary" disabled={submitting || preparing || (fileMode && !queuedCount) || (!repairAsset && visibility === "selected_representatives" && !linkedIds.length) || (mode === "url" && urlMethod === "browser" && (!capture || capture.text.trim().length < 20 || !captureConfirmed))} type="submit">{preparing ? <><i className="knowledge-spinner" />{zh ? "正在准备…" : "Preparing…"}</> : submitting ? <><i className="knowledge-spinner" />{mode === "obsidian" && !isUploading ? (zh ? "正在处理知识…" : "Processing knowledge…") : (zh ? "正在上传…" : "Uploading…")}</> : fileMode ? <>{zh ? `开始上传${queuedCount ? ` (${queuedCount})` : ""}` : `Start upload${queuedCount ? ` (${queuedCount})` : ""}`}<span>→</span></> : <>{zh ? "开始处理" : "Start processing"}<span>→</span></>}</button></footer>
+        <footer><button disabled={submitting || isUploading || preparing} onClick={closeDialog} type="button">{fileMode && completedCount ? (zh ? "完成" : "Done") : (zh ? "取消" : "Cancel")}</button><button className="is-primary" disabled={submitting || preparing || (mode === "text" && sourceText.length > KNOWLEDGE_TEXT_CHARACTERS) || (fileMode && !queuedCount) || (!repairAsset && visibility === "selected_representatives" && !linkedIds.length) || (mode === "url" && urlMethod === "browser" && (!capture || capture.text.trim().length < 20 || !captureConfirmed))} type="submit">{preparing ? <><i className="knowledge-spinner" />{zh ? "正在准备…" : "Preparing…"}</> : submitting ? <><i className="knowledge-spinner" />{mode === "obsidian" && !isUploading ? (zh ? "正在处理知识…" : "Processing knowledge…") : (zh ? "正在上传…" : "Uploading…")}</> : fileMode ? <>{zh ? `开始上传${queuedCount ? ` (${queuedCount})` : ""}` : `Start upload${queuedCount ? ` (${queuedCount})` : ""}`}<span>→</span></> : <>{zh ? "开始处理" : "Start processing"}<span>→</span></>}</button></footer>
       </form>
     </section>
     {previewItem ? <div className="knowledge-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setPreviewingId(null); }}>
@@ -644,7 +649,7 @@ function validateUploadFile(file: File, zh: boolean) {
   const extension = file.name.split(".").pop()?.toLowerCase();
   if (!extension || !["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "txt", "md", "markdown"].includes(extension)) return zh ? "不支持该文件类型" : "Unsupported file type";
   if (!file.size) return zh ? "文件内容为空" : "The file is empty";
-  if (file.size > MAX_FILE_BYTES) return zh ? "文件超过 15 MB" : "File exceeds 15 MB";
+  if (file.size > MAX_FILE_BYTES) return zh ? "文件超过 150 MB" : "File exceeds 150 MB";
   return null;
 }
 function uploadStatusLabel(status: UploadQueueStatus, zh: boolean) {

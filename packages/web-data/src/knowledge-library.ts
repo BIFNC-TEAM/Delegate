@@ -1,6 +1,6 @@
 import { knowledgeIngestionContext, KnowledgeProcessingPending } from "./knowledge-ingestion-context";
 import { readKnowledgeResponse } from "./knowledge-response";
-import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS, knowledgeTextLimitMessage } from "@delegate/domain/knowledge-limits";
+import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS, knowledgeTextLimitMessage, requiresKnowledgeSourceChange } from "@delegate/domain/knowledge-limits";
 import { knowledgeTitleSchema, knowledgeOriginalFileNameSchema } from "./knowledge-filenames";
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
@@ -493,6 +493,7 @@ export async function queueKnowledgeAssetProcessing(
 ): Promise<{ asset: KnowledgeAssetRecord; queued: boolean }> {
   if (shouldUseDemoKnowledge(ownerId)) {
     const asset = requireDemoAsset(assetId);
+    if (requiresKnowledgeSourceChange(asset.processingError)) throw new KnowledgeLibraryError(asset.processingError!, 422);
     if (asset.status === "archived") {
       throw new KnowledgeLibraryError(
         "Archived knowledge must be restored before reprocessing.",
@@ -513,6 +514,7 @@ export async function queueKnowledgeAssetProcessing(
 
   const scopedOwnerId = requireOwnerId(ownerId);
   const existing = await requireDatabaseAsset(scopedOwnerId, assetId);
+  if (requiresKnowledgeSourceChange(existing.processingError)) throw new KnowledgeLibraryError(existing.processingError!, 422);
   await assertKnowledgeIngestionIdle(assetId);
   if (existing.status === KnowledgeAssetStatus.ARCHIVED) {
     throw new KnowledgeLibraryError(

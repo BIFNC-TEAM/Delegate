@@ -1,6 +1,6 @@
 "use client";
 
-import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS } from "@delegate/domain/knowledge-limits";
+import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS, requiresKnowledgeSourceChange } from "@delegate/domain/knowledge-limits";
 
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -439,6 +439,7 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   }
 
   async function retryQueueItem(item: UploadQueueItem) {
+    if (requiresKnowledgeSourceChange(item.message)) return;
     if (!item.assetId || item.replacement) {
       await uploadQueueItem(item, item.replacement ? "replace_existing" : conflictPolicy);
       return;
@@ -462,18 +463,6 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
   async function runWithRetry(item: UploadQueueItem) {
     setSubmitting(true);
     try { await retryQueueItem(item); } finally { setSubmitting(false); }
-  }
-
-  async function retryFailedItems() {
-    const failedItems = queue.filter((item) => item.status === "failed");
-    if (!failedItems.length) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await runWithConcurrency(failedItems, UPLOAD_CONCURRENCY, retryQueueItem);
-    } finally {
-      setSubmitting(false);
-    }
   }
 
   async function submit(event: FormEvent) {
@@ -544,12 +533,11 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
               <div className="knowledge-upload-item-main"><header><strong title={item.obsidianImport?.sourcePath ?? item.file.name}>{item.displayName ?? item.file.name}</strong><span>{uploadStatusLabel(item.status, zh)}</span></header><small>{formatBytes(item.file.size)}{item.message ? ` · ${item.message}` : ""}</small><div className="knowledge-upload-progress"><i style={{ width: `${item.progress}%` }} /></div></div>
               <div className="knowledge-upload-actions">
                 {item.previewText !== undefined ? <button type="button" disabled={preparing} aria-label={zh ? `预览 ${item.file.name}` : `Preview ${item.file.name}`} aria-haspopup="dialog" onClick={() => setPreviewingId(item.id)}>{zh ? "预览" : "Preview"}</button> : null}
-                {item.status === "failed" ? <button disabled={submitting || preparing} onClick={() => void runWithRetry(item)} type="button">↻ {item.assetId ? (zh ? "重新处理" : "Reprocess") : (zh ? "重传" : "Retry")}</button> : null}
+                {item.status === "failed" && !requiresKnowledgeSourceChange(item.message) ? <button disabled={submitting || preparing} onClick={() => void runWithRetry(item)} type="button">↻ {item.assetId ? (zh ? "重新处理" : "Reprocess") : (zh ? "重传" : "Retry")}</button> : null}
                 {item.status === "skipped" ? <button onClick={() => void runUploads([item], "replace_existing")} type="button">↻ {zh ? "覆盖重传" : "Replace"}</button> : null}
                 {!(["uploading", "processing"] as UploadQueueStatus[]).includes(item.status) ? <button aria-label={zh ? `移除 ${item.file.name}` : `Remove ${item.file.name}`} className="is-remove" disabled={submitting || preparing} onClick={() => removeQueueItem(item)} type="button">×</button> : null}
               </div>
             </article>)}</div>
-            {failedCount ? <button className="knowledge-retry-all" disabled={submitting} onClick={() => void retryFailedItems()} type="button">↻ {zh ? `重试 ${failedCount} 个失败项` : `Retry ${failedCount} failed item${failedCount === 1 ? "" : "s"}`}</button> : null}
           </section> : null}
         </> : mode === "url" ? <>
           <label className="knowledge-form-field"><span>{zh ? "来源网址" : "Source URL"}<b>*</b></span><input onChange={(event) => { setSourceUrl(event.target.value); setCapture(null); setCaptureConfirmed(false); }} placeholder="https://example.com/about" required type="url" value={sourceUrl} /><small>{zh ? "浏览器采集支持你有权访问的公网、内网及登录后页面。" : "Browser capture supports public, internal, and signed-in pages you may access."}</small></label>
@@ -603,12 +591,12 @@ function KnowledgeDetailDrawer({ activeSlug, asset, locale, representatives, onC
     <header><div className={`knowledge-detail-icon is-${asset.kind}`}>{fileMark(asset.kind)}</div><div><span>{kindLabel(asset.kind)} · {asset.originalFileName ?? (asset.kind === "url" ? "URL" : (zh ? "手工文本" : "Manual text"))}</span><h2>{asset.title}</h2><StatusBadge status={asset.status} zh={zh} /></div><button aria-label={zh ? "关闭" : "Close"} onClick={onClose} type="button">×</button></header>
     <nav>{(["overview", "content", "access", "logs"] as const).map((item) => <button className={tab === item ? "is-active" : undefined} key={item} onClick={() => setTab(item)} type="button">{item === "overview" ? (zh ? "概览" : "Overview") : item === "content" ? (zh ? "提取正文" : "Extracted text") : item === "access" ? (zh ? "权限与代表" : "Access & reps") : (zh ? "处理日志" : "Processing logs")}{item === "logs" ? <span>{asset.processingLogs.length}</span> : null}</button>)}</nav>
     <div className="knowledge-detail-body">
-      {tab === "overview" ? <><section className="knowledge-summary-card"><span>{zh ? "自动摘要" : "Generated summary"}</span><p>{asset.summary ?? (zh ? "处理完成后会在这里生成摘要。" : "A summary will appear after processing.")}</p></section>{asset.processingError ? <div className="knowledge-processing-error"><strong>{zh ? "处理失败" : "Processing failed"}</strong><p>{asset.processingError}</p><button onClick={() => void onAction(asset.id, "reprocess")} type="button">↻ {zh ? "重新处理" : "Reprocess"}</button>{asset.kind === "url" && asset.status === "failed" ? <button onClick={onBrowserCapture} type="button">{zh ? "浏览器采集" : "Capture in browser"} ↗</button> : null}</div> : null}<DetailFacts asset={asset} locale={locale} /><section className="knowledge-tag-section"><div><span>{zh ? "手工标签" : "Manual tags"}</span>{asset.tags.length ? asset.tags.map((tag) => <em key={tag}>{tag}</em>) : <small>{zh ? "暂无" : "None"}</small>}</div><div><span>{zh ? "自动标签" : "Generated tags"}</span>{asset.autoTags.length ? asset.autoTags.map((tag) => <em className="is-auto" key={tag}>✦ {tag}</em>) : <small>{zh ? "暂无" : "None"}</small>}</div></section><section className="knowledge-linked-summary"><div><span>{zh ? "正在使用这条知识" : "Representatives using this"}</span><strong>{asset.representativeLinks.filter((link) => link.enabled).length}</strong></div><RepresentativeStack links={asset.representativeLinks} zh={zh} /><button onClick={() => setTab("access")} type="button">{zh ? "管理权限" : "Manage access"} →</button></section></> : null}
+      {tab === "overview" ? <><section className="knowledge-summary-card"><span>{zh ? "自动摘要" : "Generated summary"}</span><p>{asset.summary ?? (zh ? "处理完成后会在这里生成摘要。" : "A summary will appear after processing.")}</p></section>{asset.processingError ? <div className="knowledge-processing-error"><strong>{zh ? "处理失败" : "Processing failed"}</strong><p>{asset.processingError}</p>{!requiresKnowledgeSourceChange(asset.processingError) ? <button onClick={() => void onAction(asset.id, "reprocess")} type="button">↻ {zh ? "重新处理" : "Reprocess"}</button> : null}{asset.kind === "url" && asset.status === "failed" ? <button onClick={onBrowserCapture} type="button">{zh ? "浏览器采集" : "Capture in browser"} ↗</button> : null}</div> : null}<DetailFacts asset={asset} locale={locale} /><section className="knowledge-tag-section"><div><span>{zh ? "手工标签" : "Manual tags"}</span>{asset.tags.length ? asset.tags.map((tag) => <em key={tag}>{tag}</em>) : <small>{zh ? "暂无" : "None"}</small>}</div><div><span>{zh ? "自动标签" : "Generated tags"}</span>{asset.autoTags.length ? asset.autoTags.map((tag) => <em className="is-auto" key={tag}>✦ {tag}</em>) : <small>{zh ? "暂无" : "None"}</small>}</div></section><section className="knowledge-linked-summary"><div><span>{zh ? "正在使用这条知识" : "Representatives using this"}</span><strong>{asset.representativeLinks.filter((link) => link.enabled).length}</strong></div><RepresentativeStack links={asset.representativeLinks} zh={zh} /><button onClick={() => setTab("access")} type="button">{zh ? "管理权限" : "Manage access"} →</button></section></> : null}
       {tab === "content" ? <section className="knowledge-extracted"><header><div><span>{zh ? "规范化正文" : "Normalized content"}</span><small>{(asset.extractedText?.length ?? 0).toLocaleString()} {zh ? "字符" : "characters"}</small></div>{asset.sourceUrl ? <a href={asset.sourceUrl} rel="noreferrer" target="_blank">{zh ? "打开来源" : "Open source"} ↗</a> : null}</header><pre>{asset.extractedText ?? (zh ? "暂无可显示的正文。" : "No extracted content available.")}</pre><footer><span>SHA-256</span><code>{asset.checksum ?? "—"}</code></footer></section> : null}
       {tab === "access" ? <div className="knowledge-access-editor"><label className="knowledge-form-field"><span>{zh ? "知识标题" : "Title"}</span><input maxLength={180} onChange={(event) => setTitle(event.target.value)} value={title} /></label><label className="knowledge-form-field"><span>{zh ? "手工标签" : "Manual tags"}</span><input onChange={(event) => setTags(event.target.value)} value={tags} /></label><fieldset className="knowledge-visibility-options is-compact"><legend>{zh ? "可见范围" : "Visibility"}</legend>{visibilityOptions.map((option) => <label className={visibility === option.value ? "is-selected" : undefined} key={option.value}><input checked={visibility === option.value} name="detail-visibility" onChange={() => setVisibility(option.value)} type="radio" /><span>{visibilityIcon(option.value)}</span><div><strong>{zh ? option.zh : option.en}</strong><small>{zh ? option.detailZh : option.detailEn}</small></div><i /></label>)}</fieldset><fieldset className="knowledge-representative-picker"><legend>{zh ? "关联代表" : "Linked representatives"}</legend>{representatives.map((representative) => <label key={representative.id}><input checked={linkedIds.includes(representative.id)} onChange={(event) => setLinkedIds((current) => event.target.checked ? [...current, representative.id] : current.filter((id) => id !== representative.id))} type="checkbox" /><span>{representative.name.slice(0, 1)}</span><div><strong>{representative.name}</strong><small>/{representative.slug}</small></div></label>)}</fieldset>{error ? <div className="knowledge-form-error">! {error}</div> : null}<button className="knowledge-save-button" disabled={saving || (visibility === "selected_representatives" && !linkedIds.length)} onClick={() => void saveAccess()} type="button">{saving ? (zh ? "正在保存…" : "Saving…") : (zh ? "保存配置" : "Save configuration")}</button></div> : null}
       {tab === "logs" ? <section className="knowledge-log-list">{asset.processingLogs.length ? asset.processingLogs.map((log) => <article className={`is-${log.level}`} key={log.id}><i /><div><header><strong>{log.stage}</strong><time>{formatDateTime(log.createdAt, locale)}</time></header><p>{log.message}</p></div></article>) : <p>{zh ? "暂无处理日志。" : "No processing logs."}</p>}</section> : null}
     </div>
-    <footer className="knowledge-detail-actions"><div>{asset.status === "archived" ? <><button onClick={() => void onAction(asset.id, "restore")} type="button">↻ {zh ? "恢复" : "Restore"}</button><button className="is-danger" onClick={() => void onDelete(asset.id)} type="button">{zh ? "永久删除" : "Delete forever"}</button></> : <button onClick={() => void onAction(asset.id, "archive")} type="button">⌑ {zh ? "归档" : "Archive"}</button>}</div><button onClick={() => void onAction(asset.id, "reprocess")} type="button">↻ {zh ? "重新处理" : "Reprocess"}</button></footer>
+    <footer className="knowledge-detail-actions"><div>{asset.status === "archived" ? <><button onClick={() => void onAction(asset.id, "restore")} type="button">↻ {zh ? "恢复" : "Restore"}</button><button className="is-danger" onClick={() => void onDelete(asset.id)} type="button">{zh ? "永久删除" : "Delete forever"}</button></> : <button onClick={() => void onAction(asset.id, "archive")} type="button">⌑ {zh ? "归档" : "Archive"}</button>}</div>{!asset.processingError ? <button onClick={() => void onAction(asset.id, "reprocess")} type="button">↻ {zh ? "重新处理" : "Reprocess"}</button> : null}</footer>
   </aside></div>;
 }
 

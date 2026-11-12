@@ -1,3 +1,4 @@
+import { KNOWLEDGE_RESULT_BYTES } from "@delegate/domain/knowledge-limits";
 import { NotionError } from "./types";
 import { notionFetch } from "./transport";
 
@@ -48,7 +49,7 @@ export class NotionClient {
       for (;;) {
         const { done, value } = await reader.read(); if (done) break;
         size += value.length;
-        if (size > 8 * 1024 * 1024) { await reader.cancel(); throw new NotionError("LIMIT", "Notion 响应过大，请减少选择。 / Response too large."); }
+        if (size > KNOWLEDGE_RESULT_BYTES) { await reader.cancel(); throw new NotionError("LIMIT", "Notion 响应过大，请减少选择。 / Response too large."); }
         chunks.push(value);
       }
       return JSON.parse(Buffer.concat(chunks).toString("utf8"));

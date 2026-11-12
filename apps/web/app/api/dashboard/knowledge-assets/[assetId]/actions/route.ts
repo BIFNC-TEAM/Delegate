@@ -1,9 +1,9 @@
-import { after, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import {
   archiveKnowledgeAsset,
-  processKnowledgeAsset,
+  enqueueKnowledgeIngestion,
   queueKnowledgeAssetProcessing,
   resolveKnowledgeLibraryOwnerId,
 } from "@delegate/web-data";
@@ -23,9 +23,7 @@ export async function POST(request: Request, context: RouteContext) {
     if (action === "reprocess") {
       const queued = await queueKnowledgeAssetProcessing(ownerId, assetId);
       if (queued.queued) {
-        after(async () => {
-          await processKnowledgeAsset(ownerId, assetId);
-        });
+        await enqueueKnowledgeIngestion(ownerId, assetId);
       }
       return NextResponse.json({ asset: queued.asset }, { status: 202 });
     }

@@ -40,3 +40,7 @@ export function proxy(request: NextRequest) {
   });
   return response;
 }
+
+// This route authenticates before reading its bounded multipart stream. Excluding
+// it here avoids Next Proxy cloning a second complete 150 MiB request body.
+export const config = { matcher: ["/((?!api/dashboard/knowledge-assets$).*)"] };

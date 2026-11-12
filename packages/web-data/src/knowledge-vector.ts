@@ -1,3 +1,4 @@
+import { knowledgeIngestionContext, KnowledgeProcessingPending } from "./knowledge-ingestion-context";
 import { createHash } from "node:crypto";
 
 import {
@@ -94,11 +95,37 @@ export async function indexKnowledgeText(params: {
   const client = buildKnowledgeClient(params.ownerId);
   const staleUris = new Set((params.staleRepresentativeSlugs ?? []).map((slug) => buildRepresentativeKnowledgeUri(slug, params.assetId)));
   const targetUris = [workspaceUri, ...params.representativeSlugs.map((slug) => buildRepresentativeKnowledgeUri(slug, params.assetId))];
-  for (const uri of [...staleUris, ...targetUris]) await removeKnowledgeResource(client, uri);
+  const ingestion = knowledgeIngestionContext.getStore();
+  if (!ingestion?.checkpoint.indexPrepared) {
+    for (const uri of [...staleUris, ...targetUris]) await removeKnowledgeResource(client, uri);
+    await ingestion?.save("indexPrepared", "yes");
+  }
 
   const content = renderVectorDocument(params);
   try {
     for (const uri of targetUris) {
+      const key = `index:${uri}`;
+      if (ingestion?.checkpoint[`${key}:done`]) continue;
+      let taskId = ingestion?.checkpoint[key];
+      if (ingestion?.checkpoint[`${key}:submitted`] && !taskId) {
+        const tasks = await client.findResourceTasks(uri).catch(() => []);
+        const submittedAt = Number(ingestion.checkpoint[`${key}:submitted`]);
+        taskId = tasks.filter((task) => task.created_at >= submittedAt - 1)
+          .sort((left, right) => right.created_at - left.created_at)[0]?.task_id;
+        if (!taskId) throw new KnowledgeProcessingPending("正在确认索引任务状态，请稍候。");
+        await ingestion.save(key, taskId);
+      }
+      if (taskId) {
+        let task;
+        try { task = await client.getTask(taskId); }
+        catch { throw new KnowledgeProcessingPending("暂时无法获取索引进度，后台将继续查询。"); }
+        if (["failed", "cancelled"].includes(task.status) || task.result?.status === "error" || task.result?.errors?.length || Object.values(task.result?.queue_status ?? {}).some((queue) => (queue.error_count ?? 0) > 0)) {
+          throw new Error(task.error || task.result?.errors?.join("；") || "索引处理失败，请重试。");
+        }
+        if (task.status !== "completed") throw new KnowledgeProcessingPending("正在建立检索索引。");
+        await ingestion!.save(`${key}:done`, "yes");
+        continue;
+      }
       const temp = await client.tempUpload({
         filename: `${sanitizeVikingSegment(params.assetId)}.md`,
         content,
@@ -106,18 +133,31 @@ export async function indexKnowledgeText(params: {
       if (!temp.temp_file_id && !temp.temp_path) {
         throw new Error("OpenViking temporary upload returned no file identifier.");
       }
-      await client.addResource({
+      await ingestion?.save(`${key}:submitted`, String(Date.now() / 1000));
+      const submitted = await client.addResource({
         ...(temp.temp_file_id ? { tempFileId: temp.temp_file_id } : {}),
         ...(temp.temp_path ? { tempPath: temp.temp_path } : {}),
         to: uri,
         reason: "Delegate workspace knowledge asset ingestion",
         instruction: "Parse, segment, embed, and index this knowledge asset for permission-scoped retrieval.",
-        wait: true,
-        timeout: KNOWLEDGE_INDEX_TIMEOUT_SECONDS,
+        wait: !ingestion,
+        ...(!ingestion ? { timeout: KNOWLEDGE_INDEX_TIMEOUT_SECONDS } : {}),
       });
+      if (submitted.status === "error" || submitted.status === "cancelled" || submitted.errors?.length) throw new Error(submitted.errors?.join("；") || "索引处理失败。");
+      if (ingestion) {
+        if (!submitted.task_id) throw new KnowledgeProcessingPending("正在确认索引任务编号。");
+        await ingestion.save(key, submitted.task_id);
+        throw new KnowledgeProcessingPending("正在建立检索索引。");
+      }
     }
   } catch (error) {
-    await Promise.allSettled(targetUris.map((uri) => removeKnowledgeResource(client, uri)));
+    // A failed request does not cancel provider work. Never delete a potentially active resource.
+    if (ingestion && !(error instanceof KnowledgeProcessingPending)) {
+      const submitted = targetUris.some((uri) => ingestion.checkpoint[`index:${uri}:submitted`]);
+      if (submitted && error instanceof Error && /timeout|abort|fetch|network/i.test(error.message)) {
+        throw new KnowledgeProcessingPending("暂时无法获取索引进度，后台将继续查询。");
+      }
+    }
     throw error;
   }
 

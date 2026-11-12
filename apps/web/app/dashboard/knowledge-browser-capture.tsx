@@ -1,5 +1,8 @@
 "use client";
 
+import { KNOWLEDGE_TEXT_CHARACTERS } from "@delegate/domain/knowledge-limits";
+
+
 import { useRef, useState } from "react";
 import { knowledgeBrowserCaptureSchema, knowledgeCaptureUrlSchema, MAX_KNOWLEDGE_CAPTURE_BYTES, type KnowledgeBrowserCapture } from "@delegate/web-data/knowledge-web-capture";
 
@@ -44,7 +47,7 @@ export function KnowledgeBrowserCaptureForm({ zh, sourceUrl, capture, onCapture,
     {reading ? <p role="status">{zh ? "正在读取采集文件…" : "Reading capture…"}</p> : null}
     {capture ? <>
       <p className="knowledge-capture-source"><strong>{zh ? "已采集来源" : "Captured source"}</strong><span>{capture.sourceUrl}</span><small>{zh ? "请核对跳转后的网址是否为你需要的页面。" : "Check that the final URL is the intended page."}</small></p>
-      <label className="knowledge-form-field"><span>{zh ? "正文预览（可编辑）" : "Text preview (editable)"}</span><textarea disabled={disabled} maxLength={400_000} minLength={20} onChange={(event) => { onCapture({ ...capture, text: event.target.value }); onConfirmed(false); }} rows={8} value={capture.text} /><small>{capture.text.length.toLocaleString()} / 400,000</small></label>
+      <label className="knowledge-form-field"><span>{zh ? "正文预览（可编辑）" : "Text preview (editable)"}</span><textarea disabled={disabled} maxLength={KNOWLEDGE_TEXT_CHARACTERS} minLength={20} onChange={(event) => { onCapture({ ...capture, text: event.target.value }); onConfirmed(false); }} rows={8} value={capture.text} /><small>{capture.text.length.toLocaleString()} / 2,000,000</small></label>
       <label className="knowledge-capture-confirm"><input checked={confirmed} disabled={disabled} onChange={(event) => onConfirmed(event.target.checked)} type="checkbox" /><span>{zh ? "我已完成网站验证，确认以上是目标页面正文，并有权按下方可见范围导入。" : "I completed verification, reviewed this page’s content, and may import it with the selected visibility."}</span></label>
     </> : <p role="status">{zh ? "等待你完成验证并选择采集文件；取消后不会创建知识记录。" : "Waiting for verification and a capture file. Canceling creates no asset."}</p>}
     {error ? <p className="knowledge-form-error" role="alert">{error}</p> : null}

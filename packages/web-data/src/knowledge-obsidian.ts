@@ -1,10 +1,11 @@
+import { KNOWLEDGE_TEXT_CHARACTERS, KNOWLEDGE_BATCH_BYTES } from "@delegate/domain/knowledge-limits";
 export { KNOWLEDGE_TITLE_MAX_LENGTH, renameKnowledgeMarkdownFile } from "./knowledge-filenames";
 import { parseDocument } from "yaml";
 import { z } from "zod";
 
 export const MAX_OBSIDIAN_NOTES = 1_000;
-export const MAX_OBSIDIAN_CHARACTERS = 400_000;
-export const MAX_OBSIDIAN_SELECTION_BYTES = 40 * 1024 * 1024;
+export const MAX_OBSIDIAN_CHARACTERS = KNOWLEDGE_TEXT_CHARACTERS;
+export const MAX_OBSIDIAN_SELECTION_BYTES = KNOWLEDGE_BATCH_BYTES;
 
 const sourcePathSchema = z.string().min(1).max(1024).refine((path) =>
   !path.includes("\\") && !path.startsWith("/") && !path.includes(":") &&
@@ -39,7 +40,7 @@ export function isObsidianNotePath(path: string): boolean {
 export function parseObsidianNote(path: string, source: string): ObsidianNote {
   if (!isObsidianNotePath(path)) throw new Error("请选择 Markdown 笔记。");
   const text = source.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  if (text.length > MAX_OBSIDIAN_CHARACTERS) throw new Error(`${path}：正文超过 400,000 字符，请拆分后导入。`);
+  if (text.length > MAX_OBSIDIAN_CHARACTERS) throw new Error(`${path}：正文超过 2,000,000 字符，请拆分后导入。`);
   if (!text.startsWith("---\n")) return { path, body: text, properties: {} };
   const header = text.match(/^---\n([\s\S]*?)\n(?:---|\.\.\.)(?:\n|$)/);
   if (!header) throw new Error(`${path}：笔记属性缺少结束标记 ---。`);
@@ -122,7 +123,7 @@ function fragmentText(body: string, fragment: string): string | null {
 
 export function prepareObsidianNotes(notes: readonly ObsidianNote[], availablePaths: readonly string[]): PreparedObsidianNote[] {
   const selected = new Map(notes.map((note) => [note.path, note]));
-  let totalCharacters = 0;
+  let totalBytes = 0;
   return notes.map((note) => {
     const warnings = new Set<string>();
     const requestedPaths = new Set<string>();
@@ -159,16 +160,16 @@ export function prepareObsidianNotes(notes: readonly ObsidianNote[], availablePa
           referencedPaths.add(target);
           result += ref.embedded ? `\n${render(target, ref.fragment, [...stack, key])}\n` : body.slice(ref.start, ref.end);
         }
-        if (result.length > MAX_OBSIDIAN_CHARACTERS) throw new Error(`${note.path}：展开引用后正文超过 400,000 字符。`);
+        if (result.length > MAX_OBSIDIAN_CHARACTERS) throw new Error(`${note.path}：展开引用后正文超过 2,000,000 字符。`);
       }
       return result + body.slice(cursor);
     }
     const text = render(note.path);
     if (/```\s*(dataview|dataviewjs|tasks)\b/i.test(text)) warnings.add("动态插件查询不会执行，请将所需结果转为静态文本。");
     if (/!\[[^\]]*\]\(https?:/i.test(text) || /<img\b/i.test(text)) warnings.add("外部图片未下载或解析。");
-    if (text.length > MAX_OBSIDIAN_CHARACTERS) throw new Error(`${note.path}：正文超过 400,000 字符。`);
-    totalCharacters += text.length;
-    if (totalCharacters > MAX_OBSIDIAN_SELECTION_BYTES) throw new Error("展开引用后的正文总量过大，请减少所选笔记并分批导入。");
+    if (text.length > MAX_OBSIDIAN_CHARACTERS) throw new Error(`${note.path}：正文超过 2,000,000 字符。`);
+    totalBytes += new TextEncoder().encode(text).byteLength;
+    if (totalBytes > MAX_OBSIDIAN_SELECTION_BYTES) throw new Error("展开引用后的正文总量过大，请减少所选笔记并分批导入。");
     return { path: note.path, fileName: note.path.split("/").pop()!, text, requestedPaths: [...requestedPaths],
       metadata: obsidianImportSchema.parse({ sourcePath: note.path, properties: note.properties, referencedPaths: [...referencedPaths], warnings: [...warnings].slice(0, 100) }) };
   });

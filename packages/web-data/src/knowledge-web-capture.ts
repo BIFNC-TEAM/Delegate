@@ -1,7 +1,8 @@
+import { KNOWLEDGE_TEXT_CHARACTERS, KNOWLEDGE_RESULT_BYTES } from "@delegate/domain/knowledge-limits";
 import { z } from "zod";
 
-export const MAX_KNOWLEDGE_CAPTURE_CHARACTERS = 400_000;
-export const MAX_KNOWLEDGE_CAPTURE_BYTES = 3 * 1024 * 1024;
+export const MAX_KNOWLEDGE_CAPTURE_CHARACTERS = KNOWLEDGE_TEXT_CHARACTERS;
+export const MAX_KNOWLEDGE_CAPTURE_BYTES = KNOWLEDGE_RESULT_BYTES;
 
 // A browser snapshot is user-supplied text, never a server-side fetch request.
 export const knowledgeCaptureUrlSchema = z.string().trim().max(2_048).url().refine((value) => {

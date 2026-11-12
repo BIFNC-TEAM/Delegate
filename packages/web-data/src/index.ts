@@ -154,3 +154,5 @@ export * from "./knowledge-web-capture";
 export * from "./agent-context-authorization";
 
 export * from "./public-agent-presentation";
+
+export { enqueueKnowledgeIngestion, runKnowledgeIngestionTick, getKnowledgeIngestionProgress } from "./knowledge-ingestion";

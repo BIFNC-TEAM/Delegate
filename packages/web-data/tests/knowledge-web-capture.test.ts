@@ -68,7 +68,7 @@ describe("browser-captured knowledge", () => {
   });
 
   it.each([
-    { text: "" }, { text: "短正文" }, { text: "x".repeat(400_001) },
+    { text: "" }, { text: "短正文" }, { text: "x".repeat(2_000_001) },
     { title: "百度安全验证" }, { title: "Just a moment..." },
     { capturedAt: "invalid date" }, { version: 2 }, { format: "unknown" }, { cookies: "must not be accepted" },
   ])("rejects invalid or verification-page capture %#", (override) => {

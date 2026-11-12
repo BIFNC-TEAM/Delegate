@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("next/server", async (original) => ({ ...await original<typeof import("next/server")>(), after: mocks.after }));
 vi.mock("@delegate/web-data", () => ({
   replaceFailedKnowledgeUrlWithBrowserCapture: mocks.replace,
-  processKnowledgeAsset: mocks.process,
+  enqueueKnowledgeIngestion: mocks.process,
   resolveKnowledgeLibraryOwnerId: mocks.resolve,
   createKnowledgeAsset: mocks.create,
   knowledgeBrowserCaptureSchema,
@@ -28,12 +28,10 @@ const request = (body: unknown) => new Request("http://localhost/api/dashboard/k
 describe("browser knowledge capture routes", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.auth.mockResolvedValue({ ownerId: "owner-a" }); mocks.resolve.mockResolvedValue("owner-a"); mocks.replace.mockResolvedValue({ id: "asset-a", status: "processing" }); mocks.create.mockResolvedValue({ id: "asset-new", status: "processing" }); });
 
-  it("repairs through authenticated owner scope and schedules indexing after response", async () => {
+  it("repairs through authenticated owner scope and persists the background job", async () => {
     const response = await repair(request(capture), { params: Promise.resolve({ assetId: "asset-a" }) });
     expect(response.status).toBe(202);
     expect(mocks.replace).toHaveBeenCalledWith("owner-a", "asset-a", capture);
-    expect(mocks.process).not.toHaveBeenCalled();
-    await mocks.after.mock.calls[0]![0]();
     expect(mocks.process).toHaveBeenCalledWith("owner-a", "asset-a");
   });
 

@@ -1,4 +1,6 @@
-import { after, NextResponse } from "next/server";
+import { readKnowledgeUpload, acquireKnowledgeUpload } from "./upload-body";
+import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS } from "@delegate/domain/knowledge-limits";
+import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 
 import {
@@ -13,10 +15,9 @@ import {
   listKnowledgeAssets,
   listKnowledgeImportNames,
   listKnowledgeRepresentativeOptions,
-  replaceKnowledgeAssetSource,
   resolveUniqueKnowledgeAssetTitle,
   resolveKnowledgeLibraryOwnerId,
-  processKnowledgeAsset,
+  enqueueKnowledgeIngestion,
   storeKnowledgeSource,
   type KnowledgeAssetCreateInput,
   type KnowledgeAssetListFilters,
@@ -52,18 +53,22 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  let cleanup: (() => Promise<void>) | undefined;
+  let release: (() => void) | undefined;
   try {
     const session = await requireDashboardApiOwnerSession();
     const ownerId = await resolveKnowledgeLibraryOwnerId(session?.ownerId, request.headers.get("x-delegate-representative"));
     const contentType = request.headers.get("content-type") ?? "";
     if (contentType.includes("multipart/form-data")) {
-      const form = await request.formData();
-      const file = form.get("file");
-      if (!(file instanceof File) || file.size === 0) {
+      release = acquireKnowledgeUpload();
+      const upload = await readKnowledgeUpload(request);
+      cleanup = upload.cleanup;
+      const { form, file } = upload;
+      if (!file || file.size === 0) {
         throw new KnowledgeLibraryError("请选择要上传的知识文件。", 422);
       }
-      if (file.size > 15 * 1024 * 1024) {
-        throw new KnowledgeLibraryError("文件不能超过 15 MB。", 413);
+      if (file.size > KNOWLEDGE_FILE_BYTES) {
+        throw new KnowledgeLibraryError("文件不能超过 150 MB。", 413);
       }
       const kind = detectKnowledgeFileKind(file.name);
       const importMetadata = readFormString(form, "obsidianImport");
@@ -80,8 +85,8 @@ export async function POST(request: Request) {
         try { obsidianImport = obsidianImportSchema.parse(JSON.parse(importMetadata)); }
         catch { throw new KnowledgeLibraryError("Obsidian 来源信息无效。", 422); }
       }
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      if ((obsidianImport || notionImport) && new TextDecoder().decode(bytes).length > 400_000) throw new KnowledgeLibraryError("笔记正文超过 400,000 字符。", 413);
+      const bytes = await file.arrayBuffer();
+      if ((obsidianImport || notionImport) && new TextDecoder().decode(bytes).length > KNOWLEDGE_TEXT_CHARACTERS) throw new KnowledgeLibraryError("笔记正文超过 2,000,000 字符。", 413);
       const checksum = checksumKnowledgeSource(bytes);
       const conflictPolicy = obsidianImport ? "keep_both" : readUploadConflictPolicy(form);
       const conflicts = await findKnowledgeFileConflicts(ownerId, {
@@ -110,7 +115,7 @@ export async function POST(request: Request) {
       let asset;
       try {
         if (replacement) {
-          asset = await replaceKnowledgeAssetSource(ownerId, replacement.id, {
+          asset = await enqueueKnowledgeIngestion(ownerId, replacement.id, {
             ...(notionImport ? { notionImport } : {}),
             kind,
             originalFileName: file.name,
@@ -152,9 +157,7 @@ export async function POST(request: Request) {
         throw error;
       }
       const assetId = asset.id;
-      after(async () => {
-        await processKnowledgeAsset(ownerId, assetId);
-      });
+      if (!replacement) await enqueueKnowledgeIngestion(ownerId, assetId);
       return NextResponse.json({
         asset,
         upload: {
@@ -193,13 +196,11 @@ export async function POST(request: Request) {
       createdBy: session?.email ?? session?.ownerId ?? "dashboard-owner",
     }, { processingMode: "deferred" });
     const assetId = asset.id;
-    after(async () => {
-      await processKnowledgeAsset(ownerId, assetId);
-    });
+    await enqueueKnowledgeIngestion(ownerId, assetId);
     return NextResponse.json({ asset }, { status: 201 });
   } catch (error) {
     return knowledgeErrorResponse(error, "Failed to import knowledge.");
-  }
+  } finally { try { await cleanup?.(); } finally { release?.(); } }
 }
 
 function readEnum<const T extends readonly string[]>(params: URLSearchParams, key: string, allowed: T): T[number] | undefined {

@@ -11,6 +11,7 @@ import {
   getWeChatPayOperationsHealthSnapshot,
   preflightWeChatPayRuntime,
   prisma,
+  runKnowledgeIngestionTick,
   runLogtoIdentityReconciliation,
 } from "@delegate/web-data";
 
@@ -242,6 +243,7 @@ async function boot(): Promise<void> {
     temporalBridgeState = null;
   }
 
+  void knowledgeIngestionLoop();
   void tickLoop();
   void openVikingMaintenanceLoop();
   if (workflowRunnerConfig.paymentReconciliation.enabled) {
@@ -433,4 +435,10 @@ async function logtoIdentityReconciliationLoop(): Promise<void> {
       workflowRunnerConfig.logtoIdentityReconciliation.pollMs,
     );
   }
+}
+
+async function knowledgeIngestionLoop(): Promise<void> {
+  try { await runKnowledgeIngestionTick(); }
+  catch (error) { console.error("Knowledge ingestion worker failed:", error instanceof Error ? error.message : "unknown"); }
+  finally { setTimeout(() => void knowledgeIngestionLoop(), 2_000); }
 }

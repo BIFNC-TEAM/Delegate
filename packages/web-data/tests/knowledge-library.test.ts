@@ -252,7 +252,7 @@ describe("workspace knowledge library", () => {
     expect(docx.text).toContain("第一段\n第二段");
 
     await expect(extractKnowledgeFile({ bytes: new Uint8Array([1, 2]), fileName: "image.png" })).rejects.toMatchObject({ statusCode: 422 });
-    await expect(extractKnowledgeFile({ bytes: new Uint8Array(15 * 1024 * 1024 + 1), fileName: "large.txt" })).rejects.toMatchObject({ statusCode: 413 });
+    await expect(extractKnowledgeFile({ bytes: new Uint8Array(150 * 1024 * 1024 + 1), fileName: "large.txt" })).rejects.toMatchObject({ statusCode: 413 });
   });
 
   it("extracts a real PDF with an embedded worker and rejects image-only PDFs", async () => {

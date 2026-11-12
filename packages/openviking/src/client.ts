@@ -304,6 +304,14 @@ export class OpenVikingClient {
     });
   }
 
+  async getTask(taskId: string): Promise<{ status: string; error?: string; result?: { status?: string; errors?: string[]; queue_status?: Record<string, { error_count?: number }> } }> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskId)}`, { method: "GET" });
+  }
+
+  async findResourceTasks(resourceId: string): Promise<Array<{ task_id: string; status: string; created_at: number }>> {
+    return this.request(`/api/v1/tasks?task_type=add_resource&resource_id=${encodeURIComponent(resourceId)}&limit=20`, { method: "GET" });
+  }
+
   async addResource(params: {
     path?: string;
     tempPath?: string;
@@ -313,7 +321,7 @@ export class OpenVikingClient {
     instruction?: string;
     wait?: boolean;
     timeout?: number;
-  }): Promise<{ root_uri?: string; status?: string; source_path?: string; errors?: string[] }> {
+  }): Promise<{ root_uri?: string; status?: string; source_path?: string; errors?: string[]; task_id?: string }> {
     assertCanonicalOpenVikingResourceUri(params.to);
 
     const waitsForProcessing = params.wait ?? true;

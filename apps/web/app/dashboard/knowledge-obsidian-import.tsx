@@ -101,7 +101,7 @@ export function KnowledgeObsidianImport({ activeSlug, zh, disabled, onPrepared, 
       const chosen = noteFiles.filter(({ path }) => selection.has(path));
       if (!chosen.length) { setPreview([]); onPrepared([]); return; }
       if (chosen.length > MAX_OBSIDIAN_NOTES) throw new Error(zh ? `每次最多选择 ${MAX_OBSIDIAN_NOTES} 篇笔记。` : `Select up to ${MAX_OBSIDIAN_NOTES} notes per import.`);
-      if (chosen.reduce((sum, { file }) => sum + file.size, 0) > MAX_OBSIDIAN_SELECTION_BYTES) throw new Error(zh ? "所选笔记正文合计不能超过 40 MB，请分批选择。" : "Selected notes exceed 40 MB. Choose a smaller batch.");
+      if (chosen.reduce((sum, { file }) => sum + file.size, 0) > MAX_OBSIDIAN_SELECTION_BYTES) throw new Error(zh ? "所选笔记正文合计不能超过 150 MB，请分批选择。" : "Selected notes exceed 150 MB. Choose a smaller batch.");
       const notes = [];
       for (const { path, file } of chosen) notes.push(parseObsidianNote(path, await file.text()));
       controller.signal.throwIfAborted();

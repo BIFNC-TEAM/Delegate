@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import {
   deleteKnowledgeAsset,
   getKnowledgeAsset,
+  getKnowledgeIngestionProgress,
   resolveKnowledgeLibraryOwnerId,
   updateKnowledgeAsset,
 } from "@delegate/web-data";
@@ -17,7 +18,7 @@ export async function GET(request: Request, context: RouteContext) {
     const session = await requireDashboardApiOwnerSession();
     const ownerId = await resolveKnowledgeLibraryOwnerId(session?.ownerId, request.headers.get("x-delegate-representative"));
     const { assetId } = await context.params;
-    return NextResponse.json({ asset: await getKnowledgeAsset(ownerId, assetId) });
+    return NextResponse.json({ asset: await (new URL(request.url).searchParams.get("progress") === "true" ? getKnowledgeIngestionProgress(ownerId, assetId) : getKnowledgeAsset(ownerId, assetId)) });
   } catch (error) {
     return knowledgeErrorResponse(error, "Failed to load knowledge details.");
   }

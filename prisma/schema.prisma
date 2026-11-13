@@ -5128,3 +5128,19 @@ model MemoryReconciliationItem {
   @@index([projectionItemId], map: "MemoryReconciliationItem_projection_idx")
   @@index([status, availableAt], map: "MemoryReconciliationItem_status_available_idx")
 }
+
+model KnowledgeIngestionJob {
+  assetId       String   @id
+  ownerId       String
+  status        String   @default("pending")
+  checkpoint    Json?
+  leaseToken    String?
+  leaseExpiresAt DateTime?
+  availableAt   DateTime @default(now())
+  attempts      Int      @default(0)
+  error         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status, availableAt, leaseExpiresAt])
+}

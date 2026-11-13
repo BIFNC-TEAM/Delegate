@@ -11,7 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "obsidian-headless": "0.0.14"
+    "obsidian-headless": "0.0.14",
+    "@delegate/domain": "workspace:*"
   },
   "engines": {
     "node": ">=22.0.0"

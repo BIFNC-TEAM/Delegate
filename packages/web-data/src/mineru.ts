@@ -1,8 +1,11 @@
+import { knowledgeIngestionContext, KnowledgeProcessingPending } from "./knowledge-ingestion-context";
+import { readKnowledgeResponse } from "./knowledge-response";
+import { KNOWLEDGE_RESULT_BYTES } from "@delegate/domain/knowledge-limits";
 import { z } from "zod";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = KNOWLEDGE_RESULT_BYTES;
 
 const taskSubmissionSchema = z.object({
   task_id: z.string().trim().min(1).max(160),
@@ -137,36 +140,39 @@ export async function extractDocumentWithMinerU(input: {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
-    const documentBytes = new Uint8Array(input.bytes.byteLength);
-    documentBytes.set(input.bytes);
-    const form = new FormData();
-    form.append(
-      "files",
-      new Blob([documentBytes.buffer], { type: input.mimeType || "application/octet-stream" }),
-      safeDocumentFileName(input.fileName),
-    );
-    form.append("return_md", "true");
-    form.append("return_middle_json", "false");
-    form.append("return_model_output", "false");
-    form.append("return_content_list", "false");
-    form.append("return_images", "false");
-    form.append("return_original_file", "false");
-    form.append("response_format_zip", "false");
-    form.append("parse_method", config.parseMethod);
-    form.append("lang_list", config.language);
-    if (config.backend) form.append("backend", config.backend);
-
-    const submission = await minerUFetchJson({
-      fetchImpl,
-      url: endpoint(config, "/tasks"),
-      init: {
-        method: "POST",
-        headers: authorizationHeaders(config),
-        body: form,
-        signal: controller.signal,
-      },
-      operation: "提交解析任务",
-    });
+    const ingestion = knowledgeIngestionContext.getStore();
+    let submission: unknown = { task_id: ingestion?.checkpoint.mineruTask };
+    if (!ingestion?.checkpoint.mineruTask) {
+      const documentBytes = new Uint8Array(input.bytes.byteLength);
+      documentBytes.set(input.bytes);
+      const form = new FormData();
+      form.append(
+        "files",
+        new Blob([documentBytes.buffer], { type: input.mimeType || "application/octet-stream" }),
+        safeDocumentFileName(input.fileName),
+      );
+      form.append("return_md", "true");
+      form.append("return_middle_json", "false");
+      form.append("return_model_output", "false");
+      form.append("return_content_list", "false");
+      form.append("return_images", "false");
+      form.append("return_original_file", "false");
+      form.append("response_format_zip", "false");
+      form.append("parse_method", config.parseMethod);
+      form.append("lang_list", config.language);
+      if (config.backend) form.append("backend", config.backend);
+      submission = await minerUFetchJson({
+        fetchImpl,
+        url: endpoint(config, "/tasks"),
+        init: {
+          method: "POST",
+          headers: authorizationHeaders(config),
+          body: form,
+          signal: controller.signal,
+        },
+        operation: "提交解析任务",
+      });
+    }
     const task = taskSubmissionSchema.safeParse(submission);
     if (!task.success) {
       throw new MinerUError(
@@ -176,6 +182,7 @@ export async function extractDocumentWithMinerU(input: {
       );
     }
 
+    await ingestion?.save("mineruTask", task.data.task_id);
     await waitForTask({
       config,
       taskId: task.data.task_id,
@@ -218,6 +225,8 @@ export async function extractDocumentWithMinerU(input: {
       version: result.data.version ?? null,
     };
   } catch (error) {
+    if (error instanceof KnowledgeProcessingPending) throw error;
+    if (knowledgeIngestionContext.getStore()?.checkpoint.mineruTask && (!(error instanceof MinerUError) || error.code === "mineru_timeout" || error.code === "mineru_unavailable")) throw new KnowledgeProcessingPending("暂时无法获取解析进度，后台将继续查询。");
     if (error instanceof MinerUError) throw error;
     if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
       throw new MinerUError(
@@ -270,6 +279,7 @@ async function waitForTask(input: {
         true,
       );
     }
+    if (knowledgeIngestionContext.getStore()) throw new KnowledgeProcessingPending("正在解析知识内容。");
     await wait(input.config.pollIntervalMs, input.signal);
   }
 }
@@ -294,7 +304,11 @@ async function minerUFetchJson(input: {
       false,
     );
   }
-  const body = await response.text();
+  let body: string;
+  try { body = await readKnowledgeResponse(response, MAX_RESPONSE_BYTES); }
+  catch (error) {
+    throw new MinerUError("mineru_invalid_response", error instanceof Error ? error.message : "解析结果过大，请拆分后导入。", false);
+  }
   if (Buffer.byteLength(body, "utf8") > MAX_RESPONSE_BYTES) {
     throw new MinerUError(
       "mineru_invalid_response",

@@ -1,5 +1,5 @@
-import { after, NextResponse } from "next/server";
-import { processKnowledgeAsset, replaceFailedKnowledgeUrlWithBrowserCapture, resolveKnowledgeLibraryOwnerId } from "@delegate/web-data";
+import { NextResponse } from "next/server";
+import { enqueueKnowledgeIngestion, replaceFailedKnowledgeUrlWithBrowserCapture, resolveKnowledgeLibraryOwnerId } from "@delegate/web-data";
 import { requireDashboardApiOwnerSession } from "../../../auth";
 import { knowledgeErrorResponse } from "../../route";
 
@@ -11,7 +11,7 @@ export async function POST(request: Request, context: RouteContext) {
     const ownerId = await resolveKnowledgeLibraryOwnerId(session?.ownerId, request.headers.get("x-delegate-representative"));
     const { assetId } = await context.params;
     const asset = await replaceFailedKnowledgeUrlWithBrowserCapture(ownerId, assetId, await request.json());
-    after(async () => { await processKnowledgeAsset(ownerId, assetId); });
+    await enqueueKnowledgeIngestion(ownerId, assetId);
     return NextResponse.json({ asset }, { status: 202 });
   } catch (error) {
     return knowledgeErrorResponse(error, "Failed to import browser capture.");

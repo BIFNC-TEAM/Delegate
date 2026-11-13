@@ -1,3 +1,4 @@
+import { KNOWLEDGE_TEXT_CHARACTERS } from "@delegate/domain/knowledge-limits";
 import { NotionClient, type NotionObject } from "./client";
 import { NotionError, type NotionEntry, type NotionDocument } from "./types";
 
@@ -70,7 +71,7 @@ export async function expandNotionPages(client: NotionClient, selected: string[]
     found.set(id, await lookupNotionPage(client, id));
     async function children(blockId: string, level: number): Promise<void> {
       if (level > 20) throw new NotionError("LIMIT", "内容层级过深。 / Content nesting limit reached.");
-      for (const block of await client.all(`/blocks/${blockId}/children`)) {
+      for (const block of await client.all(`/blocks/${blockId}/children`, undefined, 20_000)) {
         if (block.type === "child_page") await visit(block.id, depth + 1);
         else if (block.has_children && !["child_database", "synced_block", "link_to_page"].includes(block.type)) await children(block.id, level + 1);
       }
@@ -91,7 +92,7 @@ export async function readNotionPage(client: NotionClient, id: string, workspace
     if (stack.includes(blockId) || stack.length >= 20) return missing("循环或过深的嵌入内容未展开 / Cyclic or deeply nested content omitted");
     if (cache.has(blockId)) return cache.get(blockId)!;
     let blocks: NotionObject[];
-    try { blocks = await client.all(`/blocks/${blockId}/children`); }
+    try { blocks = await client.all(`/blocks/${blockId}/children`, undefined, 20_000); }
     catch (error) {
       if (error instanceof NotionError && error.code === "ACCESS") return missing(`部分内容不可访问，请补充来源权限 / Content unavailable: ${canonicalUrl(blockId)}`);
       throw error;
@@ -113,7 +114,7 @@ export async function readNotionPage(client: NotionClient, id: string, workspace
         case "equation": value = `$$\n${data.expression ?? ""}\n$$`; break;
         case "divider": value = "---"; break;
         case "table": {
-          const rows = await client.all(`/blocks/${block.id}/children`);
+          const rows = await client.all(`/blocks/${block.id}/children`, undefined, 20_000);
           const cells = rows.map(row => (row.table_row?.cells ?? []).map((cell: NotionObject[]) => richText(cell).replaceAll("|", "\\|").replaceAll("\n", "<br>")));
           if (cells.length) {
             if (!data.has_column_header) cells.unshift(Array.from({ length: data.table_width }, () => ""));
@@ -138,7 +139,7 @@ export async function readNotionPage(client: NotionClient, id: string, workspace
       if (block.has_children && !["table", "synced_block", "child_page", "child_database", "link_to_page"].includes(type)) value += `\n\n${await children(block.id, [...stack, blockId])}`;
       result.push(value);
       renderedLength += value.length + 2;
-      if (renderedLength > 400_000) throw new NotionError("LIMIT", "页面正文超过 400,000 字符。 / Page too large.");
+      if (renderedLength > KNOWLEDGE_TEXT_CHARACTERS) throw new NotionError("LIMIT", "页面正文超过 2,000,000 字符。 / Page too large.");
     }
     const rendered = result.filter(Boolean).join("\n\n"); cache.set(blockId, rendered); return rendered;
   }
@@ -182,6 +183,6 @@ export async function readNotionPage(client: NotionClient, id: string, workspace
     fields.push(`${name}: ${value === null || value === undefined ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value)}`);
   }
   const text = [`# ${entry.title}`, fields.length ? `## 页面属性 / Properties\n\n${fields.join("\n\n")}` : "", await children(id)].filter(Boolean).join("\n\n");
-  if (text.length > 400_000) throw new NotionError("LIMIT", "页面正文超过 400,000 字符。 / Page too large.");
+  if (text.length > KNOWLEDGE_TEXT_CHARACTERS) throw new NotionError("LIMIT", "页面正文超过 2,000,000 字符。 / Page too large.");
   return { id, title: entry.title, text, metadata: { workspaceId: workspace.workspaceId, workspaceName: workspace.workspaceName, pageId: id, sourceUrl: entry.url, importedAt: new Date().toISOString(), incomplete, warnings: [...warnings].slice(0, 100) } };
 }

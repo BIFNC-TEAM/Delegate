@@ -140,7 +140,7 @@ export function createPublishReader(read: ReadPage = readPublishPage) {
           if (body.url !== url || /^\s*(?:<!doctype|<html)/i.test(body.text) || !body.text.trim()) throw new PublishError("未取得有效笔记正文。 / No valid note content returned.");
           if (body.text.length > MAX_OBSIDIAN_CHARACTERS) throw new PublishError("笔记过长，请拆分后导入。 / Note exceeds character limit.");
           bytes += Buffer.byteLength(body.text);
-          if (bytes > MAX_OBSIDIAN_SELECTION_BYTES) throw new PublishError("所选正文超过 40 MB，请分批导入。 / Selection exceeds 40 MB.");
+          if (bytes > MAX_OBSIDIAN_SELECTION_BYTES) throw new PublishError("所选正文超过 150 MB，请分批导入。 / Selection exceeds 150 MB.");
           return { path: decodeURIComponent(new URL(url).pathname.slice(`/access/${site.id}/`.length)), text: body.text, sourceUrl: shell.url };
         }));
         files.push(...batch);

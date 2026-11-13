@@ -80,7 +80,7 @@ export async function storeKnowledgeSource(params: {
     randomUUID(),
     safeFileName(params.fileName),
   ].join("/");
-  const body = Buffer.from(params.bytes);
+  const body = Buffer.from(params.bytes.buffer, params.bytes.byteOffset, params.bytes.byteLength);
   const checksum = checksumKnowledgeSource(body);
 
   if (useMemoryStore()) {

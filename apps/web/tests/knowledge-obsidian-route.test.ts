@@ -4,8 +4,8 @@ const mocks = vi.hoisted(() => ({ auth: vi.fn(), resolve: vi.fn(), create: vi.fn
 vi.mock("next/server", async (original) => ({ ...await original<typeof import("next/server")>(), after: mocks.after }));
 vi.mock("@delegate/web-data", () => ({
   createKnowledgeAsset: mocks.create, findKnowledgeFileConflicts: mocks.find,
-  replaceKnowledgeAssetSource: mocks.replace, storeKnowledgeSource: mocks.store, deleteKnowledgeSource: mocks.remove,
-  processKnowledgeAsset: mocks.process, resolveKnowledgeLibraryOwnerId: mocks.resolve, listKnowledgeImportNames: mocks.names,
+  extractKnowledgeFile: vi.fn(async () => ({ text: "validated content", kind: "markdown" })), replaceKnowledgeAssetSource: mocks.replace, storeKnowledgeSource: mocks.store, deleteKnowledgeSource: mocks.remove,
+  enqueueKnowledgeIngestion: mocks.process, resolveKnowledgeLibraryOwnerId: mocks.resolve, listKnowledgeImportNames: mocks.names,
   resolveUniqueKnowledgeAssetTitle: mocks.title, getKnowledgeAsset: mocks.get,
   checksumKnowledgeSource: () => "a".repeat(64), detectKnowledgeFileKind: (name: string) => name.endsWith(".md") ? "markdown" : "pdf",
   KnowledgeLibraryError: class extends Error { constructor(message: string, public statusCode: number) { super(message); } },
@@ -46,7 +46,6 @@ describe("Obsidian upload through the existing knowledge endpoint", () => {
     expect((await response.json()).upload.outcome).toBe("created");
     expect(mocks.replace).not.toHaveBeenCalled(); expect(mocks.get).not.toHaveBeenCalled();
     expect(mocks.create).toHaveBeenCalledWith("owner-a", expect.objectContaining({ visibility: "owner_only", representativeLinks: [], metadata: { obsidianImport: metadata } }), { processingMode: "deferred", numberFileName: true });
-    await mocks.after.mock.calls[0]![0]();
     expect(mocks.process).toHaveBeenCalledWith("owner-a", "new");
   });
 
@@ -73,9 +72,9 @@ describe("Obsidian upload through the existing knowledge endpoint", () => {
     expect(mocks.create).toHaveBeenCalledWith("owner-a", expect.objectContaining({ metadata: { notionImport: notion }, sourceUrl: notion.sourceUrl }), { processingMode: "deferred", numberFileName: true });
   });
   it("passes Notion provenance through source replacement", async () => {
-    mocks.replace.mockResolvedValue({ id: "old" });
+    mocks.process.mockResolvedValue({ id: "old", status: "processing" });
     expect((await POST(upload({ notion, policy: "replace_existing" }))).status).toBe(200);
-    expect(mocks.replace).toHaveBeenCalledWith("owner-a", "old", expect.objectContaining({ notionImport: notion }));
+    expect(mocks.process).toHaveBeenCalledWith("owner-a", "old", expect.objectContaining({ notionImport: notion }));
   });
   it("rejects mixed providers and private fields before storage", async () => {
     expect((await POST(upload({ notion, metadata }))).status).toBe(422);

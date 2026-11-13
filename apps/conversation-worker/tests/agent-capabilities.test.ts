@@ -192,6 +192,26 @@ describe("governed V2 host capabilities", () => {
     expect(result.status).toBe("unavailable");
   });
 
+  it("部分搜索失败且无资料时返回不可用", async () => {
+    const capabilities = await capabilitiesFixture();
+    mocks.recallContext.mockResolvedValueOnce({ items: [], citations: [], memoryUseRunId: "run-1", searchIncomplete: true });
+    const result = await capabilities.knowledge!.retrieve({ query: "培训多少钱", maximumResults: 4, context: toolContext, signal: new AbortController().signal });
+    expect(result.status).toBe("unavailable");
+  });
+
+  it("部分搜索失败但有资料时保留资料并说明结果不完整", async () => {
+    const capabilities = await capabilitiesFixture();
+    mocks.recallContext.mockResolvedValueOnce({
+      items: [{ memoryUseItemId: "item-1", internalSource: { publicTitle: "培训价格" }, content: "培训起价 8000 元" }],
+      citations: [], memoryUseRunId: "run-1", searchIncomplete: true,
+    });
+    const result = await capabilities.knowledge!.retrieve({ query: "培训多少钱", maximumResults: 4, context: toolContext, signal: new AbortController().signal });
+    expect(result.status).toBe("found");
+    expect(result.text).toContain("培训起价 8000 元");
+    expect(result.text).toContain("结果可能不完整");
+    expect(mocks.registerKnowledge).toHaveBeenCalledWith("run-1", ["item-1"]);
+  });
+
 
   it("attaches MCP provenance only to a verified successful result", () => {
     expect(attachVerifiedMcpSource({

@@ -354,6 +354,19 @@ describe("governed memory recall fence", () => {
     );
   });
 
+  it("marks search incomplete when one lane fails and the other is empty", async () => {
+    enableMemoryPolicy();
+    clientMocks.search.mockImplementation(async ({ targetUri }: { targetUri: string }) => {
+      if (targetUri.includes("/versions/")) return { resources: [], memories: [] };
+      throw new Error("memory lane unavailable");
+    });
+
+    const recalled = await recall("web");
+    expect(recalled.items).toEqual([]);
+    expect(recalled.searchIncomplete).toBe(true);
+    expect(memoryUseMocks.markDegraded).toHaveBeenCalledWith("memory-use-run-1", "memory_recall_partial");
+  });
+
   it("recalls governed memory from the new policy when legacy public recall is disabled", async () => {
     mockPrisma.conversation.findFirst.mockResolvedValue(buildConversation({
       openvikingEnabled: false,

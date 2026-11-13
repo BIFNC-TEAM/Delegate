@@ -1031,6 +1031,7 @@ export type RepresentativeRecallItem = OpenVikingRecallItem & {
 };
 
 export type RepresentativeRecallContext = {
+  searchIncomplete?: boolean;
   items: RepresentativeRecallItem[];
   citations: Array<{
     knowledgeAssetId?: string;
@@ -1705,6 +1706,7 @@ export async function recallRepresentativeContext(params: {
     // aliases and the output transaction binds them to the reply.
     citations: [],
     memoryUseRunId,
+    ...(rejectedSearchCount > 0 ? { searchIncomplete: true } : {}),
   };
 }
 

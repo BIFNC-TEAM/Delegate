@@ -66,3 +66,11 @@ describe("FAQ suggestions", () => {
   });
 
 });
+
+describe("FAQ review regressions", () => {
+  it("scales the budget and rejects incomplete output", async () => {
+    setup(); mocks.agicto.mockResolvedValue({ ...reply([qa]), completion: { status: "incomplete", reason: "length" } });
+    expect((await generateFaqSuggestions({ ...input, count: 50 })).status).toBe("invalid_output");
+    expect(mocks.agicto.mock.calls[0]![0].env.maxOutputTokens).toBeGreaterThanOrEqual(10000);
+  });
+});

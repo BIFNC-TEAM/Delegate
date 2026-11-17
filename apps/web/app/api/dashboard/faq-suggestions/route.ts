@@ -39,7 +39,7 @@ export async function POST(request: Request) {
       try {
       const result = await generateFaqSuggestions({ sources: [{ id: asset.id, title: asset.title, text }], count, ...(context ? { representative: context } : {}) }, { perSourceLimit: SOURCE_CHARS, requireSourceCitation: true });
       return { ...base, status: result.status, usage: result.sources[0]?.status, suggestions: result.suggestions, ...(result.reason ? { reason: result.reason } : {}) };
-      } catch { return { ...base, status: "model_failure", usage: "unused", suggestions: [], reason: "模型请求失败。" }; }
+      } catch (error) { return { ...base, status: error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "timeout" : "model_failure", suggestions: [], reason: "模型请求失败。" }; }
     });
     const good = results.filter(r => r.status === "success" || r.status === "insufficient_material").length;
     const attempted = results.filter(r => r.status !== "no_usable_sources").length;
@@ -50,6 +50,7 @@ export async function POST(request: Request) {
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) return authResponse;
+    console.error("FAQ request failed", { kind: error instanceof Error ? error.name : "unknown" });
     return reply({ error: "Unable to process FAQ request." }, 500);
   }
 }

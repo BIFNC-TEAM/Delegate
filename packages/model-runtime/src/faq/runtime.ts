@@ -39,7 +39,7 @@ export async function generateFaqSuggestions(
   for (const provider of providers) {
     attempts.push({ provider, model: env[provider].model });
     try {
-      const response = await callProvider(provider, { ...env, maxOutputTokens: Math.max(env.maxOutputTokens, 2048) }, prompt);
+      const response = await callProvider(provider, { ...env, maxOutputTokens: Math.max(env.maxOutputTokens, 2048, parsed.data.count * 200) }, prompt);
       if (response.completion.status !== "complete") {
         return result("invalid_output", { ...base, attempts, reason: "模型响应不完整。" });
       }

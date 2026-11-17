@@ -1942,6 +1942,7 @@ async function assertKnowledgeIngestionIdle(assetId: string): Promise<void> {
 /** Validate the complete selection before reading only the requested leading bodies. */
 export async function getFaqKnowledgeAssets(ownerId: string, assetIds: string[], bodyLimit: number) {
   if (!ownerId.trim()) throw new KnowledgeLibraryError("Authentication required.", 401);
+  if (!Number.isSafeInteger(bodyLimit) || bodyLimit <= 0 || new Set(assetIds).size !== assetIds.length || assetIds.some(id => !id.trim())) throw new KnowledgeLibraryError("Invalid asset selection.", 400);
   if (!assetIds.length) return [];
   return prisma.$transaction(async (tx) => {
     const metadata = await tx.knowledgeAsset.findMany({

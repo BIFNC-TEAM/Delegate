@@ -1,6 +1,7 @@
 name: delegate
 
 x-app-environment: &app-environment
+  FAQ_GENERATION_CONCURRENCY: ${FAQ_GENERATION_CONCURRENCY:-5}
   NODE_ENV: ${NODE_ENV:-production}
   DATABASE_URL: postgresql://postgres:postgres@postgres:5432/delegate
   OBSIDIAN_SYNC_CREDENTIAL_KEY: ${OBSIDIAN_SYNC_CREDENTIAL_KEY:-}

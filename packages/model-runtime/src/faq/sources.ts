@@ -3,7 +3,8 @@ import type { FaqSourceStatus } from "./types";
 import { faqSourceSchema } from "./types";
 
 export function prepareFaqSources(sources: Array<z.infer<typeof faqSourceSchema>>, perSourceLimit?: number) {
-  let remaining = 8000;
+  if (perSourceLimit !== undefined && (!Number.isSafeInteger(perSourceLimit) || perSourceLimit <= 0)) throw new RangeError("perSourceLimit must be a positive safe integer");
+  let remaining = perSourceLimit === undefined ? 8000 : perSourceLimit * sources.length;
   const statuses: FaqSourceStatus[] = [];
   const used: Array<z.infer<typeof faqSourceSchema>> = [];
   for (const item of sources) {
@@ -16,11 +17,14 @@ export function prepareFaqSources(sources: Array<z.infer<typeof faqSourceSchema>
       statuses.push({ id: item.id, status: "unused", reason: "正文预算已用完" });
       continue;
     }
-    const chars = Array.from(text);
-    const n = Math.min(remaining, perSourceLimit ?? remaining, chars.length);
+    const limit = Math.min(remaining, perSourceLimit ?? remaining);
+    // A code point uses at most two UTF-16 units; bound allocation before expansion.
+    const chars = Array.from(text.slice(0, limit * 2));
+    const n = Math.min(limit, chars.length);
+    const truncated = n < chars.length || text.length > limit * 2;
     remaining -= n;
     used.push({ ...item, text: chars.slice(0, n).join("") });
-    statuses.push({ id: item.id, status: n < chars.length ? "partial" : "complete", ...(n < chars.length ? { reason: "正文超过预算" } : {}) });
+    statuses.push({ id: item.id, status: truncated ? "partial" : "complete", ...(truncated ? { reason: "正文超过预算" } : {}) });
   }
   const warning = statuses.some(s => s.status === "partial" || s.status === "unused") ? "资料较长，问答内容只根据前面的部分生成。" : undefined;
   return { used, base: { sources: statuses, ...(warning ? { warning } : {}) } };

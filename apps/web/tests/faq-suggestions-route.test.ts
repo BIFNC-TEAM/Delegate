@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ session: vi.fn(), assets: vi.fn(), generate: vi.fn() }));
-vi.mock("../app/api/dashboard/auth", () => ({ requireDashboardApiOwnerSession: mocks.session, dashboardAuthErrorResponse: () => null }));
-vi.mock("@delegate/web-data", () => ({ getFaqKnowledgeAssets: mocks.assets, KnowledgeLibraryError: class KnowledgeLibraryError extends Error { statusCode = 400; } }));
+vi.mock("../app/api/dashboard/auth", async (original) => ({ ...await original<typeof import("../app/api/dashboard/auth")>(), requireDashboardApiOwnerSession: mocks.session }));
+vi.mock("@delegate/web-data", () => ({ getFaqKnowledgeAssets: mocks.assets, RepresentativeAccessError: class RepresentativeAccessError extends Error { statusCode = 401; }, KnowledgeLibraryError: class KnowledgeLibraryError extends Error { statusCode = 400; } }));
 vi.mock("@delegate/model-runtime", () => ({ generateFaqSuggestions: mocks.generate }));
 import { POST } from "../app/api/dashboard/faq-suggestions/route";
-import { KnowledgeLibraryError } from "@delegate/web-data";
+import { RepresentativeAccessError, KnowledgeLibraryError } from "@delegate/web-data";
 const request = (body: unknown) => new Request("http://localhost/api/dashboard/faq-suggestions", { method: "POST", body: JSON.stringify(body) });
 const asset = (id: string) => ({ id, title: id, status: "READY", extractedText: "资料", updatedAt: new Date("2026-01-01"), processingVersion: 1 });
 beforeEach(() => { vi.resetAllMocks(); mocks.session.mockResolvedValue({ ownerId: "owner" }); mocks.assets.mockImplementation(async (_owner, ids) => ids.map(asset)); mocks.generate.mockResolvedValue({ status: "success", sources: [{ status: "complete" }], suggestions: [{ question: "Q", answer: "A", sourceIds: ["a"] }] }); });
@@ -78,4 +78,10 @@ describe("FAQ suggestions API", () => {
     }
   });
 
+});
+
+it("converts thrown authentication failures to 401", async () => {
+  mocks.session.mockRejectedValue(new RepresentativeAccessError("Authentication required.", 401));
+  expect((await POST(request({ assetIds: [] }))).status).toBe(401);
+  expect(mocks.assets).not.toHaveBeenCalled();
 });

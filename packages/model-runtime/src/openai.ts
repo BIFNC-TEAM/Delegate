@@ -9,6 +9,7 @@ import type {
 } from "./types";
 
 export async function generateOpenAIResponse(params: {
+  allowEmptyText?: boolean;
   env: ModelRuntimeEnv;
   prompt: RepresentativeReplyPrompt;
 }): Promise<{
@@ -55,7 +56,7 @@ export async function generateOpenAIResponse(params: {
   });
 
   const replyText = extractResponseText(response);
-  if (!replyText) {
+  if (!replyText && !(params.allowEmptyText && response.status === "completed" && response.output?.some(item => item.type === "message" && item.content?.some(part => part.type === "output_text" && typeof part.text === "string")))) {
     throw new Error("OpenAI Responses returned no text output.");
   }
 
@@ -99,7 +100,7 @@ export async function generateOpenAIResponse(params: {
     : undefined;
 
   return {
-    replyText,
+    replyText: replyText ?? "",
     ...(usage ? { usage } : {}),
     completion: response.status === "completed" && !response.incomplete_details
       ? { status: "complete" }

@@ -4,17 +4,17 @@ import { generateBailianResponse } from "../bailian";
 import { generateOpenAIResponse } from "../openai";
 import type { ModelProvider, ModelRuntimeEnv, RepresentativeReplyPrompt } from "../types";
 
-export async function callProvider(provider: ModelProvider, env: ModelRuntimeEnv, prompt: RepresentativeReplyPrompt) {
+export async function callProvider(provider: ModelProvider, env: ModelRuntimeEnv, prompt: RepresentativeReplyPrompt, allowEmptyText = false) {
   if (provider === "agicto") {
-    return generateAgictoResponse({ env, prompt });
+    return generateAgictoResponse({ env, prompt, allowEmptyText });
   }
   if (provider === "bailian") {
-    return generateBailianResponse({ env, prompt });
+    return generateBailianResponse({ env, prompt, allowEmptyText });
   }
   if (provider === "openai") {
-    return generateOpenAIResponse({ env, prompt });
+    return generateOpenAIResponse({ env, prompt, allowEmptyText });
   }
-  return generateAnthropicResponse({ env, prompt });
+  return generateAnthropicResponse({ env, prompt, allowEmptyText });
 }
 export function classifyFailure(error: unknown): "timeout" | "retryable" | "invalid_output" | "non_retryable" {
   if (!(error instanceof Error)) {

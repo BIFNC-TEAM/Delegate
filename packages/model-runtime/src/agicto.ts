@@ -12,6 +12,7 @@ import type {
  * This adapter calls AGICTO directly and never constructs an OpenAI client.
  */
 export async function generateAgictoResponse(params: {
+  allowEmptyText?: boolean;
   env: ModelRuntimeEnv;
   prompt: RepresentativeReplyPrompt;
 }): Promise<{
@@ -77,7 +78,7 @@ export async function generateAgictoResponse(params: {
 
   const choice = response.choices?.[0];
   const replyText = choice?.message?.content?.trim();
-  if (!replyText) {
+  if (!replyText && !(params.allowEmptyText && choice?.finish_reason === "stop" && typeof choice?.message?.content === "string")) {
     throw new Error("AGICTO Chat Completions returned no text output.");
   }
 
@@ -120,7 +121,7 @@ export async function generateAgictoResponse(params: {
     : undefined;
 
   return {
-    replyText,
+    replyText: replyText ?? "",
     ...(usage ? { usage } : {}),
     completion: choice?.finish_reason === "stop"
       ? { status: "complete" }

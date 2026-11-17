@@ -1,0 +1,12 @@
+import { beforeEach, expect, it, vi } from "vitest";
+const mocks = vi.hoisted(() => ({ session: vi.fn(), generate: vi.fn() }));
+vi.mock("../app/api/dashboard/auth", () => ({ requireDashboardApiOwnerSession: mocks.session, dashboardAuthErrorResponse: () => null }));
+vi.mock("@delegate/model-runtime", async original => ({ ...await original<typeof import("@delegate/model-runtime")>(), generateServiceContentSuggestion: mocks.generate }));
+import { POST } from "../app/api/dashboard/service-content-suggestions/route";
+const request = (body: unknown) => new Request("http://localhost/api/dashboard/service-content-suggestions", { method:"POST",body:JSON.stringify(body) });
+beforeEach(() => { vi.resetAllMocks(); mocks.session.mockResolvedValue({ownerId:"test-owner"}); mocks.generate.mockResolvedValue({status:"success",serviceContent:"建议",truncated:false,attempts:[{provider:"secret"}]}); });
+it("requires login even in demo mode", async () => { mocks.session.mockResolvedValue(null); expect((await POST(request({}))).status).toBe(401); expect(mocks.generate).not.toHaveBeenCalled(); });
+it.each([{workFields:1},{serviceContent:1},{language:"fr"},{workFields:Array.from({length:21},(_,i)=>String(i))},{workFields:["😀".repeat(81)]},{serviceContent:"😀".repeat(501)}])("rejects invalid input %j", async input => {expect((await POST(request(input))).status).toBe(400); expect(mocks.generate).not.toHaveBeenCalled();});
+it("normalizes and defaults", async () => { const response=await POST(request({workFields:[" 销售 ","销售",""]})); expect(mocks.generate).toHaveBeenCalledWith({workFields:["销售"],serviceContent:"",language:"zh"}); expect(response.headers.get("cache-control")).toContain("no-store"); expect(await response.json()).not.toHaveProperty("attempts"); });
+it.each([["empty_suggestion",200],["insufficient_input",200],["timeout",504],["model_failure",502]])("maps %s", async (status,http) => {mocks.generate.mockResolvedValue({status,serviceContent:"",truncated:false,attempts:[]}); expect((await POST(request({}))).status).toBe(http);});
+it("hides unexpected exceptions", async () => { mocks.generate.mockRejectedValue(new Error("private input")); const response=await POST(request({serviceContent:"原文"})); expect(response.status).toBe(500); expect(JSON.stringify(await response.json())).not.toContain("private input"); });

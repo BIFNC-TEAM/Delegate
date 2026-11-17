@@ -9,6 +9,7 @@ import type {
 } from "./types";
 
 export async function generateBailianResponse(params: {
+  allowEmptyText?: boolean;
   env: ModelRuntimeEnv;
   prompt: RepresentativeReplyPrompt;
 }): Promise<{
@@ -57,7 +58,7 @@ export async function generateBailianResponse(params: {
   });
 
   const replyText = response.choices[0]?.message.content?.trim();
-  if (!replyText) {
+  if (!replyText && !(params.allowEmptyText && response.choices?.[0]?.finish_reason === "stop" && typeof response.choices[0]?.message?.content === "string")) {
     throw new Error("Bailian Chat Completions returned no text output.");
   }
 
@@ -101,7 +102,7 @@ export async function generateBailianResponse(params: {
     : undefined;
 
   return {
-    replyText,
+    replyText: replyText ?? "",
     ...(usage ? { usage } : {}),
     completion: response.choices[0]?.finish_reason === "stop"
       ? { status: "complete" }

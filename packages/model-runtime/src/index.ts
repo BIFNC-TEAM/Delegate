@@ -5,3 +5,4 @@ export * from "./managed-document";
 export * from "./pi";
 
 export * from "./faq";
+export * from "./service-content";

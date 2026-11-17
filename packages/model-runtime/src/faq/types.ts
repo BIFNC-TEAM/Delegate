@@ -11,9 +11,9 @@ export const faqSuggestionsInputSchema = z.object({
   representative: z.object({
     name: z.string().trim().min(1).max(180),
     description: z.string().max(2000),
-  }),
+  }).optional(),
   sources: z.array(faqSourceSchema).max(100),
-  count: z.number().int().min(1).max(10).default(3),
+  count: z.number().int().min(1).max(50).default(3),
   language: z.string().trim().min(1).max(40).default("中文"),
 }).strict().refine((input) =>
   new Set(input.sources.map((source) => source.id)).size === input.sources.length

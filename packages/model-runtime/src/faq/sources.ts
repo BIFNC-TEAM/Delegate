@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { FaqSourceStatus } from "./types";
 import { faqSourceSchema } from "./types";
 
-export function prepareFaqSources(sources: Array<z.infer<typeof faqSourceSchema>>) {
+export function prepareFaqSources(sources: Array<z.infer<typeof faqSourceSchema>>, perSourceLimit?: number) {
   let remaining = 8000;
   const statuses: FaqSourceStatus[] = [];
   const used: Array<z.infer<typeof faqSourceSchema>> = [];
@@ -17,7 +17,7 @@ export function prepareFaqSources(sources: Array<z.infer<typeof faqSourceSchema>
       continue;
     }
     const chars = Array.from(text);
-    const n = Math.min(remaining, chars.length);
+    const n = Math.min(remaining, perSourceLimit ?? remaining, chars.length);
     remaining -= n;
     used.push({ ...item, text: chars.slice(0, n).join("") });
     statuses.push({ id: item.id, status: n < chars.length ? "partial" : "complete", ...(n < chars.length ? { reason: "正文超过预算" } : {}) });

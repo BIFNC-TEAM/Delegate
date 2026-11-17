@@ -262,6 +262,9 @@ importers:
       '@delegate/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@delegate/model-runtime':
+        specifier: workspace:*
+        version: link:../../packages/model-runtime
       '@delegate/openviking':
         specifier: workspace:*
         version: link:../../packages/openviking

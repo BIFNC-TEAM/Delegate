@@ -1938,3 +1938,27 @@ async function assertKnowledgeIngestionIdle(assetId: string): Promise<void> {
     throw new KnowledgeLibraryError("该文件仍在后台处理中，请处理完成后再修改或归档。", 409);
   }
 }
+
+/** Validate the complete selection before reading only the requested leading bodies. */
+export async function getFaqKnowledgeAssets(ownerId: string, assetIds: string[], bodyLimit: number) {
+  if (!ownerId.trim()) throw new KnowledgeLibraryError("Authentication required.", 401);
+  if (!assetIds.length) return [];
+  return prisma.$transaction(async (tx) => {
+    const metadata = await tx.knowledgeAsset.findMany({
+      where: { ownerId, id: { in: assetIds } },
+      select: { id: true, status: true },
+    });
+    if (metadata.length !== assetIds.length || metadata.some((row) => row.status !== KnowledgeAssetStatus.READY)) {
+      throw new KnowledgeLibraryError("One or more knowledge assets are unavailable.", 400);
+    }
+    const selectedIds = assetIds.slice(0, bodyLimit);
+    if (!selectedIds.length) return [];
+    const rows = await tx.knowledgeAsset.findMany({
+      where: { ownerId, id: { in: selectedIds }, status: KnowledgeAssetStatus.READY },
+      select: { id: true, title: true, extractedText: true, updatedAt: true, processingVersion: true },
+    });
+    if (rows.length !== selectedIds.length) throw new KnowledgeLibraryError("One or more knowledge assets are unavailable.", 400);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    return selectedIds.map((id) => byId.get(id)!);
+  }, { isolationLevel: "RepeatableRead" });
+}

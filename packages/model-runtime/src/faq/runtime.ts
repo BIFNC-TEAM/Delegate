@@ -9,6 +9,7 @@ import { callProvider, classifyFailure } from "./provider";
 /** Internal only: the caller must authorize all data and its disclosure to model providers. */
 export async function generateFaqSuggestions(
   faqSuggestionsInput: FaqSuggestionsInput,
+  options: { perSourceLimit?: number; requireSourceCitation?: boolean } = {},
 ): Promise<FaqResult> {
   const result = (status: FaqResult["status"], extra: Partial<FaqResult> = {}): FaqResult => ({
     status,
@@ -24,7 +25,7 @@ export async function generateFaqSuggestions(
   if (!parsed.success) {
     return result("invalid_input", { reason: "输入结构、数量或资料标识无效（标识不可重复或使用 representative）。" });
   }
-  const { used, base } = prepareFaqSources(parsed.data.sources);
+  const { used, base } = prepareFaqSources(parsed.data.sources, options.perSourceLimit);
   if (!used.length) {
     return result("no_usable_sources", base);
   }
@@ -33,7 +34,7 @@ export async function generateFaqSuggestions(
   if (env.state !== "ready" || !providers.length) {
     return result("model_failure", { ...base, reason: "模型未配置或不可用。" });
   }
-  const prompt = buildFaqPrompt(parsed.data, used);
+  const prompt = buildFaqPrompt(parsed.data, used, options);
   const attempts: FaqAttempt[] = [];
   for (const provider of providers) {
     attempts.push({ provider, model: env[provider].model });
@@ -56,7 +57,7 @@ export async function generateFaqSuggestions(
       const candidates = envelope.data.suggestions;
       const valid = candidates.flatMap((item) => {
         const candidate = faqSuggestionSchema.safeParse(item);
-        if (!candidate.success || !candidate.data.sourceIds.every((id) => validIds.has(id))) {
+        if (!candidate.success || !candidate.data.sourceIds.every((id) => validIds.has(id)) || (options.requireSourceCitation && !candidate.data.sourceIds.some((id) => used.some((source) => source.id === id)))) {
           return [];
         }
         return [candidate.data];

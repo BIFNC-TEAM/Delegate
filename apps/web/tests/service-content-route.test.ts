@@ -16,7 +16,7 @@ it("limits streamed bytes without trusting content length", async () => {
   for (const headers of [{}, { "content-length": "1" }]) {
     let cancelled = false;
     const stream = new ReadableStream({
-      start(controller) { controller.enqueue(new Uint8Array(65536)); controller.enqueue(new Uint8Array(1)); },
+      start(controller) { controller.enqueue(new Uint8Array(131072)); controller.enqueue(new Uint8Array(1)); },
       cancel() { cancelled = true; },
     });
     const req = new Request("http://localhost/test", { method: "POST", body: stream, headers, duplex: "half" } as RequestInit);
@@ -30,7 +30,7 @@ it("limits streamed bytes without trusting content length", async () => {
 it("accepts a body at the byte limit and rejects one byte over", async () => {
   // Use JSON whitespace rather than an unknown field, retaining valid input.
   const base = JSON.stringify({ workFields: ["销售", "销售"] });
-  const padding = 65536 - new TextEncoder().encode(base).length;
+  const padding = 131072 - new TextEncoder().encode(base).length;
   const exact = base + " ".repeat(padding);
   expect((await POST(new Request("http://localhost/test", { method: "POST", body: exact }))).status).toBe(200);
   expect(mocks.generate).toHaveBeenCalledWith({ workFields: ["销售"], serviceContent: "", language: "zh" });
@@ -47,7 +47,14 @@ it("authenticates before reading a large body", async () => {
   expect(read).toBe(false);
 });
 it("rejects an oversized declared length before reading", async () => {
-  const req = new Request("http://localhost/test", { method: "POST", body: "{}", headers: { "content-length": "65537" } });
+  const req = new Request("http://localhost/test", { method: "POST", body: "{}", headers: { "content-length": "131073" } });
   expect((await POST(req)).status).toBe(413);
+  expect(mocks.generate).not.toHaveBeenCalled();
+});
+
+it("returns 400 when reading the request body fails", async () => {
+  const stream = new ReadableStream({ pull(controller) { controller.error(new Error("read failure")); } });
+  const req = new Request("http://localhost/test", { method: "POST", body: stream, duplex: "half" } as RequestInit);
+  expect((await POST(req)).status).toBe(400);
   expect(mocks.generate).not.toHaveBeenCalled();
 });

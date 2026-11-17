@@ -3,7 +3,7 @@ import { generateServiceContentSuggestion, serviceContentInputSchema } from "@de
 import { dashboardAuthErrorResponse, requireDashboardApiOwnerSession } from "../auth";
 import { withPrivateNoStore } from "../../private-response";
 
-const MAX_BODY_BYTES = 64 * 1024;
+const MAX_BODY_BYTES = 128 * 1024;
 
 async function readBody(request: Request): Promise<{ tooLarge: boolean; value?: unknown }> {
   if (Number(request.headers.get("content-length")) > MAX_BODY_BYTES) return { tooLarge: true };
@@ -37,7 +37,7 @@ export async function POST(request: Request) {
   try {
     const session = await requireDashboardApiOwnerSession();
     if (!session?.ownerId?.trim()) return reply({ error: "Authentication required." }, 401);
-    const requestBody = await readBody(request);
+    const requestBody = await readBody(request).catch(() => ({ tooLarge: false, value: undefined }));
     if (requestBody.tooLarge) return reply({ error: "Request too large." }, 413);
     const input = serviceContentInputSchema.safeParse(requestBody.value);
     if (!input.success) return reply({ error: "Invalid request." }, 400);

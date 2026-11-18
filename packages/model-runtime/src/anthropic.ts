@@ -9,6 +9,7 @@ import type {
 } from "./types";
 
 export async function generateAnthropicResponse(params: {
+  allowEmptyText?: boolean;
   env: ModelRuntimeEnv;
   prompt: RepresentativeReplyPrompt;
 }): Promise<{
@@ -45,7 +46,7 @@ export async function generateAnthropicResponse(params: {
   });
 
   const replyText = extractMessageText(response);
-  if (!replyText) {
+  if (!replyText && !(params.allowEmptyText && response.stop_reason === "end_turn" && response.content?.some(part => part.type === "text" && typeof part.text === "string"))) {
     throw new Error("Anthropic Messages returned no text output.");
   }
 
@@ -74,7 +75,7 @@ export async function generateAnthropicResponse(params: {
   });
 
   return {
-    replyText,
+    replyText: replyText ?? "",
     completion: response.stop_reason === "end_turn"
       || response.stop_reason === "stop_sequence"
       ? { status: "complete" }

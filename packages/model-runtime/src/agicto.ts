@@ -12,6 +12,7 @@ import type {
  * This adapter calls AGICTO directly and never constructs an OpenAI client.
  */
 export async function generateAgictoResponse(params: {
+  allowEmptyText?: boolean;
   env: ModelRuntimeEnv;
   prompt: RepresentativeReplyPrompt;
 }): Promise<{
@@ -67,17 +68,17 @@ export async function generateAgictoResponse(params: {
 
   const providerError = readAgictoProviderError(response);
   if (providerError) {
-    throw new Error(
-      `AGICTO API error${providerError.code ? ` (${providerError.code})` : ""}: ${providerError.message}`,
-    );
+    const error = new Error(`AGICTO API error${providerError.code ? ` (${providerError.code})` : ""}: ${providerError.message}`);
+    Object.assign(error, { status: httpResponse.status, code: providerError.code });
+    throw error;
   }
   if (!httpResponse.ok) {
-    throw new Error(`AGICTO API request failed with HTTP ${httpResponse.status}.`);
+    throw Object.assign(new Error(`AGICTO API request failed with HTTP ${httpResponse.status}.`), { status: httpResponse.status });
   }
 
   const choice = response.choices?.[0];
   const replyText = choice?.message?.content?.trim();
-  if (!replyText) {
+  if (!replyText && !(params.allowEmptyText && choice?.finish_reason === "stop" && typeof choice?.message?.content === "string")) {
     throw new Error("AGICTO Chat Completions returned no text output.");
   }
 
@@ -120,7 +121,7 @@ export async function generateAgictoResponse(params: {
     : undefined;
 
   return {
-    replyText,
+    replyText: replyText ?? "",
     ...(usage ? { usage } : {}),
     completion: choice?.finish_reason === "stop"
       ? { status: "complete" }
@@ -151,10 +152,10 @@ async function readAgictoResponse(response: Response): Promise<AgictoResponse> {
   try {
     value = JSON.parse(raw);
   } catch {
-    throw new Error(`AGICTO API returned non-JSON HTTP ${response.status} content.`);
+    throw Object.assign(new Error(`AGICTO API returned non-JSON HTTP ${response.status} content.`), { status: response.status });
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("AGICTO API returned an invalid response envelope.");
+    throw Object.assign(new Error("AGICTO API returned an invalid response envelope."), { status: response.status });
   }
   return value as AgictoResponse;
 }

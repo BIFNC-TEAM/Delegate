@@ -85,6 +85,16 @@ describe("AGICTO OpenAI-compatible transport", () => {
     );
   });
 
+  it.each([
+    ["error envelope", JSON.stringify({ error: { code: "rate_limit_exceeded", message: "busy" } }), 200],
+    ["HTTP error", JSON.stringify({ message: "not found" }), 404],
+    ["non-JSON response", "<html>gateway</html>", 503],
+    ["invalid envelope", "[]", 200],
+  ])("retains status for %s", async (_label, body, status) => {
+    mocks.fetch.mockResolvedValueOnce(new Response(body, { status }));
+    await expect(generateAgictoResponse({ env: buildEnv(), prompt: { instructions: "", input: "" } })).rejects.toMatchObject({ status });
+  });
+
   it("sends native strict JSON Schema without a truncating token ceiling", async () => {
     await expect(generateAgictoResponse({
       env: buildEnv(),

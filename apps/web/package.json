@@ -22,7 +22,8 @@
     "next": "^16.2.11",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@delegate/model-runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/busboy": "^1.5.5"

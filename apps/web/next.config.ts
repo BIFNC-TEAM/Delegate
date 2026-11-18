@@ -6,6 +6,7 @@ const nextConfig: NextConfig = {
     "@delegate/obsidian-sync",
     "@delegate/domain",
     "@delegate/runtime",
+    "@delegate/model-runtime",
     "@delegate/registry",
     "@delegate/web-data",
     "@delegate/web-ui",

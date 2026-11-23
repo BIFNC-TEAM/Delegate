@@ -14,9 +14,8 @@ import {
   restoreRejectedPublicChatDraft,
   type PublicChatResponse,
 } from "./public-chat";
-import {
-  parsePublicChatText,
-} from "./public-chat-format";
+import { PublicChatText } from "./public-chat-text";
+import type { PublicCitationRange } from "@delegate/web-data";
 import {
   PUBLIC_WALLET_UPDATED_EVENT,
   type PublicWalletUpdatedDetail,
@@ -44,6 +43,7 @@ type ChatMessage = {
   createdAt?: string;
   status?: string;
   citations?: Citation[];
+  citationRanges?: PublicCitationRange[];
   sources?: PublicAnswerSource[];
   execution?: import("@delegate/web-data").PublicExecutionCall[];
   attachments?: ChatAttachment[];
@@ -334,6 +334,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
+            ...(message.citationRanges !== undefined ? { citationRanges: message.citationRanges } : {}),
             ...(message.sources?.length ? { sources: message.sources } : {}),
             ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
@@ -390,6 +391,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
+            ...(message.citationRanges !== undefined ? { citationRanges: message.citationRanges } : {}),
             ...(message.sources?.length ? { sources: message.sources } : {}),
             ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
@@ -943,6 +945,7 @@ export function RepresentativeChatPanel(props: {
             status: string;
             createdAt?: string;
             citations: Citation[];
+            citationRanges?: PublicCitationRange[];
             sources?: PublicAnswerSource[];
             execution?: import("@delegate/web-data").PublicExecutionCall[];
             attachments?: ChatAttachment[];
@@ -974,6 +977,7 @@ export function RepresentativeChatPanel(props: {
             createdAt: snapshot.message.createdAt || new Date().toISOString(),
             status: snapshot.message.status,
             citations: snapshot.message.citations,
+            ...(snapshot.message.citationRanges !== undefined ? { citationRanges: snapshot.message.citationRanges } : {}),
             ...(snapshot.message.sources ? { sources: snapshot.message.sources } : {}),
             ...(snapshot.message.execution ? { execution: snapshot.message.execution } : {}),
             ...(snapshot.message.attachments?.length ? { attachments: snapshot.message.attachments } : {}),
@@ -1208,8 +1212,8 @@ export function RepresentativeChatPanel(props: {
                   </div>
                   <div className="representative-message-content">
                     <div className="representative-message-bubble">
-                      <PublicChatText text={message.text} />
-                  {message.role === "assistant" && !isOperator ? <><PublicAnswerSources sources={message.sources} citations={message.citations} locale={props.locale} /><PublicExecution calls={message.execution} locale={props.locale} /></> : null}
+                      <PublicChatText text={message.text} ranges={message.citationRanges} messageId={message.id} representativeSlug={props.representativeSlug} locale={props.locale} />
+                  {message.role === "assistant" && !isOperator ? <>{message.citationRanges === undefined ? <PublicAnswerSources sources={message.sources} citations={message.citations} locale={props.locale} /> : null}<PublicExecution calls={message.execution} locale={props.locale} /></> : null}
                   {message.role === "assistant"
                     && !message.sources?.length && !message.citations?.length
                     && message.sourceDisclosure
@@ -1584,53 +1588,6 @@ function getVisitorMessageStatus(status: string | undefined, locale: "zh" | "en"
     ? { accepted: "已发送", queued: "已发送", waiting_human: "等待真人", failed: "发送失败" }
     : { accepted: "Sent", queued: "Sent", waiting_human: "Waiting for a human", failed: "Failed" };
   return labels[status as keyof typeof labels] ?? null;
-}
-
-function PublicChatText({ text }: { text: string }) {
-  return (
-    <div className="representative-chat-rich-text">
-      {parsePublicChatText(text).map((block, blockIndex) => {
-        if (block.kind === "separator") {
-          return <hr aria-hidden="true" key={`separator-${blockIndex}`} />;
-        }
-        if (block.kind === "unordered-list" || block.kind === "ordered-list") {
-          const List = block.kind === "ordered-list" ? "ol" : "ul";
-          return (
-            <List key={`${block.kind}-${blockIndex}`}>
-              {block.items.map((item, itemIndex) => (
-                <li key={`${blockIndex}-${itemIndex}`}>
-                  {renderPublicChatInline(item, `${blockIndex}-${itemIndex}`)}
-                </li>
-              ))}
-            </List>
-          );
-        }
-        return (
-          <p
-            className={block.kind === "heading" ? "is-heading" : undefined}
-            key={`${block.kind}-${blockIndex}`}
-          >
-            {renderPublicChatInline(block.text, String(blockIndex))}
-          </p>
-        );
-      })}
-    </div>
-  );
-}
-
-function renderPublicChatInline(value: string, keyPrefix: string): ReactNode[] {
-  return value
-    .split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/gu)
-    .filter(Boolean)
-    .map((part, index) => {
-      if (part.startsWith("**") && part.endsWith("**")) {
-        return <strong key={`${keyPrefix}-strong-${index}`}>{part.slice(2, -2)}</strong>;
-      }
-      if (part.startsWith("`") && part.endsWith("`")) {
-        return <code key={`${keyPrefix}-code-${index}`}>{part.slice(1, -1)}</code>;
-      }
-      return part;
-    });
 }
 
 function resolveResponderPresentation(input: {

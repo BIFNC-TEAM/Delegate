@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
-
-import { parsePublicChatText } from "../app/reps/[slug]/public-chat-format";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { PublicChatText } from "../app/reps/[slug]/public-chat-text";
 
 const panelSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/representative-chat-panel.tsx"),
@@ -39,18 +40,13 @@ describe("public chat reply resilience", () => {
       "<script>alert(1)</script>",
     ].join("\n");
 
-    expect(parsePublicChatText(text)).toEqual([
-      { kind: "paragraph", text: "**等温线**是气温相等各点的连线。" },
-      { kind: "separator" },
-      {
-        kind: "unordered-list",
-        items: ["同一条线上气温相同", "越密集表示温差越大"],
-      },
-      { kind: "paragraph", text: "<script>alert(1)</script>" },
-    ]);
+    const html = renderToStaticMarkup(createElement(PublicChatText, { text }));
+    expect(html).toContain("<strong>等温线</strong>");
+    expect(html).toContain("<li>同一条线上气温相同</li>");
+    expect(html).not.toContain("<script>");
     expect(panelSource).not.toContain("<p>{message.text}</p>");
-    expect(panelSource).toContain("<PublicChatText text={message.text} />");
-    expect(panelSource).toContain("renderPublicChatInline");
+    expect(panelSource).toContain("<PublicChatText text={message.text}");
+    expect(panelSource).toContain('from "./public-chat-text"');
     expect(panelSource).not.toContain("dangerouslySetInnerHTML");
   });
 

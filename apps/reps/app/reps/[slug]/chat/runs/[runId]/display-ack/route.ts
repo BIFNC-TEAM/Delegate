@@ -1,3 +1,4 @@
+import { withLocalTrace, localTraceEvent } from "@delegate/runtime/local-trace";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
@@ -14,7 +15,16 @@ import {
   setPublicAudienceSessionCookie,
 } from "../../../../public-principal";
 
-export async function POST(
+export async function POST(request: Request, context: { params: Promise<{ slug: string; runId: string }> }) {
+  const coordinates = await context.params;
+  return withLocalTrace("display-ack", coordinates, async () => {
+    const response = await postDisplayAck(request, context);
+    localTraceEvent("display.ack_response", { status: response.status, body: await response.clone().json().catch(() => null) });
+    return response;
+  });
+}
+
+async function postDisplayAck(
   request: Request,
   { params }: { params: Promise<{ slug: string; runId: string }> },
 ) {
@@ -54,6 +64,7 @@ export async function POST(
     );
     return response;
   } catch (error) {
+    localTraceEvent("display.ack_error", { error });
     const principalStatus = publicAudiencePrincipalErrorStatus(error);
     if (principalStatus) {
       return privateJson(

@@ -1,3 +1,4 @@
+import { withLocalTrace, localTraceEvent } from "@delegate/runtime/local-trace";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { auditErrorCode } from "@delegate/runtime";
@@ -52,7 +53,8 @@ export async function GET(
   const { principal, revalidate, sessionState } = audienceRequest;
 
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+    start(controller) {
+      return withLocalTrace("sse", { slug, runId }, async () => {
       const startedAt = Date.now();
       let previous = "";
       let nextPrincipalRevalidationAt = 0;
@@ -80,6 +82,7 @@ export async function GET(
 
           const serialized = JSON.stringify(snapshot);
           if (serialized !== previous) {
+            localTraceEvent("sse.run_sent", snapshot);
             controller.enqueue(encoder.encode(`event: run\ndata: ${serialized}\n\n`));
             previous = serialized;
           } else {
@@ -89,6 +92,7 @@ export async function GET(
           await wait(RUN_STREAM_POLL_INTERVAL_MS, request.signal);
         }
       } catch (error) {
+        localTraceEvent("sse.failed", { error });
         if (!request.signal.aborted) {
           controller.enqueue(
             encoder.encode(
@@ -98,8 +102,10 @@ export async function GET(
           console.error("Public generation run event stream failed.", auditErrorCode(error));
         }
       } finally {
+        localTraceEvent("sse.closed", { aborted: request.signal.aborted });
         controller.close();
       }
+      });
     },
   });
 

@@ -17,7 +17,7 @@ export const v2BudgetSchema = z.object({
   toolOutputBytes: z.number().int().min(256).max(128_000).default(12_000),
   contextBytes: z.number().int().min(1024).max(512_000).default(64_000),
   totalTokens: z.number().int().min(1024).default(200_000),
-  outputTokens: z.number().int().min(128).default(2048),
+  outputTokens: z.number().int().min(128).default(8192),
   finalReserveTokens: z.number().int().min(64).default(512),
   readRetries: z.number().int().min(0).max(2).default(1),
   directTools: z.number().int().min(1).max(64).default(16),

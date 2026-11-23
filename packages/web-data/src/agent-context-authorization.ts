@@ -1,3 +1,4 @@
+import { localTraceEvent } from "@delegate/runtime/local-trace";
 import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -6,6 +7,8 @@ import { prisma } from "./prisma";
 import { fenceGenerationWorkLease, isGenerationWorkLeaseLostError } from "./conversation-platform";
 import { revalidateMemoryUseContextSourcesInTransaction } from "./memory-use-execution";
 import { resolveServerOwnedMcpCapabilityPolicy } from "./mcp-server-policy";
+import { derivedCitationHistorySchema, type CitationHistoryMessage, type DerivedCitationHistoryProof } from "./citation-history-types";
+import { revalidateDerivedCitationHistoryInTransaction } from "./citation-history";
 
 const scopeSchema = z.object({
   runId: z.string(), representativeId: z.string(), ownerId: z.string(), representativeVersionId: z.string().nullable(),
@@ -20,6 +23,7 @@ const stateSchema = z.object({
   memory: z.array(z.object({ useRunId: z.string(), itemIds: z.array(z.string()).max(256) }).strict()).max(1),
   // Optional preserves the proof of existing v1 manifests without remote data.
   remote: z.array(remoteSchema).max(64).optional(),
+  derivedHistory: derivedCitationHistorySchema.optional(),
 }).strict();
 const accessSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("anonymous_browser") }).strict(),
@@ -77,20 +81,21 @@ async function attachmentStamp(tx: Tx, messageId: string) {
     select: { id: true, fileName: true, mimeType: true, sizeBytes: true, checksum: true, objectKey: true } });
   return hash(rows);
 }
-async function validate(tx: Tx, state: State, delivery = false, graph: Graph = { visiting: new Set(), checked: new Set() }) {
-  const current = await frame(tx, state.scope.runId, delivery);
+async function validate(tx: Tx, state: State, delivery = false, graph: Graph = { visiting: new Set(), checked: new Set() }, historical = false, modelTime = Date.now()) {
+  const current = await frame(tx, state.scope.runId, delivery || historical);
   // Compare recipient/scope before reading any message body for its fingerprint.
   if (hash(current.scope) !== hash(state.scope)) return fail();
-  if (state.messages.length > 1) {
+  if (state.messages.length > 1 || state.derivedHistory?.pairs.length) {
     const policy = await tx.representativeMemoryPolicy.findUnique({ where: { representativeId: state.scope.representativeId }, select: { shortTermMemoryEnabled: true } });
     if (policy?.shortTermMemoryEnabled === false) return fail();
   }
   const messages = await messageStamps(tx, state.scope, state.messages.map(item => item.id));
   if (hash(messages) !== hash(state.messages) || await attachmentStamp(tx, state.scope.inputMessageId) !== state.attachmentsHash) return fail();
+  if (state.derivedHistory) await revalidateDerivedCitationHistoryInTransaction(tx, state.scope, state.derivedHistory, delivery, modelTime);
   for (const memory of state.memory) await revalidateMemoryUseContextSourcesInTransaction(tx, {
     generationRunId: state.scope.runId, conversationId: state.scope.conversationId, ...memory,
   });
-  for (const remote of state.remote ?? []) await validateRemote(tx, state.scope, remote, delivery, graph);
+  for (const remote of state.remote ?? []) await validateRemote(tx, state.scope, remote, delivery, graph, historical, modelTime);
 }
 
 async function mcpAccess(tx: Tx, scope: State["scope"], bindingId: string, toolName: string) {
@@ -124,7 +129,7 @@ async function executionParts(tx: Tx, scope: State["scope"], executionId: string
     || artifact.contactId !== scope.contactId || artifact.sessionId !== execution.sessionId || (artifact.retentionUntil && artifact.retentionUntil <= new Date())) return fail();
   return { action, executionHash: fingerprint(action), artifacts: artifacts.map(artifact => ({ id: artifact.id, hash: fingerprint(artifact) })) };
 }
-async function validateRemote(tx: Tx, scope: State["scope"], reference: z.infer<typeof remoteSchema>, delivery: boolean, graph: Graph) {
+async function validateRemote(tx: Tx, scope: State["scope"], reference: z.infer<typeof remoteSchema>, delivery: boolean, graph: Graph, historical = false, modelTime = Date.now()) {
   const key = `${reference.executionId}:${reference.revision}`;
   if (graph.checked.has(key)) return;
   if (graph.visiting.has(key) || graph.checked.size + graph.visiting.size >= 64) return fail();
@@ -133,11 +138,11 @@ async function validateRemote(tx: Tx, scope: State["scope"], reference: z.infer<
   if (receipt.executionId !== reference.executionId || fingerprint(receipt) !== reference.revision || hash(receipt.input.scope) !== hash(scope)
     || receiptToolName(receipt.access) !== reference.toolName) return fail();
   graph.visiting.add(key);
-  await validate(tx, receipt.input, delivery, graph);
+  await validate(tx, receipt.input, delivery, graph, historical, modelTime);
   if (receipt.access.kind === "public_mcp" && fingerprint(await mcpAccess(tx, scope, receipt.access.bindingId, receipt.access.toolName)) !== fingerprint(receipt.access)) return fail();
   // Reusable snapshots are not live data. Bound model reuse; historical files
   // remain downloadable under current source permissions and retention.
-  if (!delivery && receipt.access.kind !== "derived_python" && Date.now() - Date.parse(receipt.observedAt) > 60 * 60 * 1000) return fail();
+  if (!delivery && receipt.access.kind !== "derived_python" && modelTime - Date.parse(receipt.observedAt) > 60 * 60 * 1000) return fail();
   const current = await executionParts(tx, scope, reference.executionId);
   if (current.executionHash !== receipt.executionHash || fingerprint(current.artifacts) !== fingerprint(receipt.artifacts)) return fail();
   graph.visiting.delete(key); graph.checked.add(key);
@@ -179,7 +184,7 @@ function snapshotWithState(snapshot: Record<string, any>, previous: State, next:
   return { ...snapshot, [key]: next };
 }
 async function safe<T>(call: () => Promise<T>): Promise<T> {
-  try { return await call(); } catch (error) { if (isGenerationWorkLeaseLostError(error)) throw error; return fail(); }
+  try { return await call(); } catch (error) { localTraceEvent("authorization.internal_error", { error }); if (isGenerationWorkLeaseLostError(error)) throw error; return fail(); }
 }
 
 export async function createAgentContextAuthorization(input: {
@@ -191,6 +196,7 @@ export async function createAgentContextAuthorization(input: {
 }): Promise<AgentContextAuthorization & {
   registerKnowledge(useRunId: string, itemIds: string[]): Promise<void>;
   registerToolResult(executionId: string): Promise<string | undefined>;
+  registerDerivedHistory(history: { messages: CitationHistoryMessage[]; proof: DerivedCitationHistoryProof }): Promise<void>;
   memorySources(): { useRunId?: string; itemIds: string[] };
 }> {
   let state = await safe(() => prisma.$transaction(async tx => {
@@ -223,6 +229,24 @@ export async function createAgentContextAuthorization(input: {
   return {
     snapshot: () => proof(state),
     hasResultSource: (reference, toolName) => (state.remote ?? []).some(item => `${item.executionId}:${item.revision}` === reference && item.toolName === toolName),
+    async registerDerivedHistory(history) {
+      state = await safe(() => prisma.$transaction(async tx => {
+        await fenceGenerationWorkLease(tx, input);
+        await tx.$queryRaw`SELECT "id" FROM "GenerationRun" WHERE "id" = ${input.runId} FOR UPDATE`;
+        const current = await frame(tx, input.runId);
+        const latest = stateSchema.parse(current.snapshot[key]);
+        if (hash(latest) !== hash(state) || latest.scope.sourceChannel !== "web") return fail();
+        await validate(tx, latest);
+        const candidate = derivedCitationHistorySchema.parse(history.proof);
+        if (candidate.formedAt > Date.now()) return fail();
+        if (fingerprint(history.messages) !== candidate.transcriptHash || history.messages.some(message => latest.messages.some(original => original.id === message.id))) return fail();
+        await revalidateDerivedCitationHistoryInTransaction(tx, latest.scope, candidate);
+        if (latest.derivedHistory && fingerprint(latest.derivedHistory) !== fingerprint(candidate)) return fail();
+        const updated = stateSchema.parse({ ...latest, derivedHistory: candidate });
+        await tx.generationRun.update({ where: { id: input.runId }, data: { contextSnapshot: snapshotWithState(current.snapshot, latest, updated) as Prisma.InputJsonObject } });
+        return updated;
+      }));
+    },
     memorySources: () => ({ ...(state.memory[0] ? { useRunId: state.memory[0].useRunId } : {}), itemIds: [...(state.memory[0]?.itemIds ?? [])] }),
     async check(_boundary, expected) {
       await safe(() => prisma.$transaction(async tx => {
@@ -284,6 +308,43 @@ export async function assertAgentContextForExecution(generationRunId: string) {
     if (checkpoint && JSON.stringify(agentContextProofSchema.parse(checkpoint.contextAuthorization)) !== JSON.stringify(proof(state))) return fail();
     await validate(tx, state);
   }));
+}
+
+/** Citation numbering consumes the same persisted, currently authorized source
+ * set as execution. It does not turn an episode registry into an allowlist.
+ * Caller holds the generation row lock and preserves the surrounding snapshot.
+ */
+export async function citationAuthorityInTransaction(tx: Tx, generationRunId: string) {
+  const current = await frame(tx, generationRunId);
+  const state = stateSchema.parse(current.snapshot[key]);
+  await validate(tx, state);
+  return { scope: state.scope, snapshot: current.snapshot, memory: state.memory, remote: state.remote ?? [] };
+}
+
+export type CitationHistoryScope = State["scope"];
+/** Scope resolution precedes loading any candidate historical answer. */
+export async function citationHistoryScopeInTransaction(tx: Tx, runId: string, completedRead = false) {
+  const current = await frame(tx, runId, completedRead);
+  if (current.scope.sourceChannel !== "web" || !current.scope.episodeId || current.scope.episodeId !== current.scope.messageEpisodeId) return fail();
+  return current.scope;
+}
+
+/** Historical source checks may read a completed origin run, but remain model
+ * input checks: the one-hour limit is NOT bypassed by using delivery mode.
+ */
+export async function revalidateCitationHistoryAcquisitionInTransaction(tx: Tx, scope: CitationHistoryScope, originRunId: string,
+  acquisition: { kind: "memory"; useRunId: string; itemId: string } | { kind: "remote"; executionId: string; revision: string; toolName: string }, options: { modelTime?: number; delivery?: boolean } = {}) {
+  const origin = await frame(tx, originRunId, true);
+  for (const field of ["representativeId", "ownerId", "representativeVersionId", "conversationId", "contactId", "audienceIdentityId", "episodeId", "messageEpisodeId", "sourceChannel", "channel"] as const) {
+    if (origin.scope[field] !== scope[field]) return fail();
+  }
+  if (acquisition.kind === "memory") {
+    await revalidateMemoryUseContextSourcesInTransaction(tx, { generationRunId: originRunId, conversationId: scope.conversationId,
+      useRunId: acquisition.useRunId, itemIds: [acquisition.itemId] });
+  } else {
+    await validateRemote(tx, origin.scope, remoteSchema.parse({ executionId: acquisition.executionId, revision: acquisition.revision, toolName: acquisition.toolName }), options.delivery ?? false,
+      { visiting: new Set(), checked: new Set() }, true, options.modelTime ?? Date.now());
+  }
 }
 
 /** Called inside the existing provider delivery fence. Source-independent

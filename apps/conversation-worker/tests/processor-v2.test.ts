@@ -1,13 +1,14 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn(), authority: vi.fn() }));
+const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn(), authority: vi.fn(), safeHistory: vi.fn(), registerHistory: vi.fn(), allocate: vi.fn() }));
 vi.mock("../src/agent-capabilities", () => ({ buildAgentCapabilities: mocks.adapters }));
 vi.mock("../src/generation-delivery", () => ({ deliverGenerationOutput: mocks.deliver }));
 vi.mock("@delegate/model-runtime/v2", async original => ({ ...await original<typeof import("@delegate/model-runtime/v2")>(),
-  createV2ModelBindingFromEnv: () => ({ ok: true, binding: { provider: "faux", modelId: "faux" } }), delegateAgentV2: { run: mocks.run } }));
+  createV2ModelBindingFromEnv: () => ({ ok: true, binding: { provider: "faux", modelId: "faux", model: { api: "faux" } } }), delegateAgentV2: { run: mocks.run } }));
 vi.mock("@delegate/web-data", () => ({
   buildRepresentativeRuntimeProfile: () => ({ contract: { freeReplyLimit: 2 } }), buildSandboxAttachmentPath: () => "/attachments/a",
   createAgentContextAuthorization: mocks.contextAuthorization,
+  loadSafeCitationHistory: mocks.safeHistory, allocateEpisodeCitationSource: mocks.allocate,
   authorizeGenerationRunFreeUsage: mocks.authorizeUsage, reserveGenerationConversationWalletUsage: async () => false,
   completeInlineGenerationRun: mocks.complete, getRepresentativeRuntimeAuthoritySnapshot: mocks.authority,
   loadGenerationRecentTurns: mocks.history, loadGenerationV2Task: mocks.prior,
@@ -21,12 +22,58 @@ beforeEach(() => {
   vi.clearAllMocks(); mocks.adapters.mockReturnValue({}); mocks.prior.mockResolvedValue(null); mocks.authorizeUsage.mockResolvedValue(false);
   mocks.authority.mockResolvedValue({ compute: { enabled: true, capabilityModes: { exec: "ask", write: "ask", browser: "allow", mcp: "allow" } }, knowledgeResources: [] });
   mocks.history.mockResolvedValue([]);
-  mocks.contextAuthorization.mockResolvedValue({ check: mocks.gate, registerKnowledge: vi.fn(), registerToolResult: vi.fn() });
+  mocks.safeHistory.mockResolvedValue({ messages: [], proof: { version: 1, byteBudget: 20000, transcriptHash: "a".repeat(64), pairs: [] } });
+  mocks.allocate.mockResolvedValue("1");
+  mocks.contextAuthorization.mockResolvedValue({ check: mocks.gate, registerKnowledge: vi.fn(), registerToolResult: vi.fn(), registerDerivedHistory: mocks.registerHistory });
   mocks.complete.mockResolvedValue({ message: { id: "reply", text: "answer" } });
   mocks.run.mockResolvedValue({ runtime: "delegate-agent-v2", traceId: "trace", status: "completed", text: "answer", sources: [], artifacts: [], sourceBindings: {},
     events: [], spans: [], calls: [], modelCalls: 1, toolCalls: 0, totalDurationMs: 5, usage, taskUsage: usage });
 });
 describe("V2 worker integration", () => {
+  it("passes Web paired history through a separate derived proof and binds the current source grant", async () => {
+    const safe = { messages: [{ id: "old-user", role: "user", text: "旧问题", timestamp: 1 }, { id: "old-reply", role: "assistant", text: "安全历史回答", timestamp: 2 }],
+      proof: { version: 1, byteBudget: 20000, transcriptHash: "a".repeat(64), pairs: [] } };
+    mocks.safeHistory.mockResolvedValue(safe);
+    await processV2ConversationTurn(makeHost() as any);
+    expect(mocks.contextAuthorization).toHaveBeenCalledWith(expect.objectContaining({ history: [] }));
+    expect(mocks.registerHistory).toHaveBeenCalledWith(safe);
+    expect(mocks.stream).not.toHaveBeenCalled();
+    expect(mocks.registerHistory.mock.invocationCallOrder[0]).toBeLessThan(mocks.run.mock.invocationCallOrder[0]!);
+    const args = mocks.run.mock.calls[0]![0];
+    expect(args.history.map((message: { role: string }) => message.role)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(args.history)).toContain("安全历史回答");
+    expect(mocks.safeHistory).toHaveBeenCalledWith(expect.objectContaining({ excludeInputIds: [], byteBudget: expect.any(Number) }));
+    await args.citationSourceNumber({ id: "artifact", title: "Web", channel: "web" }, { contextSourceRef: "execution:revision" });
+    expect(mocks.allocate).toHaveBeenCalledWith({ runId: "run", outboxId: "outbox", leaseAttempt: 1,
+      source: { id: "artifact", title: "Web", channel: "web" }, receiptReference: "execution:revision" });
+  });
+  it("merges resumed Web task inputs with paired history without resetting writes or usage", async () => {
+    mocks.safeHistory.mockResolvedValue({ messages: [{ id: "old-user", role: "user", text: "旧问题", timestamp: 1 }, { id: "old-reply", role: "assistant", text: "安全历史回答", timestamp: 2 }], proof: {} });
+    mocks.prior.mockResolvedValue({ record: { taskId: "active-task", inputMessageIds: ["active-input"], usage, attemptedWrites: ["a".repeat(64)] },
+      messages: [{ id: "active-input", text: "原待补充问题", createdAt: new Date(3) }] });
+    await processV2ConversationTurn(makeHost() as any);
+    expect(mocks.safeHistory).toHaveBeenCalledWith(expect.objectContaining({ excludeInputIds: ["active-input"] }));
+    const session = mocks.run.mock.calls[0]![0].session;
+    expect(session).toMatchObject({ taskId: "active-task", usage, attemptedWrites: ["a".repeat(64)] });
+    expect(session.messages.map((message: { role: string }) => message.role)).toEqual(["user", "assistant", "user"]);
+    expect(JSON.stringify(session.messages).match(/原待补充问题/g)).toHaveLength(1);
+  });
+  it.each(["telegram", "matrix"])("keeps the old history and citation contract on %s", async channel => {
+    const host = makeHost(); host.item.channel = channel;
+    await processV2ConversationTurn(host as any);
+    expect(mocks.run.mock.calls[0]![0].citationSourceNumber).toBeUndefined();
+    expect(mocks.safeHistory).not.toHaveBeenCalled(); expect(mocks.registerHistory).not.toHaveBeenCalled();
+    expect(mocks.complete.mock.calls[0]![0].citationRanges).toBeUndefined();
+    expect(mocks.history).toHaveBeenCalledOnce();
+  });
+  it("preserves reference body offsets and stores independent diagnostics without post-parse title replacement", async () => {
+    mocks.run.mockResolvedValue({ ...await mocks.run(), text: '`[S:example]`', status: "partial", citationStatus: "invalid",
+      citationRanges: [], citationDiagnostics: { status: "invalid", recoveryCount: 1, firstErrors: [], finalErrors: [], recovery: "used" } });
+    mocks.run.mockClear();
+    await processV2ConversationTurn(makeHost() as any);
+    expect(mocks.complete).toHaveBeenCalledWith(expect.objectContaining({ replyText: '`[S:example]`', citationRanges: [], countUsage: true,
+      agentTrace: expect.objectContaining({ status: "partial", citationStatus: "invalid", citationDiagnostics: expect.objectContaining({ recoveryCount: 1 }) }) }));
+  });
   it("reuses delivery and preserves task counters without invoking the old runtime", async () => {
     await processV2ConversationTurn(makeHost() as any);
     expect(mocks.adapters).toHaveBeenCalledWith(expect.objectContaining({ item: expect.objectContaining({ runId: "run" }) }));
@@ -47,6 +94,7 @@ describe("V2 worker integration", () => {
   it("passes prior user turns as status-tagged reference data, while authorizing the original messages", async () => {
     mocks.history.mockResolvedValue([{ id: "prior-weather", messageText: "深圳天气", createdAt: new Date(0).toISOString(), requestState: "completed" }]);
     const host = makeHost(); host.item.userText = "你好";
+    host.item.channel = "telegram";
     await processV2ConversationTurn(host as any);
     expect(mocks.history).toHaveBeenCalledWith(expect.objectContaining({ includeRequestState: true }));
     expect(mocks.contextAuthorization).toHaveBeenCalledWith(expect.objectContaining({ history: [{ id: "prior-weather", text: "深圳天气" }] }));
@@ -109,7 +157,8 @@ describe("V2 worker integration", () => {
   it("fails closed if history and the resumed task disagree on the same message", async () => {
     mocks.history.mockResolvedValue([{ id: "prior", messageText: "edited" }]);
     mocks.prior.mockResolvedValue({ messages: [{ id: "prior", text: "original" }] });
-    await expect(processV2ConversationTurn(makeHost() as any)).rejects.toThrow();
+    const host = makeHost(); host.item.channel = "telegram";
+    await expect(processV2ConversationTurn(host as any)).rejects.toThrow();
     expect(mocks.contextAuthorization).not.toHaveBeenCalled();
     expect(mocks.run).not.toHaveBeenCalled();
   });

@@ -132,7 +132,7 @@ Web 显示现有进度阶段、最终来源和可展开的调用状态/耗时。
 | `TOOL_OUTPUT_BYTES` | 12000 | 完整 JSON 结果包大小，包括来源/产物元数据 |
 | `CONTEXT_BYTES` | 64000 | 完整发送上下文大小；超限明确停止，不偷偷删掉当前任务或调用配对 |
 | `TOTAL_TOKENS` | 200000 | 累计计量预算，发送前按 UTF-8 大小保守准入 |
-| `OUTPUT_TOKENS` | 2048 | 每次最大输出 |
+| `OUTPUT_TOKENS` | 8192 | 每次最大输出；仍受模型上下文剩余空间限制 |
 | `FINAL_RESERVE_TOKENS` | 512 | 最后回答保留输出量 |
 | `READ_RETRIES` | 1 | 仅 host 明确分类为 transient 的只读错误 |
 | `DIRECT_TOOLS` | 16 | 小目录直接暴露；大目录 discover_tools 分页加载 |
@@ -191,3 +191,19 @@ worker 将最小 `v2Task` 存入原有 `GenerationRun.contextSnapshot.agentTrace
 ## 首批真实产品验收入口
 
 新增独立命令 `eval:agent:v2:product`，对固定13002/15432隔离环境执行10条用例的18个变体，读取实际发布版本、知识授权/注入记录和MCP回执后评审。专用合成代表明确禁止浏览器和代码执行，不修改正常服务链路。详见[运行说明](../packages/model-runtime/evaluation/product/README.md)和[实际验收结果](../reports/agent-v2/product10/report-20261023.md)。本批存在失败和待复核，未达到发布门槛；100条覆盖矩阵不自动继承通过。
+
+### 功能分支 r003：上下文输出准入
+
+每次模型请求使用 PI SDK 的 `clampMaxTokensToContext` 计算真实输出上限；余量低于本轮目标时仅缩小输出上限，不因此禁工具或删除工具历史。最终输出上限不足1024token时不调用模型并说明限制，恰好1024允许。累计预算不足1024时沿用budget_exhausted；SDK上下文不足时为context_limit。默认8192输出、现有contextWindow及其余预算保持。此项属于r003工作区实现，部署与验收见外层测试记录。
+
+### 功能分支r003：Web引用及历史公开契约
+
+以下为r003工作区实现，未表示已合并dev。Web采用`<reference source="1,2">正文</reference>`；最终LF Markdown和UTF-16半开范围同事务保存，公开消息可带`citationRanges: [{id,start,end}]`。旧消息未带范围时保持兼容，不根据标题猜测高亮。Telegram/Matrix保留原协议。
+
+格式错误、未知编号及取得资料却无引用的条件式自查，共用一次禁工具重新生成，沿用原GenerationRun和预算。最终仍非法时交付固定引用校验失败提示；无引用自查后仍无引用不强制引用，也不代表语义证据已核实。所有模型调用usage累加到原任务，保持原计次/预留/交付结算规则，不额外收一次提问次数。
+
+Web同episode加载最近最多8轮完整问答并按字节整轮裁剪。历史范围任一依赖失效时，在模型副本中整个范围占位；原文不改。Web/MCP观察沿用严格超过1小时的模型复用限制，文件下载仍遵循实时权限和保留策略。模型及交付边界重验原文与派生证明，历史编号不自动授予本轮引用资格。
+
+`POST /reps/[slug]/chat/citation-sources`沿用现有访客会话，参数仅messageId/rangeId。身份、代表、线程、消息和范围归属均须匹配；越权404不返回元数据，任一来源失效返回unavailable和空sources，成功仅提供授权后的标题及适用的安全外部URL/域名。界面只显示标题；每次点击重新请求，迟到响应不覆盖当前范围。
+
+前后端共享Markdown规则，显式链接仅显示文字、模型图片仅alt，不执行HTML/MDX；表格、删除线及只读任务项启用，上传附件仍走独立既有入口。仅最终校验后的正文交付，不推送未校验草稿。显示确认会话渠道为字符串web，记忆使用记录渠道仍为枚举WEB；两者不可混用。

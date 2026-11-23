@@ -1,3 +1,4 @@
+import { withLocalTrace, localTraceEvent } from "@delegate/runtime/local-trace";
 import { processV2ConversationTurn } from "./processor-v2";
 
 import { isConversationCancellationRequest } from "@delegate/runtime";
@@ -78,7 +79,10 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       : {}),
   });
   if(!item) return { processed: false as const };
-  return processGenerationItem(config, item);
+  return withLocalTrace("worker", { runId: item.runId, conversationId: item.conversationId, inputMessageId: item.inputMessageId, leaseAttempt: item.leaseAttempt }, async () => {
+    localTraceEvent("worker.claimed", item);
+    return processGenerationItem(config, item);
+  });
 }
 
 async function deliverOperatorItem(
@@ -352,6 +356,7 @@ async function processGenerationItem(config: ConversationWorkerConfig, item: Gen
 
     return await processV2ConversationTurn({ config, item, setup, leaseGuard, workLease });
   } catch(error) {
+    localTraceEvent("worker.processing_error", { error });
     if(isGenerationMemoryDeliveryBlockedError(error) || isGenerationPlanDeliverySupersededError(error)) {
       return { processed: true as const, runId: item.runId, status: "canceled" as const };
     }
@@ -375,6 +380,7 @@ async function processGenerationItem(config: ConversationWorkerConfig, item: Gen
         replyText: agentContextBlockedMessage, senderDisplayName: item.representativeName, intent: "agent_context_blocked", countUsage: false,
         evidenceIndependentSystemFailure: { failureCode: "agent_context_authorization_failed" }
       });
+      localTraceEvent("worker.context_blocked_committed", { messageId: completed.message.id, text: completed.message.text });
       return { processed: true as const, runId: item.runId, status: "context_blocked" as const };
     }
     const errorMessage = error instanceof Error ? error.message : "Pi conversation processing failed.";

@@ -1,3 +1,5 @@
+import { localTraceEvent } from "@delegate/runtime/local-trace";
+import type { PiModelBinding } from "../pi/types";
 import { createPiModelBindingFromEnv } from "../pi/provider";
 import { resolveV2Budget } from "./config";
 import { z } from "zod";
@@ -8,8 +10,9 @@ export function createV2ModelBindingFromEnv(env: NodeJS.ProcessEnv = process.env
   // Explicit deployment capability, never inferred from a question or model name.
   const profile = z.enum(["auto", "qwen-chat-template"]).parse(env.DELEGATE_V2_REASONING_PROFILE ?? "auto");
   const modelEnv = resolveV2ModelEnv(env);
-  const result = createPiModelBindingFromEnv({ ...modelEnv, DELEGATE_PI_MODEL_MAX_RETRIES: "0", DELEGATE_PI_MAX_OUTPUT_TOKENS: String(budget.outputTokens) });
-  if (!result.ok) return result;
+  const created = createPiModelBindingFromEnv({ ...modelEnv, DELEGATE_PI_MODEL_MAX_RETRIES: "0", DELEGATE_PI_MAX_OUTPUT_TOKENS: String(budget.outputTokens) });
+  if (!created.ok) return created;
+  const result = { ...created, binding: withV2TransportCompatibility(created.binding) };
   const model = result.binding.model;
   if (profile === "qwen-chat-template") {
     if (model.api !== "openai-completions") throw new Error("V2 qwen-chat-template requires an OpenAI-compatible Chat Completions transport.");
@@ -45,4 +48,29 @@ export function resolveV2ModelEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.
     DELEGATE_AGICTO_INPUT_COST_USD_PER_1M_TOKENS: env.DELEGATE_V2_MODEL_INPUT_COST_USD_PER_1M_TOKENS ?? "0",
     DELEGATE_AGICTO_OUTPUT_COST_USD_PER_1M_TOKENS: env.DELEGATE_V2_MODEL_OUTPUT_COST_USD_PER_1M_TOKENS ?? "0",
   } : env;
+}
+
+/** PI 0.85.1 adds tools=[] for historical tool messages. OpenAI-compatible
+ * servers may reject it; empty current catalogs must remain answer-only. */
+function withV2TransportCompatibility(binding: PiModelBinding): PiModelBinding {
+  const wrap = (stream: PiModelBinding["streamFn"]): PiModelBinding["streamFn"] => (model, context, options) => stream(model, context, {
+    ...options,
+    onPayload: async (payload, selectedModel) => {
+      const transformed = await options?.onPayload?.(payload, selectedModel);
+      const actual = transformed === undefined ? payload : transformed;
+      let result = actual;
+      if (model.api === "openai-completions" && actual && typeof actual === "object") {
+        const body = actual as Record<string, unknown>;
+        if (Array.isArray(body.tools) && body.tools.length === 0 && !context.tools?.length) {
+          const { tools: _tools, tool_choice: _choice, ...rest } = body;
+          result = rest;
+        }
+      }
+      localTraceEvent("provider.request_payload", { api: model.api, model: model.id, payload: result });
+      return result;
+    },
+  });
+  return { ...binding, streamFn: wrap(binding.streamFn),
+    ...(binding.createObservedStreamFn ? { createObservedStreamFn: (observer, beforeRequest) => wrap(binding.createObservedStreamFn!(observer, beforeRequest)) } : {}),
+  };
 }

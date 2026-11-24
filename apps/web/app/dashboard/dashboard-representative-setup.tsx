@@ -4,6 +4,8 @@ import Link from "next/link";
 import { WorkbenchIcon } from "./representative-workbench";
 import { RepresentativeAvatar } from "./representative-avatar-editor";
 import { RepresentativeBasicFields } from "./representative-basic-fields";
+import { RepresentativeKnowledgeRules } from "./representative-knowledge-rules";
+import { defaultKnowledgeSettings, type KnowledgeSettings } from "@delegate/domain/representative-knowledge-settings";
 import "./representative-basic-info.css";
 import type { FormEvent } from "react";
 import { useEffect, useState, useTransition } from "react";
@@ -46,6 +48,7 @@ type ComputeNetworkMode = "no_network" | "allowlist" | "full";
 type ComputeFilesystemMode = "workspace_only" | "read_only_workspace" | "ephemeral_full";
 type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mcp";
 type RepresentativeSetupSnapshot = {
+  knowledgeSettings?: KnowledgeSettings;
   id: string;
   slug: string;
   avatarUrl?: string | null;
@@ -377,11 +380,12 @@ export function DashboardRepresentativeSetup({
     setMessage(null);
     setError(null);
     try {
-      const bindingChanged = !sameStringSet(knowledgeAssetIds, savedKnowledgeAssetIds);
+      const settings = draft.knowledgeSettings ?? (draft.id.startsWith("onboarding-") && activeSection === "knowledge" ? defaultKnowledgeSettings(knowledgeAssetIds) : undefined);
+      const bindingChanged = !settings && !sameStringSet(knowledgeAssetIds, savedKnowledgeAssetIds);
       const { setupResponse: response, bindingResponse, bindingError } =
         await saveRepresentativeSetupRequests({
           representativeSlug,
-          setup: draft,
+          setup: settings ? {...draft, knowledgeSettings:settings} : draft,
           knowledgeAssetIds,
           bindingChanged,
         });
@@ -466,13 +470,13 @@ export function DashboardRepresentativeSetup({
     );
   }
 
-  if (activeSection === "basics" && draft.id.startsWith("onboarding-")) {
+  if ((activeSection === "basics" || activeSection === "knowledge") && draft.id.startsWith("onboarding-")) {
     return (
       <section className="d-basic-setup">
         <header className="d-workflow-header">
           <div className="d-workflow-toolbar"><Link className="d-back-link" href={`/dashboard?rep=${representativeSlug}&view=representatives&repSection=directory&lang=${locale}`}><WorkbenchIcon name="back"/>对外代理列表</Link><div className="d-workflow-tools"><button type="button" className="d-button d-ghost" onClick={() => setActiveSection("compute")}><WorkbenchIcon name="settings"/>高级配置</button><Link className="d-button d-ghost" href={`/dashboard?rep=${representativeSlug}&view=representatives&repSection=directory&create=1&lang=${locale}`}><WorkbenchIcon name="plus"/>创建对外代理</Link></div></div>
-          <div className="d-agent-heading"><RepresentativeAvatar url={draft.avatarUrl} name={draft.name} className="d-agent-portrait"/><div className="d-agent-heading-body"><div className="d-agent-title-line"><h1>{draft.name}</h1><span className={`d-badge${activeVersion ? " teal" : ""}`}>{activeVersion ? `已发布 v${activeVersion}` : "未发布"}</span></div><div className="d-agent-id"><span className="d-agent-id-label">ID</span><code>{representativeSlug}</code></div><p className="d-agent-description">{draft.tagline}</p><div className="d-agent-metadata"><span><WorkbenchIcon name="knowledge"/>知识文件 {knowledgeAssetIds.length} 份</span></div></div><div className="d-agent-heading-action"><Link className="d-button" href={`/dashboard?rep=${representativeSlug}&view=channels&lang=${locale}`}>发布与渠道 ↗</Link></div></div>
-          <nav className="d-workflow-steps" aria-label="配置步骤">{([{id:"basics",label:"基本信息"},{id:"knowledge",label:"知识与规则"},{id:"pricing",label:"价格"}] as const).map((step,index) => <button className={step.id === "basics" ? "active" : ""} type="button" key={step.id} aria-current={step.id === "basics" ? "step" : undefined} onClick={() => setActiveSection(step.id)}><span className="d-workflow-number">0{index+1}</span>{step.label}</button>)}</nav>
+          <div className="d-agent-heading"><RepresentativeAvatar url={draft.avatarUrl} name={draft.name} className="d-agent-portrait"/><div className="d-agent-heading-body"><div className="d-agent-title-line"><h1>{draft.name}</h1><span className={`d-badge${activeVersion ? " teal" : ""}`}>{activeVersion ? `已发布 v${activeVersion}` : "未发布"}</span></div><div className="d-agent-id"><span className="d-agent-id-label">ID</span><code>{representativeSlug}</code></div><p className="d-agent-description">{draft.tagline}</p><div className="d-agent-metadata"><span><WorkbenchIcon name="knowledge"/>知识文件 {draft.knowledgeSettings?.files.length ?? knowledgeAssetIds.length} 份</span></div></div><div className="d-agent-heading-action"><Link className="d-button" href={`/dashboard?rep=${representativeSlug}&view=channels&lang=${locale}`}>发布与渠道 ↗</Link></div></div>
+          <nav className="d-workflow-steps" aria-label="配置步骤">{([{id:"basics",label:"基本信息"},{id:"knowledge",label:"知识与规则"},{id:"pricing",label:"价格"}] as const).map((step,index) => <button className={step.id === activeSection ? "active" : ""} type="button" disabled={basicSaving || avatarBusy} key={step.id} aria-current={step.id === activeSection ? "step" : undefined} onClick={() => setActiveSection(step.id)}><span className="d-workflow-number">0{index+1}</span>{step.label}</button>)}</nav>
         </header>
         {error ? <p className="status-banner status-error" role="alert">{error}</p> : null}
         {message ? <p className="status-banner status-success" role="status">{message}</p> : null}
@@ -483,7 +487,15 @@ export function DashboardRepresentativeSetup({
           void persistRepresentativeSetup().finally(() => setBasicSaving(false));
         }}>
           <fieldset disabled={basicSaving} className="d-basic-fieldset">
-            <RepresentativeBasicFields
+            {activeSection === "knowledge" ? <RepresentativeKnowledgeRules
+              key={representativeSlug}
+              representativeSlug={representativeSlug}
+              name={draft.name} description={draft.tagline} initialSetup={draft.knowledgePackRevision === 0}
+              settings={draft.knowledgeSettings ?? defaultKnowledgeSettings(knowledgeAssetIds)}
+              faq={draft.knowledgePack.faq} handoffPrompt={draft.handoffPrompt} hours={draft.contract.handoffWindowHours}
+              onChange={(patch) => updateDraft(value => ({...value, ...patch, knowledgeSettings:patch.knowledgeSettings ?? value.knowledgeSettings ?? defaultKnowledgeSettings(knowledgeAssetIds), ...(patch.faq ? {knowledgePack:{...value.knowledgePack,faq:patch.faq}} : {}), ...(patch.hours !== undefined ? {contract:{...value.contract,handoffWindowHours:patch.hours}} : {})}))}
+              onBusy={setAvatarBusy} onSkip={() => setActiveSection("pricing")}
+            /> : <RepresentativeBasicFields
               draft={draft}
               onAvatarBusy={setAvatarBusy}
               onChange={({ identitySummary, ...patch }) => updateDraft(value => ({
@@ -493,11 +505,11 @@ export function DashboardRepresentativeSetup({
                   ...(identitySummary !== undefined ? { identitySummary } : {}),
                 },
               }))}
-            />
+            />}
           </fieldset>
           <footer className="d-footer">
             <span className="d-status">修改保存在草稿中</span>
-            <div className="d-row"><button type="button" className="d-button" disabled>上一步</button>
+            <div className="d-row"><button type="button" className="d-button" disabled={activeSection === "basics" || basicSaving || avatarBusy} onClick={() => setActiveSection("basics")}>上一步</button>
               <button type="submit" className="d-button" disabled={basicSaving || avatarBusy}>
                 {basicSaving ? "正在保存…" : "保存草稿"}
               </button>
@@ -506,7 +518,7 @@ export function DashboardRepresentativeSetup({
                   setError("请填写完整的基本信息。");
                   return;
                 }
-                setActiveSection("knowledge");
+                setActiveSection(activeSection === "basics" ? "knowledge" : "pricing");
               }}>确认并继续</button>
             </div>
           </footer>

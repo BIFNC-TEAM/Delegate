@@ -296,3 +296,6 @@
 ### Approved representative workbench prototype (2026-11-18)
 
 For the representative directory, four-step onboarding and new representative basic-info pages, `D:/Dev/delegate-workbench.html` is the approved visual source. Use its exact layout, Inter / Microsoft YaHei / PingFang SC font stack, 208px sidebar, #2463eb selection accent, #15171c primary buttons, #f5f7fa canvas, #e5e7ec borders, and source spacing. These explicitly approved prototype values override the earlier teal dashboard guidelines for this scope. Preserve real API interactions; prototype-only reset and simulation controls are not production features. Existing modules outside this batch retain their implementation.
+
+### Knowledge and rules — November 2026, Batch 2
+The approved prototype also governs the new representative knowledge/rules tabs, library picker, FAQ review and service-boundary dialog. Retain exact prototype geometry and styles. The confirmed upload limit is 150 MiB. Draft-only settings must not be advertised as active visitor capabilities before runtime integration.

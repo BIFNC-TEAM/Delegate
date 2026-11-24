@@ -284,3 +284,15 @@
 | 2026-08-06 | Moved Memory into representative configuration and automated policy | Removes the standalone Memory System and human memory-approval workflow while retaining fail-closed candidate isolation, versioning, audit, deletion, usage, and reconciliation controls; keeps Knowledge Library and generic Approvals as separate products. |
 
 | 2026-10-27 | Approved reference-based marketing website | Owner approved the blue, centered `Delegate官网.html` direction for `apps/site`; Dashboard and representative UI remain unchanged. |
+
+## Representative Creation — November 2026, Batch 1
+- Approved 11.13 requirements and `delegate-workbench.html` take precedence for new representative creation and new representative basic information only. Other modules retain their existing layouts during incremental rollout.
+- Creation is a four-step guide: work fields, name/avatar, services, expression style. Keep the progress indicator, editable previous steps, and quiet identity preview. Preserve unfinished answers in versioned, owner-scoped browser storage; no representative exists until generation succeeds.
+- AI service suggestions require explicit adoption, preserve original input on failure, and never save or publish automatically. Basic-info generation itself uses deterministic field mapping.
+- After generation, show Creator information and Representative information as two panels. Saving writes the draft; Continue validates and preserves edits without implicit save. Knowledge/pricing and advanced modules keep their current implementations until their batches.
+- New representatives receive a seven-digit, nonzero-leading numeric slug used consistently as their display ID and public route identifier. Existing slugs are not migrated. Show draft content and actual publication status separately, with no public entry before publication and public access.
+- Reuse the existing avatar storage and private draft persistence. Avatars accept JPEG/PNG/WebP up to 5 MiB; default to a text avatar. Disable navigation/save during processing and retain the previous avatar on failure.
+
+### Approved representative workbench prototype (2026-11-18)
+
+For the representative directory, four-step onboarding and new representative basic-info pages, `D:/Dev/delegate-workbench.html` is the approved visual source. Use its exact layout, Inter / Microsoft YaHei / PingFang SC font stack, 208px sidebar, #2463eb selection accent, #15171c primary buttons, #f5f7fa canvas, #e5e7ec borders, and source spacing. These explicitly approved prototype values override the earlier teal dashboard guidelines for this scope. Preserve real API interactions; prototype-only reset and simulation controls are not production features. Existing modules outside this batch retain their implementation.

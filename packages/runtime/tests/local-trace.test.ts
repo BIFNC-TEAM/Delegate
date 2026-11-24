@@ -1,12 +1,45 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { localTraceEvent, sanitizeLocalTrace, withLocalTrace } from "../src/local-trace";
+import { localTraceEvent, localTraceEventLazy, sanitizeLocalTrace, withLocalTrace } from "../src/local-trace";
 const dirs: string[] = [];
 function directory() { const dir = mkdtempSync(join(tmpdir(), "local-trace-")); dirs.push(dir); return dir; }
 afterEach(() => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 describe("explicit local complete tracing", () => {
+  it.each(["disabled", "no-context", "relative-directory", "initialization-failure"])("skips response construction with %s", async mode => {
+    const dir = directory();
+    const blocked = join(dir, "file"); writeFileSync(blocked, "not a directory");
+    vi.stubEnv("DELEGATE_LOCAL_TRACE_ENABLED", mode === "disabled" ? "0" : "1");
+    vi.stubEnv("DELEGATE_LOCAL_TRACE_DIR", mode === "relative-directory" ? "relative" : mode === "initialization-failure" ? blocked : dir);
+    const response = Response.json({ answer: "unchanged" }, { status: 202, headers: { "X-Test": "preserved" } });
+    const copy = response.clone(); const clone = vi.spyOn(response, "clone").mockReturnValue(copy); const parse = vi.spyOn(copy, "json");
+    const factory = vi.fn(async () => ({ status: response.status, body: await response.clone().json() }));
+    const action = async () => { await localTraceEventLazy("http.response", factory); return response; };
+    const returned = mode === "no-context" ? await action() : await withLocalTrace("test", {}, action);
+    expect(returned).toBe(response); expect(factory).not.toHaveBeenCalled(); expect(clone).not.toHaveBeenCalled(); expect(parse).not.toHaveBeenCalled();
+    expect(response.status).toBe(202); expect(response.headers.get("X-Test")).toBe("preserved"); expect(await response.json()).toEqual({ answer: "unchanged" });
+    expect(readdirSync(dir)).toEqual(["file"]);
+  });
+  it("builds response data once inside an active trace without consuming the original", async () => {
+    const dir = directory(); vi.stubEnv("DELEGATE_LOCAL_TRACE_ENABLED", "1"); vi.stubEnv("DELEGATE_LOCAL_TRACE_DIR", dir);
+    const response = Response.json({ answer: "visible", token: "sensitive" }, { status: 202 });
+    const clone = vi.spyOn(response, "clone");
+    const factory = vi.fn(async () => ({ status: response.status, body: await response.clone().json() }));
+    const returned = await withLocalTrace("test", {}, async () => { await localTraceEventLazy("http.response", factory); return response; });
+    expect(returned).toBe(response); expect(factory).toHaveBeenCalledOnce(); expect(clone).toHaveBeenCalledOnce();
+    expect(await response.json()).toEqual({ answer: "visible", token: "sensitive" });
+    const rows = readFileSync(join(dir, readdirSync(dir)[0]!), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    expect(rows.find(row => row.event === "http.response").data).toEqual({ status: 202, body: { answer: "visible", token: "[REDACTED]" } });
+  });
+  it("does not fail the business response when lazy diagnostics throw", async () => {
+    const dir = directory(); vi.stubEnv("DELEGATE_LOCAL_TRACE_ENABLED", "1"); vi.stubEnv("DELEGATE_LOCAL_TRACE_DIR", dir);
+    const response = new Response("business result", { status: 201 });
+    const returned = await withLocalTrace("test", {}, async () => {
+      await localTraceEventLazy("http.response", () => { throw Error("diagnostic failure"); }); return response;
+    });
+    expect(returned).toBe(response); expect(await returned.text()).toBe("business result");
+  });
   it("does not create files when disabled", async () => {
     const dir = directory(); vi.stubEnv("DELEGATE_LOCAL_TRACE_DIR", dir); vi.stubEnv("DELEGATE_LOCAL_TRACE_ENABLED", "0");
     expect(await withLocalTrace("test", {}, async () => { localTraceEvent("secret", "not written"); return 3; })).toBe(3);

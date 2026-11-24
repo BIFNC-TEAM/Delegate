@@ -54,6 +54,13 @@ export class LocalTrace {
   }
 }
 export function localTraceEvent(event: string, data?: unknown) { context.getStore()?.record(event, data); }
+/** Build expensive diagnostic data only when a recorder actually exists. */
+export async function localTraceEventLazy(event: string, createData: () => unknown | Promise<unknown>): Promise<void> {
+  const trace = context.getStore();
+  if (!trace) return;
+  try { trace.record(event, await createData()); }
+  catch { trace.record(event, { dataUnavailable: true }); }
+}
 export function localTraceEnabled() { return process.env.DELEGATE_LOCAL_TRACE_ENABLED === "1" && !!process.env.DELEGATE_LOCAL_TRACE_DIR && isAbsolute(process.env.DELEGATE_LOCAL_TRACE_DIR); }
 export async function withLocalTrace<T>(scope: string, coordinates: Record<string, unknown>, action: () => Promise<T>): Promise<T> {
   if (!localTraceEnabled()) return action();

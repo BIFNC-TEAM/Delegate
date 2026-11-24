@@ -1,4 +1,4 @@
-import { withLocalTrace, localTraceEvent } from "@delegate/runtime/local-trace";
+import { withLocalTrace, localTraceEvent, localTraceEventLazy } from "@delegate/runtime/local-trace";
 import { createHash } from "node:crypto";
 
 import { cookies } from "next/headers";
@@ -104,7 +104,7 @@ export async function POST(request: Request, context: { params: Promise<{ slug: 
   return withLocalTrace("http", { slug, method: "POST" }, async () => {
     localTraceEvent("http.received", { contentType: request.headers.get("content-type"), contentLength: request.headers.get("content-length") });
     const response = await postChat(request, context);
-    localTraceEvent("http.response", { status: response.status, body: await response.clone().json().catch(() => null) });
+    await localTraceEventLazy("http.response", async () => ({ status: response.status, body: await response.clone().json().catch(() => null) }));
     return response;
   });
 }

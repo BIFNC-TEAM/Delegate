@@ -1,4 +1,4 @@
-import { withLocalTrace, localTraceEvent } from "@delegate/runtime/local-trace";
+import { withLocalTrace, localTraceEvent, localTraceEventLazy } from "@delegate/runtime/local-trace";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
@@ -19,7 +19,7 @@ export async function POST(request: Request, context: { params: Promise<{ slug: 
   const coordinates = await context.params;
   return withLocalTrace("display-ack", coordinates, async () => {
     const response = await postDisplayAck(request, context);
-    localTraceEvent("display.ack_response", { status: response.status, body: await response.clone().json().catch(() => null) });
+    await localTraceEventLazy("display.ack_response", async () => ({ status: response.status, body: await response.clone().json().catch(() => null) }));
     return response;
   });
 }

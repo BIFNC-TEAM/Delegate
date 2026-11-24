@@ -1,5 +1,10 @@
 "use client";
 
+import Link from "next/link";
+import { WorkbenchIcon } from "./representative-workbench";
+import { RepresentativeAvatar } from "./representative-avatar-editor";
+import { RepresentativeBasicFields } from "./representative-basic-fields";
+import "./representative-basic-info.css";
 import type { FormEvent } from "react";
 import { useEffect, useState, useTransition } from "react";
 
@@ -43,6 +48,7 @@ type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mc
 type RepresentativeSetupSnapshot = {
   id: string;
   slug: string;
+  avatarUrl?: string | null;
   knowledgePackRevision: number;
   ownerName: string;
   name: string;
@@ -296,10 +302,12 @@ const setupSectionsEn: Array<{
 
 export function DashboardRepresentativeSetup({
   initialSection = "basics",
+  activeVersion,
   representativeSlug,
   locale,
 }: {
   initialSection?: RepresentativeSetupSectionId;
+  activeVersion?: number | null | undefined;
   representativeSlug: string;
   locale: Locale;
 }) {
@@ -323,6 +331,8 @@ export function DashboardRepresentativeSetup({
   const [activeSection, setActiveSection] =
     useState<RepresentativeSetupSectionId>(initialSection);
   const [isPending, startTransition] = useTransition();
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [basicSaving, setBasicSaving] = useState(false);
   const localizedSetupSections = locale === "zh" ? setupSections : setupSectionsEn;
 
   useEffect(() => {
@@ -452,6 +462,55 @@ export function DashboardRepresentativeSetup({
           </div>
           <p className="section-copy">{t.loadingCopy}</p>
         </div>
+      </section>
+    );
+  }
+
+  if (activeSection === "basics" && draft.id.startsWith("onboarding-")) {
+    return (
+      <section className="d-basic-setup">
+        <header className="d-workflow-header">
+          <div className="d-workflow-toolbar"><Link className="d-back-link" href={`/dashboard?rep=${representativeSlug}&view=representatives&repSection=directory&lang=${locale}`}><WorkbenchIcon name="back"/>对外代理列表</Link><div className="d-workflow-tools"><button type="button" className="d-button d-ghost" onClick={() => setActiveSection("compute")}><WorkbenchIcon name="settings"/>高级配置</button><Link className="d-button d-ghost" href={`/dashboard?rep=${representativeSlug}&view=representatives&repSection=directory&create=1&lang=${locale}`}><WorkbenchIcon name="plus"/>创建对外代理</Link></div></div>
+          <div className="d-agent-heading"><RepresentativeAvatar url={draft.avatarUrl} name={draft.name} className="d-agent-portrait"/><div className="d-agent-heading-body"><div className="d-agent-title-line"><h1>{draft.name}</h1><span className={`d-badge${activeVersion ? " teal" : ""}`}>{activeVersion ? `已发布 v${activeVersion}` : "未发布"}</span></div><div className="d-agent-id"><span className="d-agent-id-label">ID</span><code>{representativeSlug}</code></div><p className="d-agent-description">{draft.tagline}</p><div className="d-agent-metadata"><span><WorkbenchIcon name="knowledge"/>知识文件 {knowledgeAssetIds.length} 份</span></div></div><div className="d-agent-heading-action"><Link className="d-button" href={`/dashboard?rep=${representativeSlug}&view=channels&lang=${locale}`}>发布与渠道 ↗</Link></div></div>
+          <nav className="d-workflow-steps" aria-label="配置步骤">{([{id:"basics",label:"基本信息"},{id:"knowledge",label:"知识与规则"},{id:"pricing",label:"价格"}] as const).map((step,index) => <button className={step.id === "basics" ? "active" : ""} type="button" key={step.id} aria-current={step.id === "basics" ? "step" : undefined} onClick={() => setActiveSection(step.id)}><span className="d-workflow-number">0{index+1}</span>{step.label}</button>)}</nav>
+        </header>
+        {error ? <p className="status-banner status-error" role="alert">{error}</p> : null}
+        {message ? <p className="status-banner status-success" role="status">{message}</p> : null}
+        <form onSubmit={event => {
+          event.preventDefault();
+          if (basicSaving || avatarBusy) return;
+          setBasicSaving(true);
+          void persistRepresentativeSetup().finally(() => setBasicSaving(false));
+        }}>
+          <fieldset disabled={basicSaving} className="d-basic-fieldset">
+            <RepresentativeBasicFields
+              draft={draft}
+              onAvatarBusy={setAvatarBusy}
+              onChange={({ identitySummary, ...patch }) => updateDraft(value => ({
+                ...value, ...patch,
+                knowledgePack: {
+                  ...value.knowledgePack,
+                  ...(identitySummary !== undefined ? { identitySummary } : {}),
+                },
+              }))}
+            />
+          </fieldset>
+          <footer className="d-footer">
+            <span className="d-status">修改保存在草稿中</span>
+            <div className="d-row"><button type="button" className="d-button" disabled>上一步</button>
+              <button type="submit" className="d-button" disabled={basicSaving || avatarBusy}>
+                {basicSaving ? "正在保存…" : "保存草稿"}
+              </button>
+              <button type="button" className="d-button d-primary" disabled={basicSaving || avatarBusy} onClick={() => {
+                if (!draft.name.trim() || !draft.tagline.trim() || !draft.tone.trim() || !draft.knowledgePack.identitySummary.trim()) {
+                  setError("请填写完整的基本信息。");
+                  return;
+                }
+                setActiveSection("knowledge");
+              }}>确认并继续</button>
+            </div>
+          </footer>
+        </form>
       </section>
     );
   }

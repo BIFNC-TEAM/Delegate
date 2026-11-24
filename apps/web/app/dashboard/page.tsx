@@ -155,6 +155,7 @@ export default async function DashboardPage({
 
   return (
     <DashboardFramework
+      ownerId={ownerId ?? "local"}
       accountLabel={accountLabel}
       activeSlug={activeSlug}
       activeView={activeView}

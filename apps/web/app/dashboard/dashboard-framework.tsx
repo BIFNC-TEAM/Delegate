@@ -1,3 +1,4 @@
+import { RepresentativeWorkbench } from "./representative-workbench";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
@@ -42,6 +43,7 @@ const functionalDashboardViews = new Set<DashboardView>([
 ]);
 
 type DashboardFrameworkProps = {
+  ownerId: string;
   accountLabel: string;
   activeSlug: string;
   activeView: DashboardView;
@@ -127,6 +129,12 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
   const activeNavigationItem = dashboardNavigation
     .flatMap((group) => group.items)
     .find((item) => item.id === props.activeView);
+
+  if (props.activeView === "representatives") {
+    return <RepresentativeWorkbench accountLabel={props.accountLabel} representativeName={props.representatives.find(rep => rep.slug === props.activeSlug)?.name || "我的对外代理"} count={props.representatives.length} activeSlug={props.activeSlug} locale={props.locale} loginHref={props.loginHref}>
+      <DashboardRepresentativeOperations ownerId={props.ownerId} accountLabel={props.accountLabel} activeSlug={props.activeSlug} initialSnapshot={props.representativeOperations} locale={props.locale} representativeBaseUrl={props.representativeBaseUrl} representatives={props.representatives}/>
+    </RepresentativeWorkbench>;
+  }
 
   return (
     <main
@@ -320,7 +328,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               <a className="dashboard-v2-text-link" href={buildLocalizedHref(`${props.websiteBaseUrl}/`, props.locale)}>
                 {t.website}
               </a>
-              {props.activeView !== "settings" && hasActiveRepresentative ? (
+              {props.activeView !== "settings" && hasActiveRepresentative && (!props.representatives.some(rep => rep.slug === props.activeSlug && rep.id.startsWith("onboarding-")) || props.representatives.some(rep => rep.slug === props.activeSlug && rep.activeVersion && rep.publicMode)) ? (
                 <a
                   className="dashboard-v2-top-button"
                   href={buildLocalizedHref(`${props.representativeBaseUrl}/reps/${props.activeSlug}`, props.locale)}
@@ -341,7 +349,6 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
 
           <div className="dashboard-v2-content">
             {!hasActiveRepresentative
-              && props.activeView !== "representatives"
               && props.activeView !== "knowledge"
               && props.activeView !== "settings" ? (
               <DashboardRepresentativeOnboarding
@@ -357,15 +364,6 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               />
             ) : props.activeView === "knowledge" ? (
               <DashboardKnowledgeLibrary activeSlug={props.activeSlug} locale={props.locale} />
-            ) : props.activeView === "representatives" ? (
-              <DashboardRepresentativeOperations
-                accountLabel={props.accountLabel}
-                activeSlug={props.activeSlug}
-                initialSnapshot={props.representativeOperations}
-                locale={props.locale}
-                representativeBaseUrl={props.representativeBaseUrl}
-                representatives={props.representatives}
-              />
             ) : props.activeView === "inbox" && props.inboxSnapshot ? (
               <DashboardInbox
                 activeSlug={props.activeSlug}

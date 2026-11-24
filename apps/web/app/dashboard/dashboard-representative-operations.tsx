@@ -22,6 +22,7 @@ import {
 import { formatVersionDateTime } from "./dashboard-time";
 
 export function DashboardRepresentativeOperations({
+  ownerId,
   accountLabel,
   activeSlug,
   initialSnapshot,
@@ -29,6 +30,7 @@ export function DashboardRepresentativeOperations({
   representativeBaseUrl,
   representatives,
 }: {
+  ownerId: string;
   accountLabel: string;
   activeSlug: string;
   initialSnapshot: RepresentativeOperationsSnapshot | null;
@@ -162,6 +164,8 @@ export function DashboardRepresentativeOperations({
     });
   }
 
+  const prototypeView = activeSection === "directory" || (activeSection === "setup" && snapshot?.representative.id.startsWith("onboarding-"));
+
   const sectionNavigation = (
     <nav aria-label={zh ? "对外代理模块" : "Digital representative workspace"} className="representative-section-tabs">
       <button className={activeSection === "directory" ? "is-active" : undefined} onClick={() => navigateSection("directory")} type="button">
@@ -178,15 +182,7 @@ export function DashboardRepresentativeOperations({
 
   return (
     <>
-      {activeSection === "directory" ? (
-        <RepresentativeWorkspaceHeader
-          actionLabel={zh ? "配置当前代表" : "Configure active representative"}
-          canAct={Boolean(snapshot)}
-          onAction={() => navigateSection("setup")}
-          summary={zh ? "创建多个对外代理，并为每个代表维护独立的身份、知识、价格与发布版本。" : "Create multiple representatives with independent identity, knowledge, pricing, and release history."}
-          title={zh ? "管理工作区里的全部对外代理。" : "Manage every representative in this workspace."}
-        />
-      ) : activeSection === "setup" && snapshot ? (
+      {prototypeView ? null : activeSection === "setup" && snapshot ? (
         <RepresentativeWorkspaceHeader
           actionLabel={zh ? "查看发布检查" : "Review publish readiness"}
           canAct
@@ -222,10 +218,11 @@ export function DashboardRepresentativeOperations({
         </header>
       ) : null}
 
-      {sectionNavigation}
+      {!prototypeView ? sectionNavigation : null}
 
       <div className="representative-section-panel" hidden={activeSection !== "directory"}>
         <DashboardRepresentativeDirectory
+          ownerId={ownerId}
           activeSlug={activeSlug}
           initialOwnerName={representatives[0]?.ownerName || accountLabel}
           initialRepresentatives={representatives}
@@ -238,6 +235,7 @@ export function DashboardRepresentativeOperations({
         <>
           <div className="representative-section-panel" hidden={activeSection !== "setup"}>
             <DashboardRepresentativeSetup
+              activeVersion={snapshot.representative.activeVersion}
               initialSection={requestedSetupSection}
               locale={locale}
               representativeSlug={activeSlug}

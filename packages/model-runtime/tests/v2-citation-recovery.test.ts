@@ -18,6 +18,144 @@ const answer = '<reference source="1">**结论😀**</reference>';
 
 // Scripted provider decisions: mechanism evidence, not real-model/HTTP tests.
 describe("reference recovery within the native PI loop", () => {
+  it("[r004] keeps repeated sources aligned across parallel tool results", async () => {
+    let release!: (id: string) => void;
+    const breakfastNumber = new Promise<string>(resolve => { release = resolve; });
+    const sources = [{ id: "breakfast", title: "Breakfast", channel: "knowledge" as const },
+      { id: "chicken", title: "Chicken", channel: "knowledge" as const }];
+    const execute = async () => ({ text: "legacy", sources,
+      sourceContents: sources.map(source => ({ sourceId: source.id, text: `${source.id}_BODY` })) });
+    const payloads: Array<{ text: string; sources: Array<{ id: string }> }> = [];
+    const result = await new DelegateAgentV2().run(input([
+      fauxAssistantMessage([fauxToolCall("lookup", {}), fauxToolCall("another_lookup", {})], { stopReason: "toolUse" }),
+      context => {
+        for (const message of context.messages.filter(m => m.role === "toolResult")) {
+          payloads.push(JSON.parse(message.content.filter(c => c.type === "text").map(c => c.text).join("")));
+        }
+        return fauxAssistantMessage('<reference source="2">Breakfast</reference> <reference source="1">Chicken</reference>');
+      },
+    ], { tools: [{ ...tool, execute }, { ...tool, name: "another_lookup", execute }], citationSourceNumber: async source => {
+      if (source.id === "breakfast") return breakfastNumber;
+      queueMicrotask(() => release("2")); return "1";
+    } }));
+    expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect(payload.sources.map(source => source.id)).toEqual(["2", "1"]);
+      expect(payload.text).toBe("〔来源编号：2〕 Breakfast\nbreakfast_BODY\n\n〔来源编号：1〕 Chicken\nchicken_BODY");
+    }
+    expect(result.toolCalls).toBe(2);
+    expect(result.sourceBindings).toEqual({ "1": "chicken", "2": "breakfast" });
+  });
+  it("[r004] clips a reverse-numbered result without retaining omitted bindings", async () => {
+    let release!: (id: string) => void;
+    const first = new Promise<string>(resolve => { release = resolve; });
+    const sources = [{ id: "breakfast", title: "Breakfast", channel: "knowledge" as const },
+      { id: "chicken", title: "Chicken", channel: "knowledge" as const }];
+    let payload: { text: string; sources: Array<{ id: string }>; truncated: boolean; searchIncomplete: boolean } | undefined;
+    const result = await new DelegateAgentV2().run(input([call(), context => {
+      const message = context.messages.filter(m => m.role === "toolResult").at(-1)!;
+      payload = JSON.parse(message.content.filter(c => c.type === "text").map(c => c.text).join(""));
+      return fauxAssistantMessage('<reference source="2">Breakfast</reference>');
+    }], { budget: { toolOutputBytes: 600 }, tools: [{ ...tool, execute: async () => ({ text: "legacy", sources,
+      details: { searchIncomplete: true }, sourceContents: sources.map(source => ({ sourceId: source.id, text: `${source.id}_BODY `.repeat(200) })) }) }],
+      citationSourceNumber: async source => {
+        if (source.id === "breakfast") return first;
+        queueMicrotask(() => release("2")); return "1";
+      } }));
+    expect(payload?.sources.map(source => source.id)).toEqual(["2"]);
+    expect(payload).toMatchObject({ truncated: true, searchIncomplete: true });
+    expect(payload?.text).toContain("breakfast_BODY"); expect(payload?.text).not.toContain("chicken_BODY");
+    expect(result.calls[0]?.outputBytes).toBeLessThanOrEqual(600);
+    expect(result.sourceBindings).toEqual({ "2": "breakfast" });
+  });
+  it.each(["failure", "cancel"] as const)("[r004] does not publish pending sources after numbering %s", async mode => {
+    const controller = new AbortController();
+    let release!: (id: string) => void;
+    const pending = new Promise<string>(resolve => { release = resolve; });
+    const extraSources = [{ id: "pending", title: "Pending", channel: "knowledge" as const },
+      { id: "rejected", title: "Rejected", channel: "knowledge" as const }];
+    const result = await new DelegateAgentV2().run(input([call(), call("second_lookup"), fauxAssistantMessage(answer)], {
+      signal: controller.signal,
+      tools: [tool, { ...tool, name: "second_lookup", execute: async () => ({ text: "new bodies", sources: extraSources,
+        sourceContents: extraSources.map(source => ({ sourceId: source.id, text: source.title })) }) }],
+      citationSourceNumber: async source => {
+        if (source.id === "memory-item") return "1";
+        if (source.id === "pending") return pending;
+        if (mode === "cancel") controller.abort();
+        throw new V2Error("invalid_result");
+      },
+    }));
+    release("2"); await pending; await Promise.resolve();
+    expect(result.sourceBindings).toEqual({ "1": "memory-item" });
+    expect(result.citationRanges?.some(range => range.sourceIds.includes("2"))).toBe(false);
+    expect(result.status).toBe(mode === "cancel" ? "cancelled" : "completed");
+  });
+  it("[r004] keeps bodies with their sources when numbering finishes in reverse order", async () => {
+    let resolveFirst!: (id: string) => void;
+    const first = new Promise<string>(resolve => { resolveFirst = resolve; });
+    const sources = [{ id: "breakfast", title: "Breakfast", channel: "knowledge" as const },
+      { id: "chicken", title: "Chicken", channel: "knowledge" as const }];
+    let received: { text: string; sources: Array<{ id: string }> } | undefined;
+    const result = await new DelegateAgentV2().run(input([call(), context => {
+      const message = context.messages.filter(m => m.role === "toolResult").at(-1)!;
+      const payload = JSON.parse(message.content.filter(c => c.type === "text").map(c => c.text).join(""));
+      received = payload;
+      return fauxAssistantMessage('<reference source="2">Breakfast</reference>');
+    }], { citationSourceNumber: async source => {
+      if (source.id === "breakfast") return first;
+      queueMicrotask(() => resolveFirst("2"));
+      return "1";
+    }, tools: [{ ...tool, execute: async () => ({ text: "legacy", sources,
+      sourceContents: [{ sourceId: "breakfast", text: "BREAKFAST_BODY" }, { sourceId: "chicken", text: "CHICKEN_BODY" }] }) }] }));
+    expect(received?.sources.map(s => s.id)).toEqual(["2", "1"]);
+    expect(received?.text).toBe("〔来源编号：2〕 Breakfast\nBREAKFAST_BODY\n\n〔来源编号：1〕 Chicken\nCHICKEN_BODY");
+    expect(result.sourceBindings).toEqual({ "2": "breakfast", "1": "chicken" });
+    expect(result.citationStatus).toBe("valid");
+  });
+  it("rejects an envelope whose metadata cannot fit a tiny budget without leaking source bindings", async () => {
+    const source = { id: "memory-item", title: "T".repeat(256), channel: "knowledge" as const };
+    const result = await new DelegateAgentV2().run(input([call(), fauxAssistantMessage("Insufficient tool output space.")], {
+      budget: { toolOutputBytes: 256 }, tools: [{ ...tool, execute: async () => ({ text: "body", sources: [source],
+        sourceContents: [{ sourceId: source.id, text: "BODY".repeat(2000) }] }) }],
+    }));
+    expect(result.calls[0]?.status).toBe("error");
+    expect(result.calls[0]?.error).toBe("invalid_result");
+    expect(result.sources).toEqual([]); expect(result.sourceBindings).toEqual({});
+  });
+  it("preserves incomplete search state while rebuilding and truncating bodies", async () => {
+    const sources = [{ id: "memory-item", title: "Source", channel: "knowledge" as const }];
+    const result = await new DelegateAgentV2().run(input([call(), context => {
+      const message = context.messages.filter(m => m.role === "toolResult").at(-1)!;
+      const payload = JSON.parse(message.content.filter(c => c.type === "text").map(c => c.text).join(""));
+      expect(payload.searchIncomplete).toBe(true);
+      expect(payload.truncated).toBe(true);
+      expect(payload.sources).toHaveLength(1);
+      return fauxAssistantMessage(answer);
+    }], { tools: [{ ...tool, execute: async () => ({ text: "Incomplete search", sources, details: { searchIncomplete: true },
+      sourceContents: [{ sourceId: "memory-item", text: "BODY ".repeat(2000) }] }) }], budget: { toolOutputBytes: 600 } }));
+    expect(result.citationStatus).toBe("valid");
+    expect(result.calls[0]!.outputBytes).toBeLessThanOrEqual(600);
+  });
+  it("does not self-check ordinary clarification after retrieving sources", async () => {
+    for (const clarification of [call("request_clarification", { question: "Which day?" }), fauxAssistantMessage("<waiting_user>Which day?")]) {
+      const saveSession = vi.fn(async () => undefined);
+      const result = await new DelegateAgentV2().run(input([call(), clarification], { saveSession }));
+      expect(result.status).toBe("waiting_user"); expect(result.text).toBe("Which day?");
+      expect(result.modelCalls).toBe(2); expect(result.citationDiagnostics?.recoveryCount).toBe(0);
+      expect(saveSession).toHaveBeenCalledOnce();
+    }
+  });
+  it("preserves clarification state during invalid-reference repair", async () => {
+    for (const clarification of [call("request_clarification", { question: '<reference source="99">Which day?</reference>' }), fauxAssistantMessage('<waiting_user><reference source="99">Which day?</reference>')]) {
+      const saveSession = vi.fn(async () => undefined);
+      const result = await new DelegateAgentV2().run(input([call(), clarification, context => {
+        expect(context.tools ?? []).toHaveLength(0);
+        return fauxAssistantMessage("Which day?");
+      }], { saveSession }));
+      expect(result.status).toBe("waiting_user"); expect(result.text).toBe("Which day?");
+      expect(result.citationDiagnostics?.recoveryCount).toBe(1); expect(saveSession).toHaveBeenCalledOnce();
+    }
+  });
   it("keeps more than twelve acquired source bodies aligned with their numbered list", async () => {
     const sources = Array.from({ length: 15 }, (_, index) => ({ id: `doc-${index + 1}`, title: `Doc ${index + 1}`, channel: "knowledge" as const }));
     const execute = async () => ({ text: "legacy assembled text", sources, sourceContents: sources.map(source => ({ sourceId: source.id, text: `BODY_${source.id}` })) });

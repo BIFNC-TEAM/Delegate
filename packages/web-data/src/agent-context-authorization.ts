@@ -140,9 +140,7 @@ async function validateRemote(tx: Tx, scope: State["scope"], reference: z.infer<
   graph.visiting.add(key);
   await validate(tx, receipt.input, delivery, graph, historical, modelTime);
   if (receipt.access.kind === "public_mcp" && fingerprint(await mcpAccess(tx, scope, receipt.access.bindingId, receipt.access.toolName)) !== fingerprint(receipt.access)) return fail();
-  // Reusable snapshots are not live data. Bound model reuse; historical files
-  // remain downloadable under current source permissions and retention.
-  if (!delivery && receipt.access.kind !== "derived_python" && modelTime - Date.parse(receipt.observedAt) > 60 * 60 * 1000) return fail();
+  // Age alone does not revoke access; permissions, integrity and retention still apply.
   const current = await executionParts(tx, scope, reference.executionId);
   if (current.executionHash !== receipt.executionHash || fingerprint(current.artifacts) !== fingerprint(receipt.artifacts)) return fail();
   graph.visiting.delete(key); graph.checked.add(key);
@@ -330,7 +328,7 @@ export async function citationHistoryScopeInTransaction(tx: Tx, runId: string, c
 }
 
 /** Historical source checks may read a completed origin run, but remain model
- * input checks: the one-hour limit is NOT bypassed by using delivery mode.
+ * input checks: current permissions, integrity and retention still apply.
  */
 export async function revalidateCitationHistoryAcquisitionInTransaction(tx: Tx, scope: CitationHistoryScope, originRunId: string,
   acquisition: { kind: "memory"; useRunId: string; itemId: string } | { kind: "remote"; executionId: string; revision: string; toolName: string }, options: { modelTime?: number; delivery?: boolean } = {}) {

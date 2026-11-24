@@ -33,3 +33,22 @@ Citation format validity and source authorization do not prove semantic support.
 HTTP destructive scenarios used newly created synthetic representatives, which were archived afterward and retained by explicit IDs for audit; existing long-lived fixtures were not revoked, reset or deleted. A separate local import of six user-provided source sections is test-environment work, not application source or an assertion that their medical claims have been verified.
 
 Rollback uses the previous application image and stops reading the optional new annotation fields. Keep the additive tables and original messages. Do not drop long-lived volumes or rewrite old citations. Verification does not archive OpenSpec or merge the PR.
+
+## 本轮修复验证（2026-11-24）
+
+- 源码保留在codex/r003-citation-context工作区，未提交、未发布、未重建长期fake镜像；已有apps/web/next-env.d.ts修改未动。
+- pnpm10.23.0：V2引用恢复、解析、运行时及上下文准入4文件127项通过；随后新增极小工具预算回归，引用恢复文件29项通过（新增1项，其余原测试已通过）。
+- @delegate/model-runtime及@delegate/web-data类型检查通过。
+- 独立临时PostgreSQL（127.0.0.1:51982/delegate_citation_test）：交付2项、历史10项、来源持久化9项、卡片4项最终通过，共25项。首次运行中测试夹具未关闭接管导致走成功分支、尝试修改不可变回执被数据库拒绝，以及修改测试时误改了旧拒绝断言；修正夹具为humanInLoop=false、改用artifact指纹变化及恢复断言后，失败的两个文件12项重跑通过。其余两个文件13项此前已通过。未绕过回执不可变约束。
+- 保留期、删除、记忆关闭、撤权等已有用例继续通过。测试使用脚本模型与真实隔离数据库，不代表真实供应商、HTTP认证或浏览器链路已复测；本轮不访问或清理长期fake数据。
+- 待办42保持未完成；已记录关键流程及索引。原r003任务6.4（完整交付/PR）仍未完成，本轮不自动提交或归档。
+
+## 2026-11-24 全量复验
+
+全仓43/43任务、3929测试通过（325默认跳过）；根脚本163通过/5跳过，node:test31通过；r003隔离数据库25通过，真实HTTP17条及实际Chrome/组件夹具通过。当前工作区镜像已更新到本机reps/worker，长期数据卷保留。完整证据、失败尝试和限制见外层docs/tests/r003-citation-context/full-validation-2026-11-24.md。6.4仍未提交PR，不自动归档。
+
+## PR提交前全量检查（2026-11-24）
+
+当前分支工作区重新执行Turbo typecheck/test/build：43/43任务成功、0缓存，3934项通过、325项专用环境默认跳过。根scripts/tests：163通过、5跳过；原生node:test部署脚本31通过。Prisma schema校验及seed类型检查通过（未执行seed）。隔离delegate_citation_test数据库四个引用套件25/25通过，运行器testTimeout=15000；不访问长期fake数据。
+
+r004来源配对修复包含可控逆序、并行重复来源、裁剪及失败/取消5项新增回归；真实Web前后证据见外层docs/tests/r004-source-pairing/README.md。缺引用、只给标题加范围和无取证编造仍未解决。提交不含原有apps/web/next-env.d.ts开发类型路径改动。

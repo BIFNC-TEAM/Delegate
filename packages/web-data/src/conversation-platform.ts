@@ -3100,7 +3100,8 @@ export async function completeInlineGenerationRun(input: {
       },
     });
     if (input.citationRanges) message = await persistCitationRangesInTransaction(tx, {
-      runId: run.id, messageId: message.id, text: replyText, ranges: input.citationRanges,
+      runId: run.id, messageId: message.id, text: resolvedReplyText,
+      ranges: resolvedReplyText === replyText ? input.citationRanges : [],
     });
     const completed = await tx.generationRun.update({
       where: { id: run.id },

@@ -15,6 +15,19 @@ if (enabled) {
 const suite = enabled ? describe : describe.skip;
 suite("r003 correction, persistence and delivery on isolated PostgreSQL", () => {
   afterAll(async () => { await prisma.$disconnect(); });
+  it("clears old ranges when a skipped handoff replaces the answer", async () => {
+    const f = await prepared();
+    await prisma.representative.update({ where: { id: f.repId }, data: { humanInLoop: false } });
+    await allocateEpisodeCitationSource({ ...f.input, source: f.source });
+    const completed = await completeInlineGenerationRun({ ...f.input, conversationId: f.conversationId,
+      replyText: "Original answer", senderDisplayName: "Synthetic", countUsage: false, completeOutbox: false,
+      humanHandoff: { reason: "visitor_request", summary: "Synthetic handoff request" },
+      citationRanges: [{ start: 0, end: 8, sourceIds: ["1"] }] });
+    expect(completed.message.text).not.toBe("Original answer");
+    expect(completed.message.content).toMatchObject({ citationProtocol: "reference-v1", citationManifest: { count: 0 } });
+    expect(await prisma.messageCitationRange.count({ where: { messageId: completed.message.id } })).toBe(0);
+    expect((await prisma.generationRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe("COMPLETED");
+  });
   it("counts one delivery for a corrected answer and keeps all usage in the original run", async () => {
     const f = await prepared();
     const visitor = `citation-delivery-${f.runId}`;

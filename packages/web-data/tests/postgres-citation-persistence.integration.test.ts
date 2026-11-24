@@ -119,7 +119,7 @@ suite("r003 source registry on real isolated PostgreSQL and source authorization
     expect(first.run.outputMessageId).toBe(first.message.id);
     expect(first.message.content).toMatchObject({ citationProtocol: "reference-v1" });
   });
-  it("keeps MCP receipts versioned and rejects re-use after the existing one-hour limit", async () => {
+  it("keeps MCP receipts versioned and accepts authorized observations after one hour", async () => {
     const f = await fixture(); const guard = await createAgentContextAuthorization(f.input);
     const binding = await prisma.representativeMcpBinding.create({ data: { representativeId: f.repId, slug: "fixture", displayName: "Synthetic public service",
       serverUrl: "https://open-meteo.caseyjhand.com/mcp", allowedToolNames: ["openmeteo_search_locations"], approvalRequired: true } });
@@ -134,15 +134,11 @@ suite("r003 source registry on real isolated PostgreSQL and source authorization
         requestedCommand: "openmeteo_search_locations", requestPayload: { toolArguments: { name: "Synthetic" } }, status: "SUCCEEDED", finishedAt: new Date(Date.now() - ageMs) } });
       await prisma.artifact.create({ data: { ...scope, sessionId: session.id, toolExecutionId: execution.id, kind: "JSON", bucket: "synthetic", objectKey: randomUUID(), mimeType: "application/json", sizeBytes: 2, sha256: digest("{}") } });
       await prisma.$transaction(tx => persistAgentExecutionSourceReceipt(tx, execution.id, captured!));
-      if (ageMs) {
-        await expect(guard.registerToolResult(execution.id)).rejects.toThrow();
-      } else {
-        const reference = await guard.registerToolResult(execution.id);
-        const source = { id: "fixture:openmeteo_search_locations:synthetic", title: "Synthetic MCP", channel: "mcp" as const };
-        expect(await allocateEpisodeCitationSource({ ...f.input, source, receiptReference: reference! })).toBe("1");
-        const receipt = await prisma.toolExecution.findUniqueOrThrow({ where: { id: execution.id }, select: { sourceReceipt: true } });
-        expect(JSON.stringify(receipt.sourceReceipt)).not.toContain("toolArguments");
-      }
+      const reference = await guard.registerToolResult(execution.id);
+      const source = { id: "fixture:openmeteo_search_locations:synthetic", title: "Synthetic MCP", channel: "mcp" as const };
+      expect(await allocateEpisodeCitationSource({ ...f.input, source, receiptReference: reference! })).toBe(ageMs ? "1" : "2");
+      const receipt = await prisma.toolExecution.findUniqueOrThrow({ where: { id: execution.id }, select: { sourceReceipt: true } });
+      expect(JSON.stringify(receipt.sourceReceipt)).not.toContain("toolArguments");
     }
   });
 });

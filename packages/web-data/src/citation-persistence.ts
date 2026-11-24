@@ -82,7 +82,7 @@ async function resolveVersion(tx: Tx, authority: Authority, source: Source, rece
   if (!execution?.finishedAt || !execution.sourceReceipt) return reject();
   if (source.channel === "web" && !execution.artifacts.some(artifact => artifact.id === source.id)) return reject();
   const observedAt = z.object({ observedAt: z.string().datetime() }).parse(execution.sourceReceipt).observedAt;
-  // Current model authorization has already enforced the receipt's freshness.
+  // Current authorization checks permissions, receipt integrity and retention.
   // Keep the exact receipt revision, never equate observations by URL alone.
   return { sourceKind: source.channel, coordinate: { executionId: grant.executionId, sourceId: source.id, toolName: grant.toolName },
     versionKey: grant.executionId, contentHash: grant.revision, metadata: publicMetadata(source, observedAt),

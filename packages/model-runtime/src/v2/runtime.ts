@@ -67,6 +67,7 @@ export class DelegateAgentV2 {
     let emptyTruncationFinalization = false;
     const referenceProtocol = !!input.citationSourceNumber;
     let citationRecoveryUsed = false;
+    let recoveringClarification = false;
     let recoveryToolAttempted = false;
     let citationResult: CitationParseResult | undefined;
     const citationDiagnostics: CitationDiagnostics = { status: "not_cited", recoveryCount: 0, firstErrors: [], finalErrors: [], recovery: "not_needed" };
@@ -274,17 +275,19 @@ export class DelegateAgentV2 {
             if (clarification || !hasToolCall) {
               const draft = clarification ?? message.content.filter(c => c.type === "text").map(c => c.text).join("");
               const parsed = inspectCitationDraft(draft);
-              const needsSelfCheck = sources.size > 0 && !parsed.ranges.length && !!parsed.text.trim();
+              const isClarification = !!clarification || readCitationAnswer(draft).state === "waiting_user";
+              const needsSelfCheck = !isClarification && sources.size > 0 && !parsed.ranges.length && !!parsed.text.trim();
               if (!citationRecoveryUsed && (parsed.errors.length || needsSelfCheck)) {
                 citationDiagnostics.firstErrors = parsed.errors;
                 if (!emptyTruncationFinalization && totals().modelTurns < budget.modelTurns
                   && totals().attempts < budget.attempts && remainingMs() > budget.finalReserveMs
                   && budget.totalTokens - totals().tokens > budget.finalReserveTokens) {
                   citationRecoveryUsed = true;
+                  recoveringClarification = isClarification;
                   citationDiagnostics.recovery = "used";
                   clarification = undefined;
                   agent!.followUp({ role: "user", timestamp: Date.now(), content:
-                    `服务端引用校验反馈（不是新用户任务或证据）：${JSON.stringify({ errors: parsed.errors, legalSourceNumbers: [...sources.keys()], selfCheck: !parsed.errors.length })}。请仅为原问题重新给出完整回答，不调用工具。合法集合为空时移除引用，不编造来源。若未采用资料的通用回答无需强行引用。` });
+                    `服务端引用校验反馈（不是新用户任务或证据）：${JSON.stringify({ errors: parsed.errors, legalSourceNumbers: [...sources.keys()], selfCheck: !parsed.errors.length })}。${recoveringClarification ? "请保留原澄清意图，仅修正澄清问题，以<waiting_user>输出，不直接作答" : "请仅为原问题重新给出完整回答"}，不调用工具。合法集合为空时移除引用，不编造来源。若未采用资料的通用回答无需强行引用。` });
                   return false;
                 }
                 citationDiagnostics.recovery = "budget_exhausted";
@@ -357,7 +360,7 @@ export class DelegateAgentV2 {
       if (signal.aborted) throw signal.reason;
       if (stopped) throw stopped === "operation_failed" ? new Error(stopped) : new V2Error(stopped as V2Error["code"]);
       if (referenceProtocol) {
-        declaredCitationState = clarification ? "waiting_user" : readCitationAnswer(answer).state;
+        declaredCitationState = clarification || recoveringClarification ? "waiting_user" : readCitationAnswer(answer).state;
         citationResult = inspectCitationDraft(clarification ?? answer);
         if (recoveryToolAttempted) citationResult.errors.push({ code: "tool_call_during_recovery", offset: 0, offsetSpace: "draft" });
         citationDiagnostics.finalErrors = citationResult.errors;
@@ -471,8 +474,7 @@ async function normalizeResult(result: PiCapabilityResult, limit: number, scope:
   }
   if (["failed", "error", "unavailable", "pending_approval", "confirmation_required"].includes(status)) throw new V2Error("unavailable");
   let text = result.text;
-  const bindings: Array<[string, string]> = [];
-  const mapped = await Promise.all((sourceNumber ? result.sources ?? [] : (result.sources ?? []).slice(0, 12)).map(async source => {
+  const records = await Promise.all((sourceNumber ? result.sources ?? [] : (result.sources ?? []).slice(0, 12)).map(async source => {
     if (!source.id || !source.title || !["knowledge", "web", "mcp"].includes(source.channel)) throw new V2Error("invalid_result");
     const safe: PiSource = { id: source.id, title: truncateUtf8(source.title, 256), channel: source.channel,
       ...(source.provider && /^[\p{L}\p{N} ._-]{1,80}$/u.test(source.provider) ? { provider: source.provider } : {}),
@@ -482,21 +484,25 @@ async function normalizeResult(result: PiCapabilityResult, limit: number, scope:
     const id = sourceNumber ? await sourceNumber(safe, { ...(result.contextSourceRef ? { contextSourceRef: result.contextSourceRef } : {}), ...(result.resultRef ? { resultRef: result.resultRef } : {}) }) : fingerprint([scope, source.channel, source.id, source.version ?? "", source.url ?? ""]).slice(0, 24);
     if (sourceNumber && !/^[1-9]\d*$/.test(id)) throw new V2Error("invalid_result");
     safe.id = id;
-    bindings.push([id, source.id]);
-    text = text.replaceAll(`[S:${source.id}]`, sourceNumber ? `〔来源编号：${id}〕` : `[S:${id}]`);
-    return safe;
+    return { source: safe, originalSourceId: source.id };
   }));
+  // Promise.all preserves input order; keep the binding in that same record,
+  // rather than pairing it with a separate array ordered by completion time.
+  const mapped = records.map(record => record.source);
+  for (const { source, originalSourceId } of records) {
+    text = text.replaceAll(`[S:${originalSourceId}]`, sourceNumber ? `〔来源编号：${source.id}〕` : `[S:${source.id}]`);
+  }
   const visibleArtifacts = (result.artifacts ?? []).slice(0, 10).map(a => {
     if (typeof a.id !== "string" || !a.id || typeof a.fileName !== "string" || !a.fileName || typeof a.mimeType !== "string" || !Number.isSafeInteger(a.sizeBytes) || a.sizeBytes < 0) throw new V2Error("invalid_result");
     return { id: a.id, fileName: a.fileName, mimeType: a.mimeType, sizeBytes: a.sizeBytes, ...(a.url && safeUrl(a.url) ? { url: a.url } : {}) };
   });
-  const envelope = { status, text: "", sources: mapped, artifacts: visibleArtifacts, truncated: false };
+  const envelope = { status, text: "", sources: mapped, artifacts: visibleArtifacts, truncated: false,
+    ...(result.details?.searchIncomplete === true ? { searchIncomplete: true } : {}) };
   if (sourceNumber && result.sourceContents?.length) {
     if (result.sourceContents.length !== mapped.length || new Set(result.sourceContents.map(item => item.sourceId)).size !== mapped.length) throw new V2Error("invalid_result");
     envelope.sources = [];
-    for (const [index, source] of mapped.entries()) {
-      const original = bindings[index]![1];
-      const body = result.sourceContents.find(item => item.sourceId === original);
+    for (const { source, originalSourceId } of records) {
+      const body = result.sourceContents.find(item => item.sourceId === originalSourceId);
       if (!body || typeof body.text !== "string" || !body.text.trim()) throw new V2Error("invalid_result");
       const prefix = `${envelope.text ? "\n\n" : ""}〔来源编号：${source.id}〕 ${source.title}\n`;
       const candidate = { ...envelope, sources: [...envelope.sources, source], text: envelope.text + prefix + body.text };
@@ -525,7 +531,7 @@ async function normalizeResult(result: PiCapabilityResult, limit: number, scope:
   }
   signal.throwIfAborted();
   for (const source of envelope.sources) sources.set(source.id, source);
-  for (const [id, original] of bindings) if (envelope.sources.some(source => source.id === id)) sourceBindings[id] = original;
+  for (const { source, originalSourceId } of records) if (envelope.sources.some(visible => visible.id === source.id)) sourceBindings[source.id] = originalSourceId;
   for (const artifact of visibleArtifacts) artifacts.set(artifact.id, artifact);
   return envelope;
 }

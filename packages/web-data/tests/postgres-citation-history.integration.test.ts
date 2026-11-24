@@ -100,7 +100,7 @@ suite("safe citation conversation history on real PostgreSQL", () => {
     expect(cropped.proof.pairs).toHaveLength(2);
     expect((await loadSafeCitationHistory({ ...input, byteBudget: 0 })).messages).toEqual([]);
   });
-  it("keeps the existing strict one-hour boundary for historical Web observations", async () => {
+  it("keeps authorized Web observations usable after one hour and rejects corrupted receipts", async () => {
     const f = await fixture(); const guard = await createAgentContextAuthorization(f.input);
     const web = await webObservation(f, guard);
     await allocateEpisodeCitationSource({ ...f.input, source: web.source, receiptReference: web.reference });
@@ -122,13 +122,15 @@ suite("safe citation conversation history on real PostgreSQL", () => {
       kind: "JSON", bucket: "synthetic", objectKey: randomUUID(), mimeType: "application/json", sizeBytes: 2, sha256: digest("{}") } });
     await prisma.$transaction(tx => persistAgentExecutionSourceReceipt(tx, execution.id, captured!));
     now.mockReturnValue(time + 3600_001);
-    await expect(nextGuard.check("model")).rejects.toThrow();
+    await expect(nextGuard.check("model")).resolves.toBeUndefined();
     expect(await isAgentContextArtifactAuthorized({ runId: current.runId, representativeId: f.repId, conversationId: f.conversationId,
       audienceIdentityId: f.audienceId, toolExecutionId: execution.id, artifactId: artifact.id })).toBe(true);
-    await expect(loadSafeCitationHistory({ ...current.input, byteBudget: 20_000 })).rejects.toThrow();
+    expect((await loadSafeCitationHistory({ ...current.input, byteBudget: 20_000 })).messages[1]!.text).toBe("网页事实；其他文字");
     const later = await nextRun(f);
     const expired = await loadSafeCitationHistory({ ...later.input, byteBudget: 20_000 });
-    expect(expired.messages[1]!.text).toBe(`${CITATION_HISTORY_UNAVAILABLE}；其他文字`);
+    expect(expired.messages[1]!.text).toBe("网页事实；其他文字");
+    await prisma.artifact.update({ where: { id: web.source.id }, data: { sha256: digest("changed") } });
+    await expect(nextGuard.check("model")).rejects.toThrow();
   });
   it("rejects copied proofs across identities or episodes", async () => {
     const a = await prepared(); await allocateEpisodeCitationSource({ ...a.input, source: a.source });

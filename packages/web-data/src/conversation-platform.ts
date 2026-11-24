@@ -11712,6 +11712,11 @@ export async function publishRepresentativeVersion(input: {
       },
     });
     if (!representative) throw new Error("Representative not found.");
+    // The workbench draft is intentionally isolated from live links. Never
+    // publish a version that silently ignores its configured access/boundaries.
+    if (representative.knowledgePack?.workbenchSettings) {
+      throw new Error("新版知识与规则已保存为草稿；发布同步、访客下载和服务边界执行尚未接通，暂不能发布此草稿。");
+    }
 
     const readiness = buildRepresentativeReadiness({
       displayName: representative.displayName,

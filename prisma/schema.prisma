@@ -2590,6 +2590,7 @@ model KnowledgePack {
   faq              Json
   materials        Json
   policies         Json
+  workbenchSettings Json?
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
   representative   Representative @relation(fields: [representativeId], references: [id])

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { createRepresentative, getRepresentativeSetupSnapshot, listRepresentativeDirectoryItems, updateRepresentativeSetup } from "../src/representative-setup";
 import { prisma } from "../src/prisma";
+import { defaultKnowledgeSettings } from "@delegate/domain/representative-knowledge-settings";
+import { publishRepresentativeVersion } from "../src/conversation-platform";
 
 const enabled = process.env.DELEGATE_ONBOARDING_E2E === "1";
 if (enabled) {
@@ -30,5 +32,15 @@ if (enabled) {
     expect(await listRepresentativeDirectoryItems(foreign.id)).toEqual([]);
     await expect(updateRepresentativeSetup({ representativeSlug: a.slug, input: { ...saved, name: "名".repeat(61) }, syncOpenViking: false })).rejects.toThrow("字数上限");
     await expect(updateRepresentativeSetup({ representativeSlug: a.slug, input: { ...saved, avatarUrl: "https://untrusted.example/avatar.jpg" }, syncOpenViking: false })).rejects.toThrow("Invalid avatar reference");
+    const settings = defaultKnowledgeSettings();
+    const asset=await prisma.knowledgeAsset.create({data:{ownerId:owner.id,kind:"TEXT",title:"草稿关联测试",status:"READY"}});
+    settings.files=[{id:asset.id,allowDownload:true}];
+    settings.boundaries[0]!.action = "decline";
+    const staged=await updateRepresentativeSetup({representativeSlug:a.slug,input:{...saved,knowledgeSettings:settings},syncOpenViking:false});
+    expect((await getRepresentativeSetupSnapshot(a.slug))?.knowledgeSettings).toEqual(settings);
+    expect(await prisma.knowledgeAssetRepresentative.count({where:{representativeId:a.id}})).toBe(0);
+    await expect(updateRepresentativeSetup({representativeSlug:a.slug,input:{...staged,knowledgeSettings:{...settings,files:[{id:"foreign-or-missing",allowDownload:true}]}},syncOpenViking:false})).rejects.toThrow("不可用");
+    await expect(updateRepresentativeSetup({representativeSlug:a.slug,input:{...staged,knowledgeSettings:{...settings,featuredFaqIds:["missing-faq"]}},syncOpenViking:false})).rejects.toThrow("展示项");
+    await expect(publishRepresentativeVersion({representativeSlug:a.slug,publishedBy:owner.id,ownerId:owner.id})).rejects.toThrow("尚未接通");
   });
 });

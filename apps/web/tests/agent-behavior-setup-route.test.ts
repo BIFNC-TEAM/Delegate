@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { defaultKnowledgeSettings } from "@delegate/domain/representative-knowledge-settings";
 const mocks = vi.hoisted(() => ({ update: vi.fn(), auth: vi.fn(), authError: vi.fn(), skillAccess: vi.fn() }));
 vi.mock("@delegate/web-data", () => ({
   updateRepresentativeSetup: mocks.update, getRepresentativeSetupSnapshot: vi.fn(), maybeSyncRepresentativeOpenVikingResources: vi.fn(), assertOwnerCanManageSkills: mocks.skillAccess,
@@ -24,6 +25,11 @@ describe("Owner-only answer policy setup input", () => {
   it("does not invent or clear configuration for older clients", async () => {
     expect((await request({})).status).toBe(200);
     expect(mocks.update.mock.calls[0]![0].input).not.toHaveProperty("agentBehavior");
+  });
+  it("forwards knowledge drafts and avatar references rather than silently dropping them", async()=>{
+    const knowledgeSettings=defaultKnowledgeSettings();
+    expect((await request({knowledgeSettings,avatarUrl:"/api/avatars/test"})).status).toBe(200);
+    expect(mocks.update.mock.calls[0]![0].input).toMatchObject({knowledgeSettings,avatarUrl:"/api/avatars/test"});
   });
   it("performs no save for unauthorized callers", async () => {
     mocks.auth.mockRejectedValue(new Error("forbidden")); mocks.authError.mockReturnValue(new Response("forbidden", { status: 403 }));

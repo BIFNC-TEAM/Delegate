@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import { knowledgeSettingsSchema, normalizeFaqQuestion, type KnowledgeSettings } from "@delegate/domain/representative-knowledge-settings";
 import { onboardingCreateSchema, generateRepresentativeBasics } from "@delegate/domain/representative-onboarding";
 import { managedAvatarObjectKey } from "./owner-avatar-storage";
 import { createHash } from "node:crypto";
@@ -147,6 +148,7 @@ const editableKnowledgeDocumentSchema = z.object({
 });
 
 const representativeSetupUpdateSchema = z.object({
+  knowledgeSettings: knowledgeSettingsSchema.optional(),
   knowledgePackRevision: z.number().int().min(0),
   ownerName: z.string().trim().min(1),
   avatarUrl: z.string().max(2048).nullable().optional(),
@@ -211,6 +213,7 @@ export type RepresentativeSetupSnapshot = Pick<
   | "contract"
   | "handoffPrompt"
 > & {
+  knowledgeSettings?: KnowledgeSettings;
   avatarUrl?: string | null;
   knowledgePackRevision: number;
   publicMode: boolean;
@@ -1234,6 +1237,16 @@ export async function updateRepresentativeSetup(
       throw new Error(`Representative "${params.representativeSlug}" not found.`);
     }
     if (input.avatarUrl && input.avatarUrl !== representative.avatarUrl && !managedAvatarObjectKey(input.avatarUrl, representative.ownerId)) throw new Error("Invalid avatar reference.");
+    if (input.knowledgeSettings) {
+      const ids = input.knowledgeSettings.files.map(f => f.id);
+      const count = await prisma.knowledgeAsset.count({where:{id:{in:ids},ownerId:representative.ownerId,archivedAt:null}});
+      if (count !== ids.length) throw new Error("部分文件已不可用，请刷新知识库列表后重新选择。");
+      const faq = input.knowledgePack.faq;
+      if (faq.some(q=>Array.from(q.title).length>100 || Array.from(q.summary).length>2000)) throw new Error("问题最多100字，答案最多2000字。");
+      if (new Set(faq.map(q=>normalizeFaqQuestion(q.title))).size !== faq.length) throw new Error("存在重复问题，请合并后保存。");
+      if (input.knowledgeSettings.featuredFaqIds.some(id=>!faq.some(q=>q.id===id))) throw new Error("常见问题展示项已不存在。");
+      if (Array.from(input.handoffPrompt).length > 600) throw new Error("人工接管提示语最多600字。");
+    }
     if (representative.id.startsWith("onboarding-")) {
       const within = (text: string, max: number) => Array.from(text).length <= max;
       if (!within(input.name, 60) || !within(input.tagline, 500) || !within(input.tone, 600) || !within(input.knowledgePack.identitySummary, 1200)) throw new Error("基本信息超过字数上限。");
@@ -1305,6 +1318,7 @@ export async function updateRepresentativeSetup(
         create: {
           representativeId: representative.id,
           revision: 1,
+          ...(input.knowledgeSettings ? {workbenchSettings:input.knowledgeSettings} : {}),
           identitySummary: input.knowledgePack.identitySummary,
           faq: normalizeKnowledgeDocuments(input.knowledgePack.faq, "faq"),
           materials: normalizeKnowledgeDocuments(input.knowledgePack.materials, "materials"),
@@ -1312,6 +1326,7 @@ export async function updateRepresentativeSetup(
         },
         update: {
           revision: { increment: 1 },
+          ...(input.knowledgeSettings ? {workbenchSettings:input.knowledgeSettings} : {}),
           identitySummary: input.knowledgePack.identitySummary,
           faq: normalizeKnowledgeDocuments(input.knowledgePack.faq, "faq"),
           materials: normalizeKnowledgeDocuments(input.knowledgePack.materials, "materials"),
@@ -1462,6 +1477,7 @@ function serializeRepresentativeSetup(
     slug: representative.slug,
     avatarUrl: representative.avatarUrl,
     knowledgePackRevision: representative.knowledgePack?.revision ?? 0,
+    ...(representative.knowledgePack?.workbenchSettings ? {knowledgeSettings:knowledgeSettingsSchema.parse(representative.knowledgePack.workbenchSettings)} : {}),
     ownerName: representative.owner.displayName,
     name: representative.displayName,
     tagline: representative.roleSummary,

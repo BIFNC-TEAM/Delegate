@@ -1,5 +1,7 @@
 import { after, NextResponse } from "next/server";
 import { agentBehaviorSchema } from "@delegate/domain";
+import { knowledgeSettingsSchema } from "@delegate/domain/representative-knowledge-settings";
+import { z } from "zod";
 
 import {
   assertOwnerCanManageSkills,
@@ -63,6 +65,8 @@ export async function PATCH(
       syncOpenViking: false,
       changedBy: session?.ownerId ?? "local-owner",
       input: {
+        ...(body.knowledgeSettings !== undefined ? {knowledgeSettings:knowledgeSettingsSchema.parse(body.knowledgeSettings)} : {}),
+        ...(body.avatarUrl !== undefined ? {avatarUrl:z.string().max(2048).nullable().parse(body.avatarUrl)} : {}),
         knowledgePackRevision:
           typeof body.knowledgePackRevision === "number"
             ? body.knowledgePackRevision

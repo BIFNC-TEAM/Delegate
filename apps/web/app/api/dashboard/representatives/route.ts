@@ -1,3 +1,4 @@
+import { onboardingCreateSchema } from "@delegate/domain/representative-onboarding";
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 
@@ -49,7 +50,7 @@ export async function POST(request: Request) {
     }
 
     const created = await createRepresentative(
-      normalized.input,
+      { ...normalized.input, ...(body.onboarding !== undefined ? { onboarding: onboardingCreateSchema.parse(body.onboarding) } : {}) },
       session?.ownerId ? { ownerId: session.ownerId } : {},
     );
 

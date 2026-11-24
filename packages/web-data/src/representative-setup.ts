@@ -1,3 +1,6 @@
+import { randomInt } from "node:crypto";
+import { onboardingCreateSchema, generateRepresentativeBasics } from "@delegate/domain/representative-onboarding";
+import { managedAvatarObjectKey } from "./owner-avatar-storage";
 import { createHash } from "node:crypto";
 
 import {
@@ -146,6 +149,7 @@ const editableKnowledgeDocumentSchema = z.object({
 const representativeSetupUpdateSchema = z.object({
   knowledgePackRevision: z.number().int().min(0),
   ownerName: z.string().trim().min(1),
+  avatarUrl: z.string().max(2048).nullable().optional(),
   name: z.string().trim().min(1),
   tagline: z.string().trim().min(1),
   tone: z.string().trim().min(1),
@@ -175,6 +179,7 @@ const representativeSetupUpdateSchema = z.object({
 });
 
 const representativeCreateSchema = z.object({
+  onboarding: onboardingCreateSchema.optional(),
   ownerName: z.string().trim().min(1),
   representativeName: z.string().trim().min(1),
   slug: z
@@ -206,6 +211,7 @@ export type RepresentativeSetupSnapshot = Pick<
   | "contract"
   | "handoffPrompt"
 > & {
+  avatarUrl?: string | null;
   knowledgePackRevision: number;
   publicMode: boolean;
   humanInLoop: boolean;
@@ -306,6 +312,8 @@ export type RepresentativeDirectoryItem = {
   updatedAt: string;
   lifecycleState: string;
   activeVersion: number | null;
+  avatarUrl?: string | null;
+  publicMode?: boolean;
 };
 
 export type PublicRepresentativeRuntimeResult =
@@ -572,6 +580,8 @@ export async function listRepresentativeDirectoryItems(ownerId?: string | null):
       slug: representative.slug,
       ownerName: representative.owner.displayName,
       name: representative.displayName,
+      avatarUrl: representative.avatarUrl,
+      publicMode: representative.publicMode,
       tagline: representative.roleSummary,
       updatedAt: representative.updatedAt.toISOString(),
       lifecycleState: representative.lifecycleState.toLowerCase(),
@@ -612,18 +622,37 @@ export async function createRepresentative(
         throw new Error("The authenticated owner no longer exists.");
       }
 
-      const slug = await reserveRepresentativeSlug(
+      const onboarding = parsed.onboarding;
+      const draftId = onboarding ? `onboarding-${onboarding.requestId}` : undefined;
+      if (draftId) {
+        // Serialize allocation and retries. The ID makes a lost-response retry idempotent.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(18001113)`;
+        const existing = await tx.representative.findUnique({ where: { id: draftId }, include: representativeSetupInclude });
+        if (existing) {
+          if (existing.ownerId !== owner.id) throw new Error("Invalid creation request.");
+          return existing;
+        }
+      }
+      if (onboarding?.avatarUrl && !managedAvatarObjectKey(onboarding.avatarUrl, owner.id)) throw new Error("Invalid avatar reference.");
+      const slug = onboarding ? await reserveNumericRepresentativeSlug(tx) : await reserveRepresentativeSlug(
         tx,
         parsed.slug?.trim() || slugify(parsed.representativeName),
       );
       const template = buildRepresentativeTemplate({
-        ownerName: parsed.ownerName,
+        ownerName: owner.displayName,
         representativeName: parsed.representativeName,
         ...(parsed.tagline ? { tagline: parsed.tagline } : {}),
       });
 
+      if (onboarding) {
+        const basics = generateRepresentativeBasics(onboarding, owner.displayName);
+        Object.assign(template, { name: basics.name, tagline: basics.tagline, tone: basics.tone, languages: basics.languages });
+        template.knowledgePack.identitySummary = basics.identitySummary;
+      }
       const representative = await tx.representative.create({
         data: {
+          ...(draftId ? { id: draftId } : {}),
+          avatarUrl: onboarding?.avatarUrl || null,
           ownerId: owner.id,
           slug,
           displayName: template.name,
@@ -853,7 +882,7 @@ export async function createRepresentative(
       }
 
       return createdRepresentative;
-    });
+    }, parsed.onboarding ? { maxWait: 10_000, timeout: 15_000 } : undefined);
 
     return serializeRepresentativeSetup(created);
   } catch (error) {
@@ -1204,6 +1233,11 @@ export async function updateRepresentativeSetup(
     if (!representative) {
       throw new Error(`Representative "${params.representativeSlug}" not found.`);
     }
+    if (input.avatarUrl && input.avatarUrl !== representative.avatarUrl && !managedAvatarObjectKey(input.avatarUrl, representative.ownerId)) throw new Error("Invalid avatar reference.");
+    if (representative.id.startsWith("onboarding-")) {
+      const within = (text: string, max: number) => Array.from(text).length <= max;
+      if (!within(input.name, 60) || !within(input.tagline, 500) || !within(input.tone, 600) || !within(input.knowledgePack.identitySummary, 1200)) throw new Error("基本信息超过字数上限。");
+    }
     const existingSetup = serializeRepresentativeSetup(representative);
     const computePolicyAuditPayload = buildComputePolicyAuditPayload({
       currentCompute: existingSetup.compute,
@@ -1226,6 +1260,7 @@ export async function updateRepresentativeSetup(
       const liveRepresentative = await tx.representative.update({
         where: { id: representative.id },
         data: {
+          ...(input.avatarUrl !== undefined ? { avatarUrl: input.avatarUrl || null } : {}),
           displayName: input.name,
           roleSummary: input.tagline,
           tone: input.tone,
@@ -1425,6 +1460,7 @@ function serializeRepresentativeSetup(
   return {
     id: representative.id,
     slug: representative.slug,
+    avatarUrl: representative.avatarUrl,
     knowledgePackRevision: representative.knowledgePack?.revision ?? 0,
     ownerName: representative.owner.displayName,
     name: representative.displayName,
@@ -2956,4 +2992,12 @@ function mapComputeFilesystemModeToDb(
 
 function mapComputeFilesystemModeFromDb(value: ComputeFilesystemMode) {
   return value.toLowerCase() as RepresentativeSetupSnapshot["compute"]["filesystemMode"];
+}
+
+async function reserveNumericRepresentativeSlug(tx: Prisma.TransactionClient): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const slug = String(randomInt(1000000, 10000000));
+    if (!await tx.representative.findUnique({ where: { slug }, select: { id: true } })) return slug;
+  }
+  throw new Error("暂时无法分配代表编号，请重试。");
 }

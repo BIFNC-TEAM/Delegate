@@ -8,6 +8,8 @@ import {
 } from "@delegate/domain";
 
 import { revalidateAgentContextDeliveryInTransaction } from "./agent-context-authorization";
+import { persistCitationRangesInTransaction, type PersistedCitationRangeInput } from "./citation-persistence";
+import { publicCitationRangeProjection, projectPublicCitationRanges } from "./public-citation-sources";
 import {
   ChannelDesiredState,
   ChannelHealthStatus,
@@ -160,6 +162,8 @@ export type GenerationRuntimeOutcome =
     };
 
 export type GenerationAgentTrace = {
+  citationStatus?: "valid" | "not_cited" | "invalid";
+  citationDiagnostics?: Record<string, unknown>;
   calls?: Array<Record<string, unknown>>;
   sources?: Array<{ id: string; channel: string }>;
   v2Task?: import("./agent-v2-session").V2TaskRecord;
@@ -2580,6 +2584,8 @@ export async function completeInlineGenerationRun(input: {
   /** Operational Pi lifecycle/timing evidence. It contains no hidden reasoning or raw tool payloads. */
   agentTrace?: GenerationAgentTrace;
   publicSources?: PublicAnswerSource[];
+  /** Final LF Markdown ranges; persisted atomically with the output message. */
+  citationRanges?: PersistedCitationRangeInput[];
   publicExecution?: PublicExecutionCall[];
   turnTrace?: ConversationTurnTrace;
   completeOutbox?: boolean;
@@ -2620,8 +2626,8 @@ export async function completeInlineGenerationRun(input: {
     reasonCode: string;
   };
 }) {
-  const replyText = input.replyText.trim();
-  if (!replyText) throw new Error("Reply text is required.");
+  const replyText = input.citationRanges ? input.replyText : input.replyText.trim();
+  if (!replyText.trim()) throw new Error("Reply text is required.");
   if (input.keepConversationQueued && input.humanHandoff) {
     throw new Error(
       "A generation run cannot queue another AI step while requesting human handoff.",
@@ -3012,7 +3018,7 @@ export async function completeInlineGenerationRun(input: {
         );
       }
     }
-    const message = await tx.message.create({
+    let message = await tx.message.create({
       data: {
         conversationId: run.conversationId,
         episodeId: run.episodeId,
@@ -3027,6 +3033,7 @@ export async function completeInlineGenerationRun(input: {
           : MessageContentType.TEXT,
         text: resolvedReplyText,
         ...(input.intent
+          || input.citationRanges
           || input.publicSources?.length
           || input.publicExecution?.length
           || input.humanHandoff
@@ -3035,6 +3042,7 @@ export async function completeInlineGenerationRun(input: {
           ? {
               content: {
                 ...(input.intent ? { intent: input.intent } : {}),
+                ...(input.citationRanges ? { citationProtocol: "reference-v1" } : {}),
                 ...(input.publicSources?.length ? { publicSources: readPublicAnswerSources({ publicSources: input.publicSources }) as unknown as Prisma.InputJsonArray } : {}),
                 ...(input.publicExecution?.length ? { publicExecution: readPublicExecution({ publicExecution: input.publicExecution }) as unknown as Prisma.InputJsonArray } : {}),
                 ...(input.humanHandoff
@@ -3090,6 +3098,10 @@ export async function completeInlineGenerationRun(input: {
             }
           : {}),
       },
+    });
+    if (input.citationRanges) message = await persistCitationRangesInTransaction(tx, {
+      runId: run.id, messageId: message.id, text: resolvedReplyText,
+      ranges: resolvedReplyText === replyText ? input.citationRanges : [],
     });
     const completed = await tx.generationRun.update({
       where: { id: run.id },
@@ -8422,6 +8434,7 @@ export async function getPublicGenerationRunSnapshot(input: {
           id: true,
           text: true,
           content: true,
+          citationRanges: publicCitationRangeProjection,
           deliveryStatus: true,
           failureCode: true,
           createdAt: true,
@@ -8512,6 +8525,7 @@ export async function getPublicGenerationRunSnapshot(input: {
             text: renderPublicConversationMessageText(outputMessage),
             status: outputMessage.deliveryStatus.toLowerCase(),
             createdAt: outputMessage.createdAt.toISOString(),
+            ...(projectPublicCitationRanges(outputMessage) ? { citationRanges: projectPublicCitationRanges(outputMessage) } : {}),
             ...(sourceDisclosure ? { sourceDisclosure } : {}),
             sources: readPublicAnswerSources(outputMessage.content),
             execution: readPublicExecution(outputMessage.content),
@@ -8599,6 +8613,7 @@ export async function getPublicConversationHistory(input: {
           ],
         },
         include: {
+          citationRanges: publicCitationRangeProjection,
           citations: {
             select: {
               title: true,
@@ -8694,6 +8709,7 @@ export async function getPublicConversationHistory(input: {
         senderType: normalizeSenderType(message.senderType),
         ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
         text: renderPublicConversationMessageText(message),
+        ...(projectPublicCitationRanges(message) ? { citationRanges: projectPublicCitationRanges(message) } : {}),
         status: message.deliveryStatus.toLowerCase(),
         createdAt: message.createdAt.toISOString(),
         ...(generation?.inputMessage.clientMessageId
@@ -8736,6 +8752,7 @@ export function renderPublicConversationMessageText(message: {
   content?: unknown;
   attachments?: Array<{ fileName: string }>;
 }) {
+  if (isJsonRecord(message.content) && message.content.citationProtocol === "reference-v1") return message.text ?? "";
   const text = stripLegacyUnverifiedToolFallbackPrefix(message.text || "");
   const publicText = text
     .replace(

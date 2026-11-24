@@ -51,6 +51,19 @@ vi.mock("../app/reps/[slug]/public-principal", () => ({
 import { POST as acknowledgeDisplay } from "../app/reps/[slug]/chat/runs/[runId]/display-ack/route";
 
 describe("public memory display acknowledgement route", () => {
+  it("does not clone the acknowledgement response when local trace is disabled", async () => {
+    vi.stubEnv("DELEGATE_LOCAL_TRACE_ENABLED", "0");
+    const clone = vi.spyOn(Response.prototype, "clone");
+    try {
+      const response = await acknowledgeDisplay(displayRequest(), {
+        params: Promise.resolve({ slug: "delegate", runId: "generation_run_1" }),
+      });
+      expect(clone).not.toHaveBeenCalled();
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.json()).toEqual({ acknowledged: true, displayedCount: 2 });
+    } finally { clone.mockRestore(); vi.unstubAllEnvs(); }
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.cookies.mockResolvedValue({ get: vi.fn() });

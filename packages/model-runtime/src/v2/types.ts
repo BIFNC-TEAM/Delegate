@@ -1,6 +1,7 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { PiArtifact, PiCapabilityResult, PiModelBinding, PiRuntimeEvent, PiSource, PiSpan, PiToolContext } from "../pi/types";
 import type { V2Budget } from "./config";
+import type { CitationDiagnostics, CitationRange } from "./citations";
 
 export type V2Tool = Omit<AgentTool<any>, "execute"> & {
   category: "knowledge" | "web" | "mcp" | "skill" | "sandbox" | "control";
@@ -34,6 +35,11 @@ export type V2RunInput = {
   authorizedUserLocation?: string;
   context: PiToolContext; budget?: Partial<V2Budget>; session?: V2Session;
   history?: AgentMessage[]; signal?: AbortSignal;
+  /** Staged reference protocol. The trusted host assigns source numbers only
+   * after acquisition/authorization. Absent until persistence/host rollout.
+   * A stable episode number is not itself an authorization grant.
+   */
+  citationSourceNumber?(source: PiSource, acquisition: Pick<PiCapabilityResult, "contextSourceRef" | "resultRef">): Promise<string>;
   /** Required host gate; rechecked before each model/tool/result/release boundary. */
   authorize(boundary: "model" | "tool" | "tool_result" | "release", tool?: V2Tool, args?: unknown): Promise<void>;
   /** Host-supplied task store. Save must succeed before exposing a clarification. */
@@ -46,6 +52,9 @@ export type V2RunResult = {
   text: string; sources: PiSource[]; artifacts: PiArtifact[]; invalidCitations: string[];
   /** Host-only ledger mapping; omit from public API/telemetry. */
   sourceBindings: Record<string, string>;
+  citationRanges?: CitationRange[];
+  citationStatus?: CitationDiagnostics["status"];
+  citationDiagnostics?: CitationDiagnostics;
   modelCalls: number; toolCalls: number; totalDurationMs: number; firstTextMs?: number;
   usage: V2Usage; taskUsage: V2Usage; session?: V2Session;
   /** Costs use configured provider prices; false means zero is not a price claim. */

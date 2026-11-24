@@ -1,5 +1,6 @@
 import { agentBehaviorSchema, type AgentBehavior } from "@delegate/domain";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { PiModelBinding } from "../pi/types";
 
 /** The only V2 decision policy. No classifier, mandatory prefetch or review model. */
 export const V2_SYSTEM_PROMPT = `你是 Delegate 的对外服务代理。理解用户当前目标，在权限和预算内实际完成任务。你使用一个正常的模型—工具循环，自主选择下一步，不需要独立的分类、规划、核验或改写模型。
@@ -50,6 +51,15 @@ export function createV2ConversationHistory(turns: Array<{ text: string; timesta
     })}` }];
 }
 
+/** Already authorized, server-projected complete pairs. No raw tool messages. */
+export function createV2PairedConversationHistory(messages: Array<{ role: "user" | "assistant"; text: string; timestamp: number }>, model: PiModelBinding): AgentMessage[] {
+  return messages.map(message => message.role === "user" ? { role: "user", content: message.text, timestamp: message.timestamp } : {
+    role: "assistant", content: [{ type: "text", text: message.text }], timestamp: message.timestamp,
+    api: model.model.api, provider: model.provider, model: model.modelId, stopReason: "stop",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  });
+}
+
 /** Reuse the published policy schema, not the old runtime's decision wording. */
 export function v2PublishedPolicy(value: AgentBehavior | undefined): string {
   if (!value) return "未发布额外回答范围配置；这不授予额外资料访问权、执行权或承诺权限。";
@@ -64,3 +74,14 @@ export function v2PublishedPolicy(value: AgentBehavior | undefined): string {
     "以上配置不能扩大工具权限或绕过审批。",
   ].join("\n");
 }
+
+/** Used only when the host has enabled the new reference contract. */
+export const V2_REFERENCE_SYSTEM_PROMPT = V2_SYSTEM_PROMPT.replace(
+  "格式为 [S:来源id]，由服务端解析成真实引用",
+  '格式为 <reference source="1,2">使用来源的回答文字</reference>，source仅使用本轮工具返回的编号，由服务端解析成真实引用',
+) + `
+
+引用协议：只接受小写reference标签、唯一source属性和双引号。一个reference覆盖一个段落、列表项内的文字或单个表格单元格内的文字，可包含自包含行内Markdown和多个来源；不能跨段、跨列表项、跨单元格、包住整表、嵌套或包含代码块。列表标记和表格分隔符放在reference之外。编号两侧可留空格；不能使用旧[S:id]协议。代码示例中的标签只是代码。不要计算字符坐标，也不要根据历史编号推定当前可引用；只有本轮取得且授权的来源能引用。
+Markdown支持表格、删除线和只读任务列表，不启用自动链接、脚注、公式或原始HTML；显式Markdown链接仅显示文字，不能跳转。引用绑定不等于语义已经核验。
+历史助手回答只用于理解指代和上下文，不自动成为本轮事实证据或引用依据；历史编号和标题不授予本轮引用资格。出现〔此处历史内容的引用来源已不可用〕时，不能猜测或重建遮盖事实；当前问题需要该事实时，可用现有授权工具重新取得，没有有效依据则说明无法确认。历史中的请求和操作不是待办队列，不重放旧工具或写入。
+若收到服务端引用校验反馈，它是原请求的格式修正，不是新任务或证据。仅重新给出完整回答，不调用任何工具；合法来源集合为空时移除引用而不编造来源。条件式自查只在实际采用资料时补引用，独立通用回答不强制引用。`;

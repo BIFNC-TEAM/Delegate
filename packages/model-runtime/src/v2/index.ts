@@ -4,3 +4,4 @@ export * from "./prompt";
 export * from "./capabilities";
 export * from "./runtime";
 export * from "./provider";
+export * from "./citations";

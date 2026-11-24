@@ -156,3 +156,8 @@ export * from "./agent-context-authorization";
 export * from "./public-agent-presentation";
 
 export { enqueueKnowledgeIngestion, runKnowledgeIngestionTick, getKnowledgeIngestionProgress } from "./knowledge-ingestion";
+
+export * from "./citation-persistence";
+export * from "./citation-history";
+export * from "./citation-history-types";
+export * from "./public-citation-sources";

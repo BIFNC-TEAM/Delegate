@@ -5034,6 +5034,21 @@ button.skill-row:hover {
   font-size: 0.88em;
 }
 
+.representative-chat-rich-text :is(h1, h2, h3, h4, h5, h6) { margin: 0; color: inherit; font-size: 1rem; line-height: 1.5; font-weight: 700; }
+.representative-chat-rich-text pre { margin: 0; max-width: 100%; overflow: auto; padding: 12px; border-radius: 10px; background: rgba(17, 24, 39, 0.06); }
+.representative-chat-rich-text pre code { padding: 0; background: none; }
+.representative-chat-table { max-width: 100%; overflow-x: auto; }
+.representative-chat-table table { border-collapse: collapse; font-size: 0.875rem; line-height: 1.5; }
+.representative-chat-table :is(th, td) { padding: 8px 12px; border: 1px solid #e5e7eb; text-align: start; }
+.representative-chat-rich-text input[type="checkbox"] { margin-inline-end: 8px; }
+.representative-chat-rich-text .task-list-item { list-style: none; }
+.representative-citation-text { display: inline; padding: 0; border: 0; border-radius: 2px; background: transparent; color: inherit; font: inherit; line-height: inherit; text-align: inherit; text-decoration: underline dashed; text-decoration-color: currentColor; text-underline-offset: 4px; cursor: pointer; }
+.representative-citation-text:focus-visible { outline: 2px solid #0d9488; outline-offset: 3px; }
+.representative-citation-card { position: fixed; z-index: 80; width: min(300px, calc(100vw - 32px)); max-height: 200px; overflow: auto; padding: 16px 32px 16px 16px; border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; color: #111827; font-size: 0.875rem; line-height: 1.5; box-shadow: 0 8px 24px rgba(17, 24, 39, 0.12); }
+.representative-citation-card ul { margin: 0; padding-inline-start: 16px; }
+.representative-citation-card li + li { margin-top: 8px; }
+.representative-citation-close { position: absolute; top: 8px; right: 8px; padding: 0 4px; border: 0; background: transparent; color: #6b7280; font-size: 1.25rem; cursor: pointer; }
+
 .representative-chat-message-user .representative-message-bubble {
   border-color: #0d9488;
   border-radius: 14px 5px 14px 14px;

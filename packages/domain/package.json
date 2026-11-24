@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./knowledge-limits": "./src/knowledge-limits.ts",
-    "./representative-onboarding": "./src/representative-onboarding.ts"
+    "./representative-onboarding": "./src/representative-onboarding.ts",
+    "./representative-knowledge-settings": "./src/representative-knowledge-settings.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

@@ -1,4 +1,5 @@
 "use client";
+import {uploadKnowledgeFile} from "./knowledge-file-upload";
 
 import { KNOWLEDGE_FILE_BYTES, KNOWLEDGE_TEXT_CHARACTERS, requiresKnowledgeSourceChange } from "@delegate/domain/knowledge-limits";
 
@@ -42,14 +43,6 @@ type UploadQueueItem = {
   assetId?: string;
   replacement?: boolean;
   message?: string;
-};
-type FileUploadResponse = {
-  asset: KnowledgeAssetRecord;
-  upload: {
-    outcome: "created" | "replaced" | "skipped_duplicate";
-    conflictType?: "exact" | "same_name";
-    conflictAssetId?: string;
-  };
 };
 
 const MAX_BATCH_FILES = 20;
@@ -655,35 +648,6 @@ function conflictPolicyDescription(policy: UploadConflictPolicy, zh: boolean) {
   if (policy === "replace_existing") return zh ? "覆盖同内容或同名知识；保留已有标题、标签和权限，并重建向量索引。" : "Replaces identical or same-name sources, retains existing title, tags, and access, then rebuilds the index.";
   if (policy === "keep_both") return zh ? "即使内容或名称相同，也创建带序号的新知识。" : "Always creates a numbered copy, even when content or names match.";
   return zh ? "完全相同的内容不重复存储；同名但内容不同会保留为新副本。" : "Identical content is not stored twice; same-name files with different content become copies.";
-}
-function uploadKnowledgeFile(activeSlug: string, form: FormData, onProgress: (progress: number) => void): Promise<FileUploadResponse> {
-  return new Promise((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open("POST", "/api/dashboard/knowledge-assets");
-    request.setRequestHeader("X-Delegate-Representative", activeSlug);
-    request.upload.addEventListener("progress", (event) => {
-      if (!event.lengthComputable) return;
-      onProgress(Math.max(1, Math.min(78, Math.round((event.loaded / event.total) * 78))));
-    });
-    request.addEventListener("load", () => {
-      let payload: (FileUploadResponse & { error?: string }) | null = null;
-      try {
-        payload = JSON.parse(request.responseText) as FileUploadResponse & { error?: string };
-      } catch {
-        reject(new Error(`Request failed (${request.status || 0})`));
-        return;
-      }
-      if (request.status < 200 || request.status >= 300) {
-        reject(new Error(payload.error || `Request failed (${request.status})`));
-        return;
-      }
-      onProgress(80);
-      resolve(payload);
-    });
-    request.addEventListener("error", () => reject(new Error("Network error while uploading file")));
-    request.addEventListener("abort", () => reject(new Error("File upload was cancelled")));
-    request.send(form);
-  });
 }
 async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>) {
   let cursor = 0;

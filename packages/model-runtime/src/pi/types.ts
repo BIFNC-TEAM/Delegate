@@ -120,6 +120,8 @@ export type PiCapabilityResult = {
   text: string;
   details?: Record<string, unknown>;
   sources?: PiSource[];
+  /** Host-authored per-source bodies keep source lists and truncation aligned. */
+  sourceContents?: Array<{ sourceId: string; text: string }>;
   artifacts?: PiArtifact[];
   resultRef?: string;
   contextSourceRef?: string;

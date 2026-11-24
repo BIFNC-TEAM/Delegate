@@ -3042,6 +3042,7 @@ model ConversationEpisode {
   handoffRequests         HandoffRequest[]
   internalNotes           ConversationInternalNote[]
   leads                   Lead[]
+  citationSources         EpisodeCitationSource[]
 
   @@unique([conversationId, sequence])
   @@index([conversationId, status, startedAt])
@@ -3149,6 +3150,7 @@ model Message {
   threadMessages                     Message[]                           @relation("MessageThreads")
   revisions                          MessageRevision[]
   attachments                        MessageAttachment[]
+  citationRanges                     MessageCitationRange[]
   citations                          MessageCitation[]
   inputForGenerationRuns             GenerationRun[]                     @relation("GenerationInputMessage")
   outputForGenerationRuns            GenerationRun[]                     @relation("GenerationOutputMessage")
@@ -3238,6 +3240,58 @@ model MessageAttachment {
   message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
   @@index([messageId, createdAt])
+}
+
+/// Stable source versions, not per-run authorization grants or raw tool bodies.
+model EpisodeCitationSource {
+  id                 String                       @id @default(cuid())
+  episodeId          String
+  representativeId   String
+  identityScopeHash  String                       @db.VarChar(64)
+  ordinal            Int
+  sourceKey          String                       @db.VarChar(64)
+  sourceKind         String                       @db.VarChar(32)
+  coordinate         Json
+  versionKey         String
+  contentHash        String                       @db.VarChar(64)
+  metadata           Json
+  createdAt          DateTime                     @default(now())
+  episode            ConversationEpisode          @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  ranges             MessageCitationRangeSource[]
+
+  @@unique([episodeId, ordinal])
+  @@unique([episodeId, sourceKey])
+  @@unique([id, episodeId])
+  @@index([representativeId, episodeId])
+}
+
+model MessageCitationRange {
+  id          String                       @id @default(cuid())
+  messageId   String
+  episodeId   String
+  ordinal     Int
+  start       Int
+  end         Int
+  bodyHash    String                       @db.VarChar(64)
+  message     Message                      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  sources     MessageCitationRangeSource[]
+
+  @@unique([messageId, ordinal])
+  @@unique([id, episodeId])
+  @@index([messageId, start])
+}
+
+model MessageCitationRangeSource {
+  rangeId          String
+  episodeId        String
+  episodeSourceId  String
+  /// This turn's acquisition proof, separate from the stable source identity.
+  acquisition      Json
+  range            MessageCitationRange  @relation(fields: [rangeId, episodeId], references: [id, episodeId], onDelete: Cascade)
+  source           EpisodeCitationSource @relation(fields: [episodeSourceId, episodeId], references: [id, episodeId], onDelete: Cascade)
+
+  @@id([rangeId, episodeSourceId])
+  @@index([episodeSourceId])
 }
 
 model MessageCitation {

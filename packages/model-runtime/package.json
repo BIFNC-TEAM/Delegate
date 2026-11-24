@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./v2": "./src/v2/index.ts"
+    "./v2": "./src/v2/index.ts",
+    "./markdown": "./src/markdown.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -17,7 +18,16 @@
     "@delegate/runtime": "workspace:*",
     "@earendil-works/pi-agent-core": "0.85.1",
     "@earendil-works/pi-ai": "0.85.1",
+    "mdast-util-gfm-strikethrough": "^2.0.1",
+    "mdast-util-gfm-table": "^2.0.1",
+    "mdast-util-gfm-task-list-item": "^2.0.1",
+    "micromark-extension-gfm-strikethrough": "^2.1.0",
+    "micromark-extension-gfm-table": "^2.1.2",
+    "micromark-extension-gfm-task-list-item": "^2.1.0",
+    "micromark-util-decode-string": "^2.0.1",
     "openai": "^6.8.1",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {

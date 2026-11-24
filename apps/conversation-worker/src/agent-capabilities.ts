@@ -1,3 +1,4 @@
+import { localTraceEvent } from "@delegate/runtime/local-trace";
 import { createHash } from "node:crypto";
 
 import {
@@ -533,6 +534,7 @@ export function buildAgentCapabilities(input: {
       knowledge: {
         retrieve: async ({ query }: { query: string }) => {
           const retrievalQuery = query;
+          localTraceEvent("knowledge.recall_started", { query: retrievalQuery });
           const recalled = await recallRepresentativeContext({
             representativeSlug: input.item.representativeSlug,
             conversationId: input.item.conversationId,
@@ -541,7 +543,8 @@ export function buildAgentCapabilities(input: {
             generationRunId: input.item.runId,
             queryText: retrievalQuery,
             allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-          }).catch(() => ({ items: [], citations: [], memoryUseRunId: undefined, searchIncomplete: true }));
+          }).catch(error => { localTraceEvent("knowledge.recall_failed", { error }); return { items: [], citations: [], memoryUseRunId: undefined, searchIncomplete: true }; });
+          localTraceEvent("knowledge.recall_result", recalled);
           if(recalled.items.length && (!recalled.memoryUseRunId || !input.registerKnowledgeSources)) throw new AgentContextAuthorizationError();
           if(recalled.memoryUseRunId && input.registerKnowledgeSources) await input.registerKnowledgeSources(recalled.memoryUseRunId, recalled.items.map(item => item.memoryUseItemId));
           input.onMemoryUse(
@@ -562,6 +565,7 @@ export function buildAgentCapabilities(input: {
               ? `${recalled.searchIncomplete ? "部分知识搜索失败，以下结果可能不完整。\n\n" : ""}${recalled.items.map((entry, index) => `[S:${sources[index]!.id}] ${sources[index]!.title}\n${entry.content || entry.abstract}`).join("\n\n")}`
               : recalled.searchIncomplete || !recalled.memoryUseRunId ? "授权知识检索当前不可用。" : "授权知识库没有找到支持该问题的资料。",
             details: { allowedCitationTitles: sources.map(source => source.title), ...(recalled.searchIncomplete ? { searchIncomplete: true } : {}) },
+            sourceContents: recalled.items.map((entry, index) => ({ sourceId: sources[index]!.id, text: entry.content || entry.abstract })),
             sources,
           };
         },

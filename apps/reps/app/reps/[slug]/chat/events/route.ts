@@ -1,3 +1,4 @@
+import { withLocalTrace, localTraceEvent } from "@delegate/runtime/local-trace";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
@@ -95,7 +96,8 @@ export async function GET(
   const { principal, revalidate, sessionState } = audienceRequest;
 
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+    start(controller) {
+      return withLocalTrace("sse", { slug, audienceIdentityId: audienceRequest.principal.audienceIdentityId }, async () => {
       let previous = "";
       let serviceBalance = initialServiceBalance;
       let nextBalanceRefreshAt = Date.now() + 2_000;
@@ -145,6 +147,7 @@ export async function GET(
           const serialized = JSON.stringify(snapshot);
           if (serialized !== previous) {
             previous = serialized;
+            localTraceEvent("sse.conversation_sent", snapshot);
             controller.enqueue(encoder.encode(`event: conversation\ndata: ${serialized}\n\n`));
           } else {
             controller.enqueue(encoder.encode(": keep-alive\n\n"));
@@ -152,6 +155,7 @@ export async function GET(
           await wait(500, request.signal);
         }
       } catch (error) {
+        localTraceEvent("sse.failed", { error });
         if (!request.signal.aborted) {
           controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
             error: "stream_failed",
@@ -159,8 +163,10 @@ export async function GET(
           console.error("Public conversation event stream failed.", error);
         }
       } finally {
+        localTraceEvent("sse.closed", { aborted: request.signal.aborted });
         controller.close();
       }
+      });
     },
   });
 

@@ -1,6 +1,5 @@
 import {
   Prisma,
-  RepresentativeChannelKind,
 } from "@prisma/client";
 
 import {
@@ -95,7 +94,7 @@ export async function acknowledgePublicMemoryDisplayInTransaction(
     outputMessageId,
     conversation: {
       audienceIdentityId,
-      sourceChannel: RepresentativeChannelKind.WEB,
+      sourceChannel: "web",
       channelThreadId: buildWebConversationThreadId(audienceId),
       representative: { slug: representativeSlug },
     },

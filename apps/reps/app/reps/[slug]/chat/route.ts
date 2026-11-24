@@ -1,3 +1,4 @@
+import { withLocalTrace, localTraceEvent, localTraceEventLazy } from "@delegate/runtime/local-trace";
 import { createHash } from "node:crypto";
 
 import { cookies } from "next/headers";
@@ -67,6 +68,7 @@ export async function GET(
         audienceId: principal.audienceId,
       });
     } catch (error) {
+    localTraceEvent("http.error", { error });
       if (!shouldUseNonPersistentDemoChat(error, slug)) throw error;
     }
     const externalUserId = await resolvePublicWalletExternalUserId({
@@ -88,6 +90,7 @@ export async function GET(
     setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
+    localTraceEvent("http.error", { error });
     const principalError = publicPrincipalErrorResponse(error);
     if (principalError) return principalError;
     const reconciliationError = walletReconciliationErrorResponse(error);
@@ -96,7 +99,17 @@ export async function GET(
   }
 }
 
-export async function POST(
+export async function POST(request: Request, context: { params: Promise<{ slug: string }> }) {
+  const { slug } = await context.params;
+  return withLocalTrace("http", { slug, method: "POST" }, async () => {
+    localTraceEvent("http.received", { contentType: request.headers.get("content-type"), contentLength: request.headers.get("content-length") });
+    const response = await postChat(request, context);
+    await localTraceEventLazy("http.response", async () => ({ status: response.status, body: await response.clone().json().catch(() => null) }));
+    return response;
+  });
+}
+
+async function postChat(
   request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
@@ -121,6 +134,7 @@ export async function POST(
       });
     }
     const { body, attachmentFiles } = await readPublicChatRequest(request);
+    localTraceEvent("http.parsed", { body, attachments: attachmentFiles.map(file => ({ name: file.name, size: file.size, type: file.type })) });
     if (!body.message) return privateJson({ error: "Message is required." }, 400);
     const control = parseTaskControlCommand(body.message);
     if (control) {
@@ -284,6 +298,7 @@ export async function POST(
       );
       return response;
     } catch (error) {
+    localTraceEvent("http.error", { error });
       if (!shouldUseNonPersistentDemoChat(error, slug)) throw error;
     }
 
@@ -331,6 +346,7 @@ export async function POST(
     setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
+    localTraceEvent("http.error", { error });
     if (error instanceof Error && error.message === "public_task_control_conflict") return privateJson({ error: "Task state changed. Check its current state before trying again.", code: "task_control_conflict" }, 409);
     if (error instanceof ConversationIngressValidationError) {
       return privateJson(
@@ -455,6 +471,7 @@ async function uploadPublicChatAttachments(input: {
     }
     return uploaded;
   } catch (error) {
+    localTraceEvent("http.error", { error });
     await cleanupPublicChatAttachments(uploaded);
     throw error;
   }

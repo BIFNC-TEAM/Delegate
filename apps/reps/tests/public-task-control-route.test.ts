@@ -24,6 +24,17 @@ import { GET } from "../app/reps/[slug]/chat/runs/[runId]/events/route";
 const request = (message: string) => new Request("http://localhost/reps/rep/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message, audienceIdentityId: "forged-owner" }) });
 
 describe("owned task controls outside new-service admission", () => {
+  it("does not clone a chat response for diagnostics when local trace is disabled", async () => {
+    vi.stubEnv("DELEGATE_LOCAL_TRACE_ENABLED", "0");
+    const clone = vi.spyOn(Response.prototype, "clone");
+    try {
+      const response = await POST(request("new question"), { params: Promise.resolve({ slug: "rep" }) });
+      expect(clone).not.toHaveBeenCalled();
+      expect(response.status).toBe(423);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toMatchObject({ error: expect.any(String) });
+    } finally { clone.mockRestore(); }
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubEnv("DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:1/delegate_test");

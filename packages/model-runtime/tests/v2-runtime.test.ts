@@ -158,7 +158,7 @@ describe("V2 PI native execution mechanisms (scripted model)", () => {
     expect(reasoning).toEqual(["low", undefined]); expect(result.status).toBe("partial");
   });
   it("disables native thinking when the response ceiling cannot hold its answer reserve", async () => {
-    const request = input([fauxAssistantMessage("done")], { budget: { outputTokens: 512, finalReserveTokens: 128 } });
+    const request = input([fauxAssistantMessage("done")], { budget: { outputTokens: 1024, finalReserveTokens: 128 } });
     request.model.model = { ...request.model.model, reasoning: true };
     const base = request.model.streamFn;
     request.model.streamFn = (model, context, options) => { expect(options?.reasoning).toBeUndefined(); return base(model, context, options); };

@@ -35,7 +35,7 @@ describe("public memory display acknowledgement", () => {
           outputMessageId: "output_message_1",
           conversation: expect.objectContaining({
             audienceIdentityId: "audience_identity_1",
-            sourceChannel: RepresentativeChannelKind.WEB,
+            sourceChannel: "web",
             channelThreadId: "web:audience_1",
             representative: { slug: "delegate" },
           }),

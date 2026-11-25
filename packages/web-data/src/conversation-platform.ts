@@ -11986,7 +11986,7 @@ function buildRepresentativeSnapshot(representative: {
   computeNetworkMode: string;
   computeNetworkAllowlist: string[];
   computeFilesystemMode: string;
-  knowledgePack: { identitySummary: string; faq: Prisma.JsonValue; materials: Prisma.JsonValue; policies: Prisma.JsonValue } | null;
+  knowledgePack: { identitySummary: string; faq: Prisma.JsonValue; materials: Prisma.JsonValue; policies: Prisma.JsonValue; serviceBoundaries?: Prisma.JsonValue | null } | null;
   knowledgeAssetLinks: Array<{
     assetId: string;
     asset: {
@@ -12162,6 +12162,7 @@ function buildRepresentativeSnapshot(representative: {
           faq: representative.knowledgePack.faq,
           materials: representative.knowledgePack.materials,
           policies: representative.knowledgePack.policies,
+          ...(representative.knowledgePack.serviceBoundaries ? { serviceBoundaries: representative.knowledgePack.serviceBoundaries } : {}),
         }
       : null,
     knowledgeAssets: representative.knowledgeAssetLinks.map((link) => ({

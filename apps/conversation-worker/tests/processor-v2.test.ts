@@ -1,11 +1,12 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn(), authority: vi.fn(), safeHistory: vi.fn(), registerHistory: vi.fn(), allocate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn(), authority: vi.fn(), safeHistory: vi.fn(), registerHistory: vi.fn(), allocate: vi.fn(), serviceRules: vi.fn(), serviceExecute: vi.fn(), serviceQuery: vi.fn() }));
 vi.mock("../src/agent-capabilities", () => ({ buildAgentCapabilities: mocks.adapters }));
 vi.mock("../src/generation-delivery", () => ({ deliverGenerationOutput: mocks.deliver }));
 vi.mock("@delegate/model-runtime/v2", async original => ({ ...await original<typeof import("@delegate/model-runtime/v2")>(),
   createV2ModelBindingFromEnv: () => ({ ok: true, binding: { provider: "faux", modelId: "faux", model: { api: "faux" } } }), delegateAgentV2: { run: mocks.run } }));
 vi.mock("@delegate/web-data", () => ({
+  readPublishedServiceBoundaries: mocks.serviceRules, executeServiceRequestOperation: mocks.serviceExecute, queryServiceRequestOperation: mocks.serviceQuery, readServiceRequestLimit: () => 5,
   buildRepresentativeRuntimeProfile: () => ({ contract: { freeReplyLimit: 2 } }), buildSandboxAttachmentPath: () => "/attachments/a",
   createAgentContextAuthorization: mocks.contextAuthorization,
   loadSafeCitationHistory: mocks.safeHistory, allocateEpisodeCitationSource: mocks.allocate,
@@ -19,6 +20,7 @@ const makeHost = () => ({ config: {}, item: { runId: "run", conversationId: "con
   setup: { id: "rep", ownerName: "Owner", name: "Test", tagline: "Assistant", tone: "concise", languages: ["zh-CN", "en"], skillPacks: [], knowledgePack: { faq: [], materials: [], policies: [] }, compute: { enabled: true } }, leaseGuard: { confirmOwned: vi.fn(async () => undefined) }, workLease: { outboxId: "outbox", leaseAttempt: 1 } });
 const usage = { modelTurns: 1, toolCalls: 0, attempts: 0, tokens: 10, inputTokens: 8, outputTokens: 2, costUsd: 0, activeMs: 5 };
 beforeEach(() => {
+  mocks.serviceRules.mockResolvedValue(null);
   vi.clearAllMocks(); mocks.adapters.mockReturnValue({}); mocks.prior.mockResolvedValue(null); mocks.authorizeUsage.mockResolvedValue(false);
   mocks.authority.mockResolvedValue({ compute: { enabled: true, capabilityModes: { exec: "ask", write: "ask", browser: "allow", mcp: "allow" } }, knowledgeResources: [] });
   mocks.history.mockResolvedValue([]);
@@ -261,4 +263,18 @@ describe("V2 worker integration", () => {
     const files = readdirSync(root).filter(f => f.endsWith(".ts") && f !== "evaluate.ts");
     for (const file of files) expect(readFileSync(new URL(file, root), "utf8")).not.toMatch(/from ["']\.\.\/pi\/(runtime|tools|execution-state|simple-text|selective-text|knowledge-prefetch|behavior-policy)["']/);
   });
+});
+
+it("binds service tools to the published version and host input message rather than model identity", async () => {
+  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [{ id: "discount", request: "", action: "approve" }] });
+  mocks.serviceExecute.mockResolvedValue({ results: [{ status: "created" }] });
+  const host = makeHost();
+  await processV2ConversationTurn(host as never);
+  const call = mocks.run.mock.calls[0]![0];
+  expect(call.instructions).toContain("max independent requests per user message=5");
+  const tool = call.tools.find((entry: any) => entry.name === "submit_service_requests");
+  expect(tool).toBeTruthy();
+  await tool.execute("submit", { overflow: false, items: [] }, new AbortController().signal, {});
+  expect(mocks.serviceExecute.mock.calls[0]![1].batch.messageId).toBe("message");
+  expect(mocks.serviceExecute.mock.calls[0]![0].actor.role).toBe("visitor");
 });

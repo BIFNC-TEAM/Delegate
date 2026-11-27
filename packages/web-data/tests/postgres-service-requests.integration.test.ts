@@ -27,7 +27,87 @@ async function fixture(actions: Record<string, string> = {}) {
   return { input, visitor, ownerActor, version };
 }
 afterAll(async () => { if (enabled) await prisma.$disconnect(); });
+// Hold the parent until both calls reach a conflicting write/row lock. This
+// reproduces the former read-before-write race without relying on a fixed delay.
+async function raceOnParent<T>(parentId: string, operations: [() => Promise<T>, () => Promise<T>]) {
+  let release!: () => void;
+  let ready!: () => void;
+  const locked = new Promise<void>(resolve => { ready = resolve; });
+  const unlock = new Promise<void>(resolve => { release = resolve; });
+  const holder = prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "ServiceRequest" WHERE id = ${parentId} FOR UPDATE`;
+    ready();
+    await unlock;
+  });
+  try {
+    await Promise.race([locked, holder.then(() => { throw new Error("Parent lock ended early"); })]);
+    const pending = Promise.allSettled(operations.map(operation => operation()));
+    try {
+      const deadline = Date.now() + 2500;
+      let waiters = 0;
+      while (Date.now() < deadline) {
+        const [row] = await prisma.$queryRaw<Array<{ count: number }>>`
+          SELECT count(*)::int AS count FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%"ServiceRequest"%'`;
+        waiters = row!.count;
+        if (waiters >= 2) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(waiters).toBeGreaterThanOrEqual(2);
+    } finally { release(); }
+    return await pending;
+  } finally {
+    release();
+    await holder;
+  }
+}
 describe.skipIf(!enabled)("PostgreSQL service requests", () => {
+  it.each(["follow_up", "answer", "replace"] as const)("returns one saved successor for concurrent identical %s retries", async mode => {
+    const f = await fixture();
+    const first = await createServiceRequest(f.input);
+    const base = { content: "数量多少", summary: "追问数量", ruleIds: ["discount"], kind: "discount", representativeVersionId: f.version.id,
+      options: [{ id: "other", label: "其他" }], reply: { action: "follow_up", text: "数量多少" }, idempotencyKey: "follow-up" };
+    const parent = mode === "answer" ? await createServiceRequestSuccessor({ ...base, actor: f.ownerActor, parentId: first.id, mode: "follow_up" }) : first;
+    let generation = 0;
+    const args = { ...base, actor: mode === "follow_up" ? f.ownerActor : f.visitor, parentId: parent.id, mode, idempotencyKey: `retry-${mode}`,
+      ...(mode === "follow_up" ? { generateOptions: async () => [{ id: "choice", label: `模型选项${++generation}` }] }
+        : { content: "100份申请八折", reply: { action: "answer", text: "100份" } }) };
+    const results = await raceOnParent(parent.id, [() => createServiceRequestSuccessor(args), () => createServiceRequestSuccessor(args)]);
+    expect(results.every(result => result.status === "fulfilled")).toBe(true);
+    const rows = results.map(result => { if (result.status === "rejected") throw result.reason; return result.value; });
+    expect(rows[0]!.id).toBe(rows[1]!.id);
+    expect(rows[0]!.options).toEqual(rows[1]!.options);
+    expect(await prisma.serviceRequest.count({ where: { parentId: parent.id } })).toBe(1);
+    expect(await prisma.serviceRequestNotification.count({ where: { requestId: rows[0]!.id } })).toBe(mode === "follow_up" ? 1 : 0);
+  });
+  it.each(["different_input", "different_key"] as const)("keeps concurrent %s successor attempts conflicting", async variant => {
+    const f = await fixture();
+    const parent = await createServiceRequest(f.input);
+    const args = { actor: f.ownerActor, parentId: parent.id, mode: "follow_up" as const, content: "几点？", summary: "时间", kind: "discount",
+      ruleIds: ["discount"], representativeVersionId: f.version.id, options: [], reply: { action: "follow_up", text: "几点？" }, idempotencyKey: "same" };
+    const other = variant === "different_input" ? { ...args, content: "多少份？" } : { ...args, idempotencyKey: "other" };
+    const results = await raceOnParent(parent.id, [() => createServiceRequestSuccessor(args), () => createServiceRequestSuccessor(other)]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find(result => result.status === "rejected") as PromiseRejectedResult;
+    expect(rejected.reason.code).toBe(variant === "different_input" ? "idempotency_conflict" : "state_conflict");
+    expect(await prisma.serviceRequest.count({ where: { parentId: parent.id } })).toBe(1);
+  });
+  it.each(["accepted", "withdraw"] as const)("allows only one conversion when a successor races with %s", async action => {
+    const f = await fixture();
+    const parent = await createServiceRequest(f.input);
+    const args = { actor: f.ownerActor, parentId: parent.id, mode: "follow_up" as const, content: "几点？", summary: "时间", kind: "discount",
+      ruleIds: ["discount"], representativeVersionId: f.version.id, options: [], reply: { action: "follow_up", text: "几点？" }, idempotencyKey: "follow-up" };
+    const results = await raceOnParent(parent.id, [() => createServiceRequestSuccessor(args),
+      () => resolveServiceRequest(action === "accepted" ? f.ownerActor : f.visitor, parent.id, action)]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find(result => result.status === "rejected") as PromiseRejectedResult;
+    expect(rejected.reason.code).toBe("state_conflict");
+    const saved = await prisma.serviceRequest.findUniqueOrThrow({ where: { id: parent.id } });
+    const successorCount = await prisma.serviceRequest.count({ where: { parentId: parent.id } });
+    expect(successorCount).toBe(saved.disabledReason === "follow_up" ? 1 : 0);
+    expect(saved.status).not.toBe("pending");
+  });
   it("persists UI actions separately while projecting only text to subsequent model history", async () => {
     const f = await historyFixture();
     await createAgentContextAuthorization(f.input);

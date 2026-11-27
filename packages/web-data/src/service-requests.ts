@@ -114,6 +114,9 @@ export async function createServiceRequestSuccessor(input: {
   return prisma.$transaction(async tx => {
     await requireRegisteredVisitor(tx, input.actor);
     if (!input.idempotencyKey || input.idempotencyKey.length > 250) throw new ServiceRequestError("invalid_request", 400);
+    // Serialize successors before reading their idempotency record. A retry
+    // waiting here must see the successor committed by the winning transaction.
+    await tx.$queryRaw`SELECT id FROM "ServiceRequest" WHERE id = ${input.parentId} FOR UPDATE`;
     const parent = await get(tx, input.actor, input.parentId);
     const payloadHash = hash([input.mode, input.content, input.summary, input.ruleIds, input.kind, input.representativeVersionId, ...(input.mode === "follow_up" ? [] : [input.options]), input.reply]);
     const prior = await tx.serviceRequest.findUnique({ where: { parentId: parent.id } });

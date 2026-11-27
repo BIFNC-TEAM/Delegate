@@ -10,6 +10,7 @@ async function handle(request: Request, params: Promise<{ slug: string }>) {
     if (runtime.status !== "available") return response({ error: "Representative unavailable." }, 404);
     const principal = await resolvePublicAudienceRequestPrincipal({ representativeSlug: slug, cookieStore: await cookies() });
     await principal.revalidate();
+    if (request.method !== "GET" && principal.principal.mode !== "authenticated") return response({ error: "authentication_required", suggestedActions: [{ type: "login" }] }, 401);
     const url = new URL(request.url);
     const conversationId = url.searchParams.get("conversationId");
     if (!conversationId) return response({ error: "conversationId is required." }, 400);

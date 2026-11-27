@@ -10,6 +10,12 @@ export function createServiceRequestReceiptGuard() {
       if (["pending", "accepted", "rejected", "disabled"].includes(String(record.status))) submitted = true;
       if (record.status === "accepted") approved = true;
     }
+    // Chain nodes intentionally omit status/direction, but carry saved receiver actions.
+    if (typeof record.id === "string" && "parentId" in record && typeof record.content === "string") {
+      submitted = true;
+      const action = (record.reply as { action?: unknown } | null)?.action;
+      if (action === "accepted") approved = true;
+    }
     if (typeof record.handoffId === "string" && ["created", "reused", "active_request_exists"].includes(String(record.status))) submitted = true;
     for (const key of ["items", "results", "request"]) if (record[key]) observe(record[key]);
   }

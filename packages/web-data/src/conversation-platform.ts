@@ -1,4 +1,4 @@
-import { readPublicAgentProgress, readPublicAnswerSources, readPublicExecution, type PublicExecutionCall, type PublicAnswerSource, type PublicAgentStage } from "./public-agent-presentation";
+import { readPublicSuggestedActions, type PublicSuggestedAction, readPublicAgentProgress, readPublicAnswerSources, readPublicExecution, type PublicExecutionCall, type PublicAnswerSource, type PublicAgentStage } from "./public-agent-presentation";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -1279,7 +1279,8 @@ export async function getConversationDetailSnapshot(
           ...(message.editedAt ? { editedAt: message.editedAt.toISOString() } : {}),
           ...(message.redactedAt ? { redactedAt: message.redactedAt.toISOString() } : {}),
           createdAt: message.createdAt.toISOString(),
-          sources: readPublicAnswerSources(message.content),
+          suggestedActions: readPublicSuggestedActions(message.content),
+        sources: readPublicAnswerSources(message.content),
         execution: message.redactedAt ? [] : readPublicExecution(message.content),
         citations: message.citations.map((citation) => ({
             title: citation.title,
@@ -2587,6 +2588,7 @@ export async function completeInlineGenerationRun(input: {
   /** Final LF Markdown ranges; persisted atomically with the output message. */
   citationRanges?: PersistedCitationRangeInput[];
   publicExecution?: PublicExecutionCall[];
+  suggestedActions?: PublicSuggestedAction[];
   turnTrace?: ConversationTurnTrace;
   completeOutbox?: boolean;
   countUsage: boolean;
@@ -3035,12 +3037,14 @@ export async function completeInlineGenerationRun(input: {
         ...(input.intent
           || input.citationRanges
           || input.publicSources?.length
+          || input.suggestedActions?.length
           || input.publicExecution?.length
           || input.humanHandoff
           || input.evidenceIndependentSystemFailure
           || input.sourceIndependentPublicRecovery
           ? {
               content: {
+                ...(input.suggestedActions?.length ? { suggestedActions: readPublicSuggestedActions(input) as unknown as Prisma.InputJsonArray } : {}),
                 ...(input.intent ? { intent: input.intent } : {}),
                 ...(input.citationRanges ? { citationProtocol: "reference-v1" } : {}),
                 ...(input.publicSources?.length ? { publicSources: readPublicAnswerSources({ publicSources: input.publicSources }) as unknown as Prisma.InputJsonArray } : {}),
@@ -8527,6 +8531,7 @@ export async function getPublicGenerationRunSnapshot(input: {
             createdAt: outputMessage.createdAt.toISOString(),
             ...(projectPublicCitationRanges(outputMessage) ? { citationRanges: projectPublicCitationRanges(outputMessage) } : {}),
             ...(sourceDisclosure ? { sourceDisclosure } : {}),
+            suggestedActions: readPublicSuggestedActions(outputMessage.content),
             sources: readPublicAnswerSources(outputMessage.content),
             execution: readPublicExecution(outputMessage.content),
             citations: outputMessage.citations.map((citation) => ({
@@ -8719,6 +8724,7 @@ export async function getPublicConversationHistory(input: {
             }
           : {}),
         ...(sourceDisclosure ? { sourceDisclosure } : {}),
+        suggestedActions: readPublicSuggestedActions(message.content),
         sources: readPublicAnswerSources(message.content),
         execution: message.redactedAt ? [] : readPublicExecution(message.content),
         citations: message.citations.map((citation) => ({

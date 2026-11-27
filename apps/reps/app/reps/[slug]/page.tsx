@@ -247,6 +247,7 @@ export default async function RepresentativePage({
         role="region"
       >
         <RepresentativeChatPanel
+          audienceAuthenticated={Boolean(audienceSession)}
           computeEnabled={representative.compute.enabled}
           accessMode={runtime.accessMode}
           faqQuestions={representative.knowledgePack.faq.map((item) => item.title)}

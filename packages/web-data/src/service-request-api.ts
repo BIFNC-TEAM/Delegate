@@ -7,13 +7,14 @@ const text = z.string().max(8000);
 const operationSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("create"), batch: z.unknown() }).strict(),
   z.object({ operation: z.literal("resolve"), id, action: z.enum(["accepted", "rejected", "withdraw"]), text: text.default("") }).strict(),
-  z.object({ operation: z.literal("successor"), id, mode: z.enum(["follow_up", "answer", "replace"]), idempotencyKey: id,
+  z.object({ operation: z.literal("successor"), id, mode: z.enum(["follow_up", "answer", "replace"]), idempotencyKey: z.string().min(1).max(250),
     item: serviceRequestItemSchema, options: z.array(z.object({ id, label: z.string().min(1).max(500) }).strict()).max(10).default([]),
     reply: z.object({ selectedOptionId: id.optional(), text: text.optional() }).strict().default({}) }).strict(),
   z.object({ operation: z.literal("configure"), rules: z.unknown() }).strict(),
 ]);
 export async function executeServiceRequestOperation(context: {
   actor: ServiceRequestActor; conversationId?: string; representativeVersionId?: string;
+  generateOptions?: (question: string) => Promise<Array<{ id: string; label: string }>>;
 }, value: unknown) {
   const parsed = operationSchema.safeParse(value);
   if (!parsed.success) throw new ServiceRequestError("invalid_operation", 400);
@@ -33,6 +34,7 @@ export async function executeServiceRequestOperation(context: {
     || selected?.id === "other" && !op.reply.text?.trim())) throw new ServiceRequestError("invalid_answer", 400);
   return createServiceRequestSuccessor({ actor: context.actor, parentId: op.id, mode: op.mode,
     ...op.item, kind: op.item.ruleIds[0]!, options, representativeVersionId: context.representativeVersionId ?? parent.representativeVersionId,
+    ...(op.mode === "follow_up" && context.generateOptions ? { generateOptions: context.generateOptions } : {}),
     reply: op.mode === "follow_up" ? { action: "follow_up", text: op.item.content }
       : { action: "answer", ...op.reply, ...(selected ? { selectedOptionLabel: selected.label } : {}) }, idempotencyKey: op.idempotencyKey });
 }
@@ -45,11 +47,11 @@ export async function queryServiceRequestOperation(actor: ServiceRequestActor, p
   const box = params.get("box");
   const status = params.get("status");
   const limit = Number(params.get("limit") ?? 25);
-  if (actor.role === "visitor" && params.get("objectId") && params.get("objectId") !== actor.representativeId) throw new ServiceRequestError("invalid_object", 400);
-  if (box && box !== "received" && box !== "sent" || status && !["pending", "accepted", "rejected", "disabled"].includes(status)
+  if (actor.role === "visitor" && params.has("objectId")) throw new ServiceRequestError("invalid_object", 400);
+  if (box && box !== "received" && box !== "sent" && box !== "all" || status && !["pending", "accepted", "rejected", "disabled"].includes(status)
     || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new ServiceRequestError("invalid_query", 400);
   return listServiceRequests(actor, {
-    ...(box ? { box: box as "received" | "sent" } : {}), ...(status ? { status } : {}), limit,
+    ...(box ? { box: box as "received" | "sent" | "all" } : {}), ...(status ? { status } : {}), limit,
     ...(actor.role === "owner" && params.get("objectId") ? { contactId: params.get("objectId")! } : {}),
     ...(params.get("kind") ? { kind: params.get("kind")! } : {}),
     ...(params.get("from") ? { from: new Date(params.get("from")!) } : {}),

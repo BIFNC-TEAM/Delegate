@@ -15,12 +15,22 @@ export async function authorizeServiceRequestActor(tx: Tx, actor: ServiceRequest
   const representative = await tx.representative.findUnique({ where: { id: actor.representativeId }, select: { ownerId: true } });
   if (!representative || (actor.role === "owner" && representative.ownerId !== actor.ownerId)) throw new ServiceRequestError("forbidden", 403);
 }
+async function requireRegisteredVisitor(tx: Tx, actor: ServiceRequestActor) {
+  if (actor.role !== "visitor") return;
+  const identity = actor.audienceIdentityId ? await tx.audienceIdentity.findFirst({ where: {
+    id: actor.audienceIdentityId, status: "REGISTERED", mergedIntoId: null,
+    account: { status: "ACTIVE", authIdentities: { some: { status: "ACTIVE" } } },
+  }, select: { id: true } }) : null;
+  if (!identity) throw new ServiceRequestError("authentication_required", 401);
+}
 function visible(actor: ServiceRequestActor): Prisma.ServiceRequestWhereInput {
-  return { representativeId: actor.representativeId, ...(actor.role === "visitor"
-    ? (actor.audienceIdentityId ? { audienceIdentityId: actor.audienceIdentityId } : { contactId: actor.contactId, audienceIdentityId: null }) : {}) };
+  return actor.role === "owner"
+    ? { ownerId: actor.ownerId, ...(actor.representativeId ? { representativeId: actor.representativeId } : {}) }
+    : { representativeId: actor.representativeId, ...(actor.audienceIdentityId
+      ? { audienceIdentityId: actor.audienceIdentityId } : { contactId: actor.contactId, audienceIdentityId: null }) };
 }
 async function get(tx: Tx, actor: ServiceRequestActor, id: string) {
-  await authorizeServiceRequestActor(tx, actor);
+  if (actor.role === "visitor") await authorizeServiceRequestActor(tx, actor);
   const row = await tx.serviceRequest.findFirst({ where: { ...visible(actor), id } });
   if (!row) throw new ServiceRequestError("not_found", 404);
   return row;
@@ -43,6 +53,7 @@ export async function createServiceRequest(input: {
   if (input.actor.role !== "visitor") throw new ServiceRequestError("forbidden", 403);
   return prisma.$transaction(async tx => {
     await authorizeServiceRequestActor(tx, input.actor);
+    await requireRegisteredVisitor(tx, input.actor);
     const conversation = await tx.conversation.findFirst({ where: {
       id: input.conversationId, representativeId: input.actor.representativeId,
       contactId: input.actor.role === "visitor" ? input.actor.contactId : "",
@@ -57,11 +68,12 @@ export async function createServiceRequest(input: {
     if (!rules.success || resolveServiceBoundaryAction(rules.data, input.ruleIds) !== "approve") throw new ServiceRequestError("request_not_permitted", 403);
     const episode = conversation.activeEpisodeId ? await tx.conversationEpisode.findUnique({ where: { id: conversation.activeEpisodeId } }) : null;
     if (!episode || episode.representativeVersionId !== version.id) throw new ServiceRequestError("version_conflict", 409);
+    const owner = await tx.representative.findUniqueOrThrow({ where: { id: input.actor.representativeId }, select: { ownerId: true } });
     const payloadHash = hash([input.kind, input.content, input.summary, input.ruleIds, input.representativeVersionId]);
     const row = await tx.serviceRequest.upsert({
       where: { conversationId_idempotencyKey: { conversationId: input.conversationId, idempotencyKey: input.idempotencyKey } },
       update: {},
-      create: { representativeId: input.actor.representativeId, conversationId: input.conversationId,
+      create: { ownerId: owner.ownerId, representativeId: input.actor.representativeId, conversationId: input.conversationId,
         contactId: conversation.contactId, audienceIdentityId: conversation.audienceIdentityId,
         representativeVersionId: input.representativeVersionId, direction: "visitor_to_owner", kind: input.kind,
         content: input.content, summary: input.summary, ruleIds: input.ruleIds, options: [],
@@ -82,7 +94,7 @@ export async function resolveServiceRequest(actor: ServiceRequestActor, id: stri
       resolvedAt: new Date(), ...(withdrawing ? {} : { reply: { action, text } }),
     } });
     if (result.count !== 1) throw new ServiceRequestError("state_conflict", 409);
-    if (!withdrawing) await tx.serviceRequestNotification.create({ data: { requestId: row.id, conversationId: row.conversationId, text: `服务申请 ${row.id}：${action === "accepted" ? "owner已接受" : "owner已拒绝"}${text ? `。${text}` : ""}` } });
+    if (!withdrawing) await tx.serviceRequestNotification.create({ data: { requestId: row.id, conversationId: row.conversationId, text: `你的服务申请（${row.summary.slice(0, 80)}）：${action === "accepted" ? "owner已接受" : "owner已拒绝"}${text ? `。${text}` : ""}` } });
     return { ...await tx.serviceRequest.findUniqueOrThrow({ where: { id } }), notification: withdrawing ? null : { status: "pending" } };
   });
 }
@@ -90,12 +102,25 @@ export async function createServiceRequestSuccessor(input: {
   actor: ServiceRequestActor; parentId: string; mode: "follow_up" | "answer" | "replace";
   content: string; summary: string; ruleIds: string[]; kind: string; representativeVersionId: string;
   options: Array<{ id: string; label: string }>; reply: unknown; idempotencyKey: string;
+  generateOptions?: (question: string) => Promise<Array<{ id: string; label: string }>>;
 }) {
+  // Generate outside the write transaction, and never regenerate for an existing successor.
+  if (input.mode === "follow_up" && input.generateOptions) {
+    const parent = await prisma.$transaction(tx => get(tx, input.actor, input.parentId));
+    if (input.actor.role !== "owner" || !recipient(input.actor, parent)) throw new ServiceRequestError("forbidden", 403);
+    const existing = await prisma.serviceRequest.findUnique({ where: { parentId: input.parentId } });
+    if (!existing) input = { ...input, options: [...(await input.generateOptions(input.content)).filter(option => option.id !== "other"), { id: "other", label: "其他" }] };
+  }
   return prisma.$transaction(async tx => {
+    await requireRegisteredVisitor(tx, input.actor);
+    if (!input.idempotencyKey || input.idempotencyKey.length > 250) throw new ServiceRequestError("invalid_request", 400);
     const parent = await get(tx, input.actor, input.parentId);
-    const payloadHash = hash([input.mode, input.content, input.summary, input.ruleIds, input.kind, input.representativeVersionId, input.options, input.reply]);
+    const payloadHash = hash([input.mode, input.content, input.summary, input.ruleIds, input.kind, input.representativeVersionId, ...(input.mode === "follow_up" ? [] : [input.options]), input.reply]);
     const prior = await tx.serviceRequest.findUnique({ where: { parentId: parent.id } });
-    if (prior && prior.idempotencyKey === input.idempotencyKey && prior.payloadHash === payloadHash) return prior;
+    if (prior && prior.idempotencyKey === input.idempotencyKey) {
+      if (prior.payloadHash !== payloadHash) throw new ServiceRequestError("idempotency_conflict", 409);
+      return prior;
+    }
     if (parent.status !== "pending") throw new ServiceRequestError("state_conflict", 409);
     const canReceive = recipient(input.actor, parent);
     if (input.mode === "follow_up" ? input.actor.role !== "owner" || !canReceive
@@ -118,19 +143,19 @@ export async function createServiceRequestSuccessor(input: {
     } });
     if (result.count !== 1) throw new ServiceRequestError("state_conflict", 409);
     const successor = await tx.serviceRequest.create({ data: {
-      representativeId: parent.representativeId, conversationId: parent.conversationId, contactId: parent.contactId,
+      ownerId: parent.ownerId, representativeId: parent.representativeId, conversationId: parent.conversationId, contactId: parent.contactId,
       audienceIdentityId: parent.audienceIdentityId, representativeVersionId: input.representativeVersionId,
       direction: input.mode === "follow_up" ? "owner_to_visitor" : "visitor_to_owner", parentId: parent.id,
       kind: input.kind, content: input.content, summary: input.summary, ruleIds: input.ruleIds,
       options: json(input.options), idempotencyKey: input.idempotencyKey, payloadHash,
     } });
     if (input.mode === "follow_up") await tx.serviceRequestNotification.create({ data: { requestId: successor.id, conversationId: parent.conversationId,
-      text: `owner请求补充信息（申请 ${successor.id}）：${input.content}\n${input.options.map(option => `${option.id}: ${option.label}`).join("\n")}` } });
+      text: `owner请求补充信息：${input.content}\n${input.options.map(option => `${option.id}: ${option.label}`).join("\n")}` } });
     return { ...successor, notification: input.mode === "follow_up" ? { status: "pending" } : null };
   });
 }
 export async function listServiceRequests(actor: ServiceRequestActor, input: {
-  box?: "sent" | "received"; contactId?: string; kind?: string; status?: string;
+  box?: "sent" | "received" | "all"; contactId?: string; kind?: string; status?: string;
   from?: Date; to?: Date; ascending?: boolean; cursor?: string; limit?: number;
 } = {}) {
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
@@ -138,9 +163,9 @@ export async function listServiceRequests(actor: ServiceRequestActor, input: {
   const to = input.to ?? new Date();
   if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from > to) throw new ServiceRequestError("invalid_time_range", 400);
   return prisma.$transaction(async tx => {
-    await authorizeServiceRequestActor(tx, actor);
+    if (actor.role === "visitor") await authorizeServiceRequestActor(tx, actor);
     const sentDirection = actor.role === "owner" ? "owner_to_visitor" : "visitor_to_owner";
-    const direction = input.box ? (input.box === "sent" ? sentDirection : sentDirection === "visitor_to_owner" ? "owner_to_visitor" : "visitor_to_owner") : undefined;
+    const direction = input.box && input.box !== "all" ? (input.box === "sent" ? sentDirection : sentDirection === "visitor_to_owner" ? "owner_to_visitor" : "visitor_to_owner") : undefined;
     const where: Prisma.ServiceRequestWhereInput = { ...visible(actor),
       ...(input.contactId ? { AND: [{ contactId: input.contactId }] } : {}),
       ...(direction ? { direction } : {}), ...(input.kind ? { kind: input.kind } : {}), ...(input.status ? { status: input.status } : {}),
@@ -156,20 +181,20 @@ export async function getServiceRequestChain(actor: ServiceRequestActor, id: str
   if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new ServiceRequestError("invalid_pagination", 400);
   return prisma.$transaction(async tx => {
     // Recursive SQL is fixed by the host, never model/user-provided SQL.
-    await get(tx, actor, id);
+    const root = await get(tx, actor, id);
     const rows = await tx.$queryRaw<Array<{ id: string; parentId: string | null; content: string; reply: Prisma.JsonValue | null; depth: number }>>`
       WITH RECURSIVE chain AS (
         SELECT id, "parentId", content, reply, 0 AS depth FROM "ServiceRequest" WHERE id = ${id}
         UNION ALL SELECT p.id, p."parentId", p.content, p.reply, c.depth + 1
         FROM "ServiceRequest" p JOIN chain c ON p.id = c."parentId"
-        WHERE p."representativeId" = ${actor.representativeId}
+        WHERE p."representativeId" = ${root.representativeId} AND p."ownerId" = ${root.ownerId}
       ) SELECT * FROM chain ORDER BY depth DESC OFFSET ${offset} LIMIT ${limit + 1}`;
     return { items: rows.slice(0, limit).map(({ depth: _depth, ...row }) => row), nextOffset: rows.length > limit ? offset + limit : null };
   });
 }
 
 export async function getServiceRequestOwnerActor(slug: string, ownerId: string): Promise<ServiceRequestActor> {
-  const representative = await prisma.representative.findFirst({ where: { slug, ownerId }, select: { id: true } });
+  const representative = await prisma.representative.findFirst({ where: { slug }, select: { id: true } });
   if (!representative) throw new ServiceRequestError("not_found", 404);
   return { role: "owner", ownerId, representativeId: representative.id };
 }
@@ -205,6 +230,7 @@ export async function createServiceRequestBatch(context: {
   await prisma.$transaction(async tx => {
     await authorizeServiceRequestActor(tx, context.actor);
     if (context.actor.role !== "visitor") throw new ServiceRequestError("forbidden", 403);
+    await requireRegisteredVisitor(tx, context.actor);
     const message = await tx.message.findFirst({ where: { id: batch.messageId, conversationId: context.conversationId, senderType: "AUDIENCE",
       conversation: { representativeId: context.actor.representativeId, contactId: context.actor.contactId, audienceIdentityId: context.actor.audienceIdentityId } } });
     if (!message) throw new ServiceRequestError("invalid_source_message", 403);

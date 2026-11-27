@@ -33,3 +33,7 @@ describe("service request host contracts", () => {
     expect(() => readServiceRequestLimit({ DELEGATE_SERVICE_REQUEST_MAX_ITEMS: "0" })).toThrow("invalid_server_limit");
   });
 });
+
+it("returns the business overflow code even for 102 valid items", () => {
+  expect(() => validateServiceRequestBatch({ messageId: "m", overflow: false, items: Array.from({ length: 102 }, (_, i) => item(i)) })).toThrow("too_many_requests");
+});

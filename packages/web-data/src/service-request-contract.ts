@@ -42,7 +42,7 @@ export const serviceRequestItemSchema = z.object({
 export const serviceRequestBatchSchema = z.object({
   messageId: z.string().min(1).max(100),
   overflow: z.boolean(),
-  items: z.array(serviceRequestItemSchema).max(101),
+  items: z.array(serviceRequestItemSchema),
 }).strict();
 export function validateServiceRequestBatch(value: unknown, limit = readServiceRequestLimit()) {
   const parsed = serviceRequestBatchSchema.safeParse(value);

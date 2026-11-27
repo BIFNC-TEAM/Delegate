@@ -5,7 +5,9 @@ vi.mock("../src/agent-capabilities", () => ({ buildAgentCapabilities: mocks.adap
 vi.mock("../src/generation-delivery", () => ({ deliverGenerationOutput: mocks.deliver }));
 vi.mock("@delegate/model-runtime/v2", async original => ({ ...await original<typeof import("@delegate/model-runtime/v2")>(),
   createV2ModelBindingFromEnv: () => ({ ok: true, binding: { provider: "faux", modelId: "faux", model: { api: "faux" } } }), delegateAgentV2: { run: mocks.run } }));
-vi.mock("@delegate/web-data", () => ({
+vi.mock("@delegate/web-data", async () => ({
+  suggestedActionsForError: (await import("../../../packages/web-data/src/public-agent-presentation")).suggestedActionsForError,
+  ServiceRequestError: (await import("../../../packages/web-data/src/service-request-contract")).ServiceRequestError,
   readPublishedServiceBoundaries: mocks.serviceRules, executeServiceRequestOperation: mocks.serviceExecute, queryServiceRequestOperation: mocks.serviceQuery, readServiceRequestLimit: () => 5,
   buildRepresentativeRuntimeProfile: () => ({ contract: { freeReplyLimit: 2 } }), buildSandboxAttachmentPath: () => "/attachments/a",
   createAgentContextAuthorization: mocks.contextAuthorization,
@@ -277,4 +279,19 @@ it("binds service tools to the published version and host input message rather t
   await tool.execute("submit", { overflow: false, items: [] }, new AbortController().signal, {});
   expect(mocks.serviceExecute.mock.calls[0]![1].batch.messageId).toBe("message");
   expect(mocks.serviceExecute.mock.calls[0]![0].actor.role).toBe("visitor");
+});
+
+it("attaches host login suggestions without adding them to the model history", async () => {
+  const { ServiceRequestError } = await import("../../../packages/web-data/src/service-request-contract");
+  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
+  mocks.serviceExecute.mockRejectedValue(new ServiceRequestError("authentication_required", 401));
+  const result = await mocks.run();
+  mocks.run.mockImplementationOnce(async args => {
+    expect(JSON.stringify(args.history)).not.toContain("suggestedActions");
+    const submit = args.tools.find((tool: { name: string }) => tool.name === "submit_service_requests");
+    await expect(submit.execute("call", { overflow: false, items: [] })).rejects.toThrow("authentication_required");
+    return result;
+  });
+  await processV2ConversationTurn(makeHost() as any);
+  expect(mocks.complete.mock.calls.at(-1)![0]).toMatchObject({ suggestedActions: [{ type: "login" }] });
 });

@@ -5202,6 +5202,7 @@ model KnowledgeIngestionJob {
 
 // Business requests are separate from compute approvals and human handoff.
 model ServiceRequest {
+  ownerId                 String
   id                      String   @id @default(cuid())
   representativeId        String
   conversationId          String
@@ -5225,6 +5226,7 @@ model ServiceRequest {
   createdAt               DateTime @default(now())
   resolvedAt              DateTime?
 
+  @@index([ownerId, createdAt, id])
   @@unique([conversationId, idempotencyKey])
   @@index([representativeId, status, createdAt, id])
   @@index([contactId, createdAt, id])

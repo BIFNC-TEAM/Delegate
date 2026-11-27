@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { publishRepresentativeVersion } from "../src/conversation-platform";
+import { fixture as historyFixture, nextRun } from "./citation-postgres-fixture";
+import { createAgentContextAuthorization } from "../src/agent-context-authorization";
+import { loadSafeCitationHistory } from "../src/citation-history";
+import { completeInlineGenerationRun, publishRepresentativeVersion } from "../src/conversation-platform";
 import { setServiceBoundaryDraft, readPublishedServiceBoundaries } from "../src/service-requests";
 import { flushServiceRequestNotification } from "../src/service-request-notifications";
 import { prisma } from "../src/prisma";
@@ -10,19 +13,57 @@ const enabled = process.env.DELEGATE_SERVICE_REQUEST_E2E === "1" && ["127.0.0.1"
 async function fixture(actions: Record<string, string> = {}) {
   const owner = await prisma.owner.create({ data: { displayName: "Synthetic c007 owner" } });
   const rep = await prisma.representative.create({ data: { ownerId: owner.id, slug: `c007-${randomUUID()}`, displayName: "Synthetic", roleSummary: "Assistant", tone: "neutral", languages: ["zh"], freeScope: [], paywalledIntents: [], handoffPrompt: "Help", allowedSkills: [], actionGate: {} } });
-  const contact = await prisma.contact.create({ data: { representativeId: rep.id, sourceChannel: "telegram" } });
-  const conversation = await prisma.conversation.create({ data: { representativeId: rep.id, contactId: contact.id, channel: "PRIVATE_CHAT", sourceChannel: "telegram" } });
+  const account = await prisma.account.create({ data: { authIdentities: { create: { provider: "LOGTO", issuer: "https://synthetic.invalid", subject: randomUUID(), verifiedAt: new Date(), lastAuthenticatedAt: new Date() } } } });
+  const audience = await prisma.audienceIdentity.create({ data: { audienceKey: randomUUID(), status: "REGISTERED", accountId: account.id } });
+  const contact = await prisma.contact.create({ data: { audienceIdentityId: audience.id, representativeId: rep.id, sourceChannel: "telegram" } });
+  const conversation = await prisma.conversation.create({ data: { audienceIdentityId: audience.id, representativeId: rep.id, contactId: contact.id, channel: "PRIVATE_CHAT", sourceChannel: "telegram" } });
   const rules = ["appointment", "discount", "scope", "dispute", "human"].map(id => ({ id, request: "", action: actions[id] ?? "approve" }));
   const version = await prisma.representativeVersion.create({ data: { representativeId: rep.id, versionNumber: 1, status: "PUBLISHED", snapshot: { knowledge: { serviceBoundaries: { version: 1, boundaries: rules } } } } });
   const episode = await prisma.conversationEpisode.create({ data: { conversationId: conversation.id, representativeVersionId: version.id, sequence: 1 } });
   await prisma.conversation.update({ where: { id: conversation.id }, data: { activeEpisodeId: episode.id } });
-  const visitor: ServiceRequestActor = { role: "visitor", representativeId: rep.id, contactId: contact.id, audienceIdentityId: null };
+  const visitor: ServiceRequestActor = { role: "visitor", representativeId: rep.id, contactId: contact.id, audienceIdentityId: audience.id };
   const ownerActor: ServiceRequestActor = { role: "owner", representativeId: rep.id, ownerId: owner.id };
   const input = { actor: visitor, conversationId: conversation.id, representativeVersionId: version.id, content: "申请八折", summary: "八折", ruleIds: ["discount"], kind: "discount", idempotencyKey: "message:1" };
   return { input, visitor, ownerActor, version };
 }
 afterAll(async () => { if (enabled) await prisma.$disconnect(); });
 describe.skipIf(!enabled)("PostgreSQL service requests", () => {
+  it("persists UI actions separately while projecting only text to subsequent model history", async () => {
+    const f = await historyFixture();
+    await createAgentContextAuthorization(f.input);
+    const output = await completeInlineGenerationRun({ ...f.input, conversationId: f.conversationId, replyText: "请登录后确认提交", senderDisplayName: "Synthetic", countUsage: false, completeOutbox: false, suggestedActions: [{ type: "login" }] });
+    const stored = await prisma.message.findUniqueOrThrow({ where: { id: output.message.id } });
+    expect(stored.content).toMatchObject({ suggestedActions: [{ type: "login" }] });
+    const current = await nextRun(f);
+    const safe = await loadSafeCitationHistory({ ...current.input, byteBudget: 20000 });
+    expect(safe.messages[1]!.text).toBe("请登录后确认提交");
+    expect(JSON.stringify(safe.messages)).not.toContain("suggestedActions");
+    expect(JSON.stringify(safe.messages)).not.toContain('"login"');
+  });
+  it("blocks anonymous and suspended accounts before application writes", async () => {
+    const f = await fixture();
+    await expect(createServiceRequest({ ...f.input, actor: { ...f.visitor, audienceIdentityId: null } })).rejects.toThrow("authentication_required");
+    const identity = await prisma.audienceIdentity.findUniqueOrThrow({ where: { id: f.visitor.role === "visitor" ? f.visitor.audienceIdentityId! : "" } });
+    await prisma.account.update({ where: { id: identity.accountId! }, data: { status: "SUSPENDED" } });
+    await expect(createServiceRequest(f.input)).rejects.toThrow("authentication_required");
+    expect(await prisma.serviceRequest.count({ where: { conversationId: f.input.conversationId } })).toBe(0);
+  });
+  it("uses frozen owner scope for aggregate/detail and successor even after representative transfer", async () => {
+    const f = await fixture();
+    const row = await createServiceRequest(f.input);
+    const other = await prisma.owner.create({ data: { displayName: "Other synthetic owner" } });
+    await prisma.representative.update({ where: { id: row.representativeId }, data: { ownerId: other.id } });
+    expect((await listServiceRequests({ ...f.ownerActor, representativeId: "" }, { box: "all" })).items.some(item => item.id === row.id)).toBe(true);
+    expect((await listServiceRequests({ role: "owner", ownerId: other.id, representativeId: "" })).items.some(item => item.id === row.id)).toBe(false);
+    const generateOptions = async () => [{ id: "yes", label: "是" }];
+    const args = { actor: f.ownerActor, parentId: row.id, mode: "follow_up" as const, content: "几点？", summary: "时间", kind: "discount", ruleIds: ["discount"], representativeVersionId: row.representativeVersionId, options: [], reply: { action: "follow_up", text: "几点？" }, idempotencyKey: "x".repeat(250), generateOptions };
+    const follow = await createServiceRequestSuccessor(args);
+    const replay = await createServiceRequestSuccessor({ ...args, generateOptions: async () => { throw new Error("must not regenerate"); } });
+    expect(replay.id).toBe(follow.id);
+    expect(follow.ownerId).toBe(row.ownerId);
+    await expect(createServiceRequestSuccessor({ ...args, content: "改问题" })).rejects.toThrow("idempotency_conflict");
+    expect((await listServiceRequests({ ...f.ownerActor, representativeId: "" }, { box: "sent" })).items.some(item => item.id === follow.id)).toBe(true);
+  });
   it("rejects overflow without writes and binds a message to one complete batch manifest", async () => {
     const f = await fixture();
     const message = await prisma.message.create({ data: { conversationId: f.input.conversationId, senderType: "AUDIENCE", text: "申请" } });

@@ -14,6 +14,8 @@ import {
   restoreRejectedPublicChatDraft,
   type PublicChatResponse,
 } from "./public-chat";
+import { buildPublicAudienceLoginHref } from "./public-auth";
+import type { PublicSuggestedAction } from "@delegate/web-data";
 import { PublicChatText } from "./public-chat-text";
 import type { PublicCitationRange } from "@delegate/web-data";
 import {
@@ -34,6 +36,10 @@ import {
   type PublicMemoryDisplayAck,
 } from "./memory-display-client";
 
+function readPublicSuggestedActions(message: { suggestedActions?: PublicSuggestedAction[] }): PublicSuggestedAction[] {
+  return message.suggestedActions?.some(action => action?.type === "login") ? [{ type: "login" }] : [];
+}
+
 type Citation = PublicSourceCitation & { uri?: string };
 type ChatAttachment = { id: string; fileName: string; mimeType?: string; sizeBytes?: number; url?: string };
 type ChatMessage = {
@@ -50,6 +56,7 @@ type ChatMessage = {
   senderType?: string;
   senderDisplayName?: string;
   displayAck?: PublicMemoryDisplayAck;
+  suggestedActions?: PublicSuggestedAction[];
   sourceDisclosure?: PublicWebAnswerSourceDisclosure;
   generationInputClientMessageId?: string;
 };
@@ -106,6 +113,7 @@ const PROFILE_RAIL_FOCUSABLE_SELECTOR = [
 
 export function RepresentativeChatPanel(props: {
   representativeSlug: string;
+  audienceAuthenticated?: boolean;
   representativeName: string;
   ownerName: string;
   humanInLoop: boolean;
@@ -338,6 +346,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.sources?.length ? { sources: message.sources } : {}),
             ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+            suggestedActions: readPublicSuggestedActions(message),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
             ...(message.generationInputClientMessageId
@@ -395,6 +404,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.sources?.length ? { sources: message.sources } : {}),
             ...(message.execution?.length ? { execution: message.execution } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+            suggestedActions: readPublicSuggestedActions(message),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
             ...(message.generationInputClientMessageId
@@ -950,7 +960,8 @@ export function RepresentativeChatPanel(props: {
             execution?: import("@delegate/web-data").PublicExecutionCall[];
             attachments?: ChatAttachment[];
             displayAck?: PublicMemoryDisplayAck;
-            sourceDisclosure?: PublicWebAnswerSourceDisclosure;
+            suggestedActions?: PublicSuggestedAction[];
+  sourceDisclosure?: PublicWebAnswerSourceDisclosure;
           };
         };
         setProgress(snapshot.statusOnly ? undefined : snapshot.progress);
@@ -981,6 +992,7 @@ export function RepresentativeChatPanel(props: {
             ...(snapshot.message.sources ? { sources: snapshot.message.sources } : {}),
             ...(snapshot.message.execution ? { execution: snapshot.message.execution } : {}),
             ...(snapshot.message.attachments?.length ? { attachments: snapshot.message.attachments } : {}),
+            suggestedActions: readPublicSuggestedActions(snapshot.message),
             ...(snapshot.message.displayAck ? { displayAck: snapshot.message.displayAck } : {}),
             ...(snapshot.message.sourceDisclosure
               ? { sourceDisclosure: snapshot.message.sourceDisclosure }
@@ -1177,7 +1189,7 @@ export function RepresentativeChatPanel(props: {
                       <time dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
                     </header>
                     <p>{displayText}</p>
-                    {message.attachments?.length ? (
+                  {message.attachments?.length ? (
                       <div className="representative-chat-artifacts">
                         <strong>{t.artifactsLabel}</strong>
                         {message.attachments.map((attachment) => (
@@ -1229,6 +1241,11 @@ export function RepresentativeChatPanel(props: {
                           ? t.unverifiedToolFallbackSourceDisclosure
                           : t.generalModelSourceDisclosure}
                     </small>
+                  ) : null}
+                  {message.role === "assistant" && !props.audienceAuthenticated && message.suggestedActions?.some(action => action.type === "login") ? (
+                    <a href={buildPublicAudienceLoginHref(props.representativeSlug, props.locale)}>
+                      {props.locale === "zh" ? "登录后继续" : "Log in to continue"}
+                    </a>
                   ) : null}
                   {message.attachments?.length ? (
                     <div className="representative-chat-artifacts">

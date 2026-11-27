@@ -10,7 +10,7 @@ vi.mock("@delegate/web-data", () => ({
 import { GET, POST } from "../app/reps/[slug]/service-requests/route";
 const params = () => ({ params: Promise.resolve({ slug: "test" }) });
 beforeEach(() => {
-  vi.clearAllMocks(); mocks.principal.mockResolvedValue({ principal: { audienceIdentityId: "verified" }, revalidate: mocks.revalidate, sessionState: {} });
+  vi.clearAllMocks(); mocks.revalidate.mockResolvedValue(undefined); mocks.principal.mockResolvedValue({ principal: { mode: "authenticated", audienceIdentityId: "verified" }, revalidate: mocks.revalidate, sessionState: {} });
   mocks.context.mockResolvedValue({ actor: { role: "visitor" } }); mocks.query.mockResolvedValue({ items: [] }); mocks.execute.mockResolvedValue({});
 });
 describe("service request visitor route", () => {
@@ -28,4 +28,13 @@ describe("service request visitor route", () => {
     await POST(new Request("http://localhost/api?conversationId=conv", { method: "POST", body: "{}" }), params());
     expect(mocks.execute).not.toHaveBeenCalled();
   });
+});
+
+it("rejects anonymous writes before resolving a conversation or dispatching business work", async () => {
+  mocks.principal.mockResolvedValue({ principal: { mode: "anonymous", audienceIdentityId: "anon" }, revalidate: mocks.revalidate });
+  const response = await POST(new Request("http://localhost/api", { method: "POST", body: "{}" }), params());
+  expect(response.status).toBe(401);
+  expect(await response.json()).toMatchObject({ error: "authentication_required", suggestedActions: [{ type: "login" }] });
+  expect(mocks.context).not.toHaveBeenCalled();
+  expect(mocks.execute).not.toHaveBeenCalled();
 });

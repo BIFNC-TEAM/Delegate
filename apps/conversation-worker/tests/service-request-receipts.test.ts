@@ -15,3 +15,12 @@ it("requires a real accepted row for approval, not creation or handoff registrat
   expect(guard.permits("申请已批准")).toBe(true);
   expect(guard.permits("真人已经加入")).toBe(false);
 });
+
+it("recognizes persisted chain actions but not answer-option labels", () => {
+  const guard = createServiceRequestReceiptGuard();
+  guard.observe({ items: [{ id: "1", parentId: null, content: "预约", reply: { action: "answer", selectedOptionLabel: "accepted" } }] });
+  expect(guard.permits("已提交申请")).toBe(true);
+  expect(guard.permits("申请已批准")).toBe(false);
+  guard.observe({ items: [{ id: "2", parentId: "1", content: "预约", reply: { action: "accepted" } }] });
+  expect(guard.permits("申请已批准")).toBe(true);
+});

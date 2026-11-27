@@ -5,6 +5,9 @@ const { mockPrisma } = vi.hoisted(() => {
   const prismaMock = {
     $executeRaw: vi.fn(),
     $transaction: vi.fn(),
+    audienceIdentity: {
+      findFirst: vi.fn(),
+    },
     contact: {
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -55,6 +58,7 @@ describe("handoff workflow enqueue", () => {
     mockPrisma.handoffRequest.findFirst.mockResolvedValue(null);
     mockPrisma.handoffEntitlementGrant.findMany.mockResolvedValue([]);
     mockPrisma.$executeRaw.mockResolvedValue(0);
+    mockPrisma.audienceIdentity.findFirst.mockResolvedValue({ id: "audience-1" });
     mockPrisma.contact.findUnique.mockResolvedValue({
       representativeId: "rep-1",
       audienceIdentityId: "audience-1",
@@ -197,6 +201,20 @@ describe("handoff workflow enqueue", () => {
     expect(result).toBeNull();
     expect(mockPrisma.handoffRequest.create).not.toHaveBeenCalled();
     expect(mockPrisma.intakeSubmission.create).not.toHaveBeenCalled();
+    expect(mockPrisma.workflowRun.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an anonymous legacy handoff before intake, contact or workflow writes", async () => {
+    mockPrisma.audienceIdentity.findFirst.mockResolvedValue(null);
+    const { maybeCreateHandoffRequest } = await import("../src/runtime-store");
+    await expect(maybeCreateHandoffRequest({
+      context: buildConversationContext(), plan: buildHandoffPlan(), text: "Please contact the owner.",
+    })).rejects.toMatchObject({ code: "authentication_required", status: 401 });
+    expect(mockPrisma.handoffRequest.create).not.toHaveBeenCalled();
+    expect(mockPrisma.handoffRequest.update).not.toHaveBeenCalled();
+    expect(mockPrisma.intakeSubmission.create).not.toHaveBeenCalled();
+    expect(mockPrisma.contact.update).not.toHaveBeenCalled();
+    expect(mockPrisma.eventAudit.create).not.toHaveBeenCalled();
     expect(mockPrisma.workflowRun.create).not.toHaveBeenCalled();
   });
 });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Prisma, type ServiceRequest } from "@prisma/client";
 import { createOrReuseHandoffRequestInTransaction } from "./handoff-entitlements";
 import { prisma } from "./prisma";
+import { requireRegisteredServiceVisitor } from "./service-visitor-auth";
 import { ServiceRequestError, publishedServiceBoundariesSchema, resolveServiceBoundaryAction, serviceRequestItemSchema } from "./service-request-contract";
 
 // Constructed only by authenticated host adapters, never from model arguments.
@@ -17,11 +18,7 @@ export async function authorizeServiceRequestActor(tx: Tx, actor: ServiceRequest
 }
 async function requireRegisteredVisitor(tx: Tx, actor: ServiceRequestActor) {
   if (actor.role !== "visitor") return;
-  const identity = actor.audienceIdentityId ? await tx.audienceIdentity.findFirst({ where: {
-    id: actor.audienceIdentityId, status: "REGISTERED", mergedIntoId: null,
-    account: { status: "ACTIVE", authIdentities: { some: { status: "ACTIVE" } } },
-  }, select: { id: true } }) : null;
-  if (!identity) throw new ServiceRequestError("authentication_required", 401);
+  await requireRegisteredServiceVisitor(tx, actor.audienceIdentityId);
 }
 function visible(actor: ServiceRequestActor): Prisma.ServiceRequestWhereInput {
   return actor.role === "owner"

@@ -674,6 +674,13 @@ describePostgres("service entitlement PostgreSQL 16 concurrency", () => {
   it("authorizes only the handoff source run to deliver while human help is pending", async () => {
     const fixture = await createFixture();
     try {
+      await prisma.audienceIdentity.update({ where: { id: fixture.sourceAudienceIdentityId }, data: {
+        status: "REGISTERED",
+        account: { create: { authIdentities: { create: {
+          provider: "LOGTO", issuer: "https://synthetic.invalid", subject: fixture.sourceAudienceIdentityId,
+          verifiedAt: new Date(), lastAuthenticatedAt: new Date(),
+        } } } },
+      } });
       const claimed = await createClaimedGenerationRun(
         fixture,
         "self-handoff-delivery",

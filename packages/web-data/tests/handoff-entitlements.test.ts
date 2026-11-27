@@ -168,6 +168,55 @@ describe("purchased handoff entitlements", () => {
 });
 
 describe("handoff request entitlement state machine", () => {
+  it.each([
+    RepresentativeHandoffAccessMode.FREE,
+    RepresentativeHandoffAccessMode.PACKAGE_REQUIRED,
+  ])("rejects an unregistered visitor before any %s handoff writes", async (handoffAccessMode) => {
+    const client = new FakeRuntimeHandoffClient({
+      handoffAccessMode,
+      grants: [runtimeGrant()],
+    });
+    client.registered = false;
+    const before = structuredClone(client.grants);
+
+    await expect(client.transaction((tx) =>
+      createOrReuseHandoffRequestInTransaction(requestDraft(), tx)
+    )).rejects.toMatchObject({ code: "authentication_required", status: 401 });
+
+    expect(client.requests).toEqual([]);
+    expect(client.ledger).toEqual([]);
+    expect(client.grants).toEqual(before);
+    expect(client.advisoryLockCalls).toBe(0);
+  });
+
+  it.each([HandoffStatus.OPEN, HandoffStatus.REVIEWING, HandoffStatus.ACCEPTED])(
+    "rejects unauthorized reuse of a historical %s request without refreshing it",
+    async (status) => {
+      const client = new FakeRuntimeHandoffClient({ handoffAccessMode: RepresentativeHandoffAccessMode.FREE });
+      const first = await client.transaction((tx) =>
+        createOrReuseHandoffRequestInTransaction(requestDraft(), tx)
+      );
+      first.request!.status = status;
+      const before = structuredClone(client.requests);
+      client.registered = false;
+
+      await expect(client.transaction((tx) =>
+        createOrReuseHandoffRequestInTransaction({ ...requestDraft(), summary: "Must not replace history" }, tx)
+      )).rejects.toMatchObject({ code: "authentication_required", status: 401 });
+      expect(client.requests).toEqual(before);
+      expect(client.ledger).toEqual([]);
+    },
+  );
+
+  it("creates and reuses a free handoff for a registered visitor", async () => {
+    const client = new FakeRuntimeHandoffClient({ handoffAccessMode: RepresentativeHandoffAccessMode.FREE });
+    const first = await client.transaction((tx) => createOrReuseHandoffRequestInTransaction(requestDraft(), tx));
+    const second = await client.transaction((tx) => createOrReuseHandoffRequestInTransaction(requestDraft(), tx));
+    expect(first).toMatchObject({ outcome: "created", access: "free" });
+    expect(second).toMatchObject({ outcome: "reused", access: "free", request: { id: first.request!.id } });
+    expect(client.requests).toHaveLength(1);
+  });
+
   it("reserves priority access before standard access and pins service level", async () => {
     const client = new FakeRuntimeHandoffClient({
       handoffAccessMode: RepresentativeHandoffAccessMode.PACKAGE_REQUIRED,
@@ -609,6 +658,7 @@ function runtimeGrant(overrides: Partial<HandoffGrant> = {}): HandoffGrant {
 }
 
 class FakeRuntimeHandoffClient {
+  registered = true;
   grants: HandoffGrant[];
   requests: Array<Record<string, any>> = [];
   ledger: Array<Record<string, any>> = [];
@@ -646,6 +696,10 @@ class FakeRuntimeHandoffClient {
   $executeRaw = async () => {
     this.advisoryLockCalls += 1;
     return 0;
+  };
+
+  audienceIdentity = {
+    findFirst: async () => this.registered ? { id: "audience_1" } : null,
   };
 
   contact = {

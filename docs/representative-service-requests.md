@@ -32,7 +32,7 @@ POST操作：
 
 ## 2026-11-27 审查修订
 
-- 匿名仅聊天，访客写接口要求authenticated principal；共享服务再次验证REGISTERED身份关联ACTIVE账号和有效认证身份，外部渠道沿可信绑定/上下文授权链接入。登录后回到原聊天，由访客确认提交，不自动重放旧意图。
+- 匿名仅聊天，访客写接口要求authenticated principal；共享服务再次验证REGISTERED身份关联ACTIVE账号和有效认证身份，外部渠道沿可信绑定/上下文授权链接入。被提示登录后由访客登录并重新尝试，不自动检测、恢复或提交登录前意图；只有后端落库成功才算创建成功。
 - ServiceRequest.ownerId为创建时后端确定的归属，后继继承；owner查询和处理按该归属授权，不因代表当前管理关系变化失去历史申请。配置规则仍要求代表当前owner权限。
 - GET `/api/dashboard/service-requests`为owner聚合读取接口，必须登录；可传representativeId筛选，省略查自身跨代表申请。支持既有列表筛选、id详情和chain查询，box=all/sent/received默认all。visitor_to_owner对owner为收到，owner_to_visitor为发出。objectId仅供owner按contact筛选，访客传入400。
 - 幂等键最大250字符。owner追问重试比较稳定业务输入，不比较模型生成选项；相同键/输入返回首次结果，不再生成选项；输入变化返回409。并发首发可能分别生成候选选项，但只有一个后继生效。
@@ -47,8 +47,14 @@ harness将authentication_required映射为`{type:"login"}`，随回复保存到M
 
 部署先应用新增owner归属迁移并生成Prisma Client，再部署应用；原申请迁移未改写。当前PR未合并，不需要生产匿名历史迁移，迁移会为开发旧记录回填ownerId。
 
-### 简短回答与待答追问
+### 模型不选择已有申请（2026-11-27）
 
-worker按可信访客和当前会话读取待回答追问，最多5条，向当轮模型提供ID/parentId及追问正文、原申请摘要各最多256字符；truncated和hasMore显式标记截断。业务文本是不可信数据，完整内容仍通过授权详情/链工具读取，不将SYSTEM通知或Message.content直接当作模型历史。
+模型服务申请工具仅保留query_service_requests和submit_service_requests，不再注册change_service_request。worker不再自动注入待回答候选，也不按targetQuote定位申请。普通聊天中无论回复“商品a”还是“10件”、无论有几条待答追问，都不能由模型选择申请进行answer、replace或withdraw；不能把追问答案当新申请绕过。模型应准确说明当前聊天不支持这类操作，不虚构卡片或已上线的回复页面。
 
-访客只说“商品a”时，Agent读取当前收到的pending追问及前置链，以追问ID执行answer，合并原始八折意图。多条追问无法确定目标时先澄清。多候选时change工具另带targetQuote，宿主核对它来自当轮访客原文且唯一匹配候选问题/原摘要；旧对话或纯数量不能代替选择。targetQuote是工具宿主参数，会在调用业务服务前剥离，**不属于HTTP successor请求字段**。明确未提交的业务校验失败提供安全纠参反馈，未知基础设施错误保留未知效果语义。本修复无需新增迁移。
+上方HTTP的明确id操作及其身份/归属/状态/选项校验保留；HTTP接口可用不代表当前已有卡片UI。申请卡片、绑定输入和Message.content扩展留在外层c008草稿，未实施。旧2abeb81简短回答自动定位的验证为历史行为，本次变更取消该模型写入口，不声称修好了旧的文本匹配算法。
+
+### 共享人工接管权限（2026-11-27）
+
+`createOrReuseHandoffRequestInTransaction` 与业务申请共用 `requireRegisteredServiceVisitor`，在历史接管查询/刷新、权益预留和FREE创建之前验证contact关联的账号资格。匿名、缺失账号、账号停用、无有效认证身份或身份已合并等不符合既有校验的请求，抛出 `ServiceRequestError("authentication_required", 401)`；调用方不得降级为创建匿名接管。
+
+该边界也保护旧会话接管包装、旧生成完成回调和bot接管适配。它沿用宿主现有登录/渠道绑定解析，不新增会话或退出规则；正常用户原有免费、付费接管及幂等行为保留。

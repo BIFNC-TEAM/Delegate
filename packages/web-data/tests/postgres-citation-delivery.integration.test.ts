@@ -17,6 +17,12 @@ suite("r003 correction, persistence and delivery on isolated PostgreSQL", () => 
   afterAll(async () => { await prisma.$disconnect(); });
   it("clears old ranges when a skipped handoff replaces the answer", async () => {
     const f = await prepared();
+    await prisma.audienceIdentity.update({ where: { id: f.audienceId }, data: {
+      account: { create: { authIdentities: { create: {
+        provider: "LOGTO", issuer: "https://synthetic.invalid", subject: f.audienceId,
+        verifiedAt: new Date(), lastAuthenticatedAt: new Date(),
+      } } } },
+    } });
     await prisma.representative.update({ where: { id: f.repId }, data: { humanInLoop: false } });
     await allocateEpisodeCitationSource({ ...f.input, source: f.source });
     const completed = await completeInlineGenerationRun({ ...f.input, conversationId: f.conversationId,

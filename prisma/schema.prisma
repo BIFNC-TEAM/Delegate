@@ -2590,6 +2590,7 @@ model KnowledgePack {
   faq              Json
   materials        Json
   policies         Json
+  serviceBoundaries Json?
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
   representative   Representative @relation(fields: [representativeId], references: [id])
@@ -5197,4 +5198,58 @@ model KnowledgeIngestionJob {
   updatedAt     DateTime @updatedAt
 
   @@index([status, availableAt, leaseExpiresAt])
+}
+
+// Business requests are separate from compute approvals and human handoff.
+model ServiceRequest {
+  ownerId                 String
+  id                      String   @id @default(cuid())
+  representativeId        String
+  conversationId          String
+  contactId               String
+  audienceIdentityId      String?
+  representativeVersionId String
+  direction               String
+  kind                    String
+  content                 String
+  summary                 String
+  ruleIds                 Json
+  status                  String   @default("pending")
+  disabledReason          String?
+  options                 Json
+  reply                   Json?
+  parentId                String?  @unique
+  parent                  ServiceRequest? @relation("ServiceRequestChain", fields: [parentId], references: [id], onDelete: Restrict)
+  successor               ServiceRequest? @relation("ServiceRequestChain")
+  idempotencyKey          String
+  payloadHash             String
+  createdAt               DateTime @default(now())
+  resolvedAt              DateTime?
+
+  @@index([ownerId, createdAt, id])
+  @@unique([conversationId, idempotencyKey])
+  @@index([representativeId, status, createdAt, id])
+  @@index([contactId, createdAt, id])
+  @@index([audienceIdentityId, createdAt, id])
+}
+
+model ServiceRequestNotification {
+  id             String @id @default(cuid())
+  requestId      String @unique
+  conversationId String
+  text           String
+  status         String @default("pending")
+  attempts       Int @default(0)
+  availableAt    DateTime @default(now())
+  messageId      String? @unique
+  createdAt      DateTime @default(now())
+  @@index([status, availableAt])
+}
+
+model ServiceRequestBatch {
+  id             String @id
+  conversationId String
+  messageId      String @unique
+  payloadHash    String
+  createdAt      DateTime @default(now())
 }

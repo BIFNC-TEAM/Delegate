@@ -1311,7 +1311,6 @@ describePostgres("representative commerce PostgreSQL closure", () => {
 
   it("keeps a RESERVED paid handoff operable after identity merge", async () => {
     const fixture = await createCommerceFixture("identity-reserved-request");
-    const targetAudienceIdentityId = await prepareIdentityMergeTarget(fixture);
     const commercial = await createCommercialProduct(fixture, {
       kind: BillingProductKind.SERVICE_PACKAGE,
       amountMinor: 15,
@@ -1340,6 +1339,7 @@ describePostgres("representative commerce PostgreSQL closure", () => {
       )
     );
     if (!reserved.request) throw new Error("expected source reserved request");
+    const targetAudienceIdentityId = await prepareIdentityMergeTarget(fixture);
 
     await expect(
       prisma.handoffRequest.update({
@@ -1867,12 +1867,17 @@ async function prepareIdentityMergeTarget(
       data: {
         status: AudienceIdentityStatus.ANONYMOUS,
         mergedIntoId: null,
+        accountId: null,
       },
     });
     const target = await tx.audienceIdentity.create({
       data: {
         audienceKey: `${fixture.suffix}:registered-target`,
         status: AudienceIdentityStatus.REGISTERED,
+        account: { create: { authIdentities: { create: {
+          provider: "LOGTO", issuer: "https://synthetic.invalid", subject: `${fixture.suffix}:target`,
+          verifiedAt: new Date(), lastAuthenticatedAt: new Date(),
+        } } } },
       },
     });
     return target.id;
@@ -2126,6 +2131,10 @@ async function createCommerceFixture(label: string): Promise<CommerceFixture> {
       data: {
         audienceKey: `${suffix}:audience`,
         status: AudienceIdentityStatus.REGISTERED,
+        account: { create: { authIdentities: { create: {
+          provider: "LOGTO", issuer: "https://synthetic.invalid", subject: suffix,
+          verifiedAt: new Date(), lastAuthenticatedAt: new Date(),
+        } } } },
       },
     });
     const contact = await tx.contact.create({

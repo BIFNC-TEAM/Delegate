@@ -12,6 +12,7 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import { requireRegisteredServiceVisitor } from "./service-visitor-auth";
 
 type HandoffEntitlementClient = {
   rechargeOrder: {
@@ -304,6 +305,8 @@ export async function createOrReuseHandoffRequestInTransaction(
   if (!contact || contact.representativeId !== input.representativeId) {
     throw new Error("Handoff contact does not match the representative.");
   }
+  // Gate both new requests and the earlier history-refresh/reuse branches.
+  await requireRegisteredServiceVisitor(tx, contact.audienceIdentityId);
   const representative = await tx.representative.findUnique({
     where: { id: input.representativeId },
     select: {

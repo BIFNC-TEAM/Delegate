@@ -85,3 +85,14 @@ export function readPublicAnswerSources(content: unknown): PublicAnswerSource[] 
     && (s.kind === 'web' || s.kind === 'mcp') && typeof s.title === 'string'
     ? [{ channel: s.kind, title: s.title, provider: s.kind === 'mcp' ? s.title : s.access === 'page' ? 'Tencent sandbox browser' : undefined, url: s.url, observedAt: s.observedAt }] : []));
 }
+
+/** Host-only UI hints. Never serialize these into model or memory input. */
+export type PublicSuggestedAction = { type: "login" };
+export function readPublicSuggestedActions(content: unknown): PublicSuggestedAction[] {
+  const actions = content && typeof content === "object" ? (content as Record<string, unknown>).suggestedActions : null;
+  return Array.isArray(actions) && actions.some(action => action && typeof action === "object" && action.type === "login")
+    ? [{ type: "login" }] : [];
+}
+export function suggestedActionsForError(code: string): PublicSuggestedAction[] {
+  return code === "authentication_required" ? [{ type: "login" }] : [];
+}

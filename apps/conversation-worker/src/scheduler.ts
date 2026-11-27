@@ -150,7 +150,10 @@ export function startConversationWorkerLoops(
   const processReconciliation = dependencies.processReconciliation
     ?? (() => invokeMemoryWorker("runNextMemoryReconciliation"));
   const processConversation = dependencies.processConversation
-    ?? processNextConversationWork;
+    ?? (async config => {
+      await webData.flushServiceRequestNotification();
+      return processNextConversationWork(config);
+    });
 
   const controls: LaneControl[] = [
     startLane({

@@ -232,7 +232,11 @@ async function createFixture(grantedUses: number): Promise<Fixture> {
   const audience = await prisma.audienceIdentity.create({
     data: {
       audienceKey: `postgres-handoff:${suffix}`,
-      status: AudienceIdentityStatus.ANONYMOUS,
+      status: AudienceIdentityStatus.REGISTERED,
+      account: { create: { authIdentities: { create: {
+        provider: "LOGTO", issuer: "https://synthetic.invalid", subject: suffix,
+        verifiedAt: new Date(), lastAuthenticatedAt: new Date(),
+      } } } },
     },
   });
   const contact = await prisma.contact.create({

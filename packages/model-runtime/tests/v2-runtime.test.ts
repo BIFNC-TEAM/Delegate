@@ -1,6 +1,6 @@
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { DelegateAgentV2, V2Error, V2RecoverableToolError, createV2Capabilities, createV2ConversationHistory, V2_SYSTEM_PROMPT, type V2RunInput, type V2Tool } from "../src/v2";
+import { DelegateAgentV2, createServiceRequestTools, V2Error, V2RecoverableToolError, createV2Capabilities, createV2ConversationHistory, V2_SYSTEM_PROMPT, type V2RunInput, type V2Tool } from "../src/v2";
 import { toolExecutionRequestSchema } from "../../compute-protocol/src";
 
 const call = (name: string, args: Record<string, unknown> = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
@@ -25,6 +25,38 @@ const citationAnswer: Responses[number] = context => {
 
 // These are mechanism tests with scripted model decisions, NOT evidence of model autonomy.
 describe("V2 PI native execution mechanisms (scripted model)", () => {
+  it.each([
+    { operation: "successor", mode: "answer", text: "10件" },
+    { operation: "successor", mode: "answer", text: "商品a，要10件" },
+    { operation: "successor", mode: "replace", text: "修改商品a申请" },
+    { operation: "resolve", action: "withdraw", text: "撤回商品a申请" },
+  ])("does not dispatch a model-invented existing-request write: %j", async ({ text, ...operation }) => {
+    const query = vi.fn(); const submit = vi.fn();
+    const tools = createServiceRequestTools({ query, submit });
+    const result = await new DelegateAgentV2().run(input([
+      call("change_service_request", { ...operation, id: "a", targetQuote: "10件", reply: { text: "10件" } }),
+      context => {
+        expect(context.messages.some(message => message.role === "toolResult" && message.isError)).toBe(true);
+        return fauxAssistantMessage("当前聊天不能修改已有申请。");
+      },
+    ], { tools, userText: text }));
+    expect(result.text).toBe("当前聊天不能修改已有申请。");
+    expect(query).not.toHaveBeenCalled(); expect(submit).not.toHaveBeenCalled();
+  });
+  it("allows one host receipt correction within the same counters and never repeats a completed write", async () => {
+    const write = vi.fn(async () => ({ text: "saved" }));
+    const feedback = vi.fn((text: string) => text === "unsupported" ? "Read the actual receipt before claiming completion." : undefined);
+    const result = await new DelegateAgentV2().run(input([fauxAssistantMessage("unsupported"), call("save"), fauxAssistantMessage("saved")], {
+      finalFeedback: feedback, tools: [tool("save", write, "write")] }));
+    expect(result.modelCalls).toBe(3); expect(result.toolCalls).toBe(1);
+    expect(write).toHaveBeenCalledOnce(); expect(result.text).toBe("saved");
+    expect(feedback).toHaveBeenCalledTimes(1);
+  });
+  it("does not loop when host correction still yields an unsupported claim", async () => {
+    const feedback = vi.fn(() => "Status unsupported.");
+    const result = await new DelegateAgentV2().run(input([fauxAssistantMessage("unsupported"), fauxAssistantMessage("still unsupported")], { finalFeedback: feedback }));
+    expect(result.modelCalls).toBe(2); expect(feedback).toHaveBeenCalledOnce();
+  });
   it("executes RAG once, maps real sources and stops without extra search/review", async () => {
     const rag = vi.fn(async () => ({ text: "12 天", sources: [{ id: "internal-doc", title: "休假制度", channel: "knowledge" as const, version: "2026", dataTime: "2026-01-01" }] }));
     const search = vi.fn(async () => ({ text: "not needed" }));

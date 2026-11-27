@@ -6,3 +6,4 @@ export * from "./pi";
 
 export * from "./faq";
 export * from "./service-content";
+export { generateServiceRequestOptions } from "./service-request-options";

@@ -161,3 +161,7 @@ export * from "./citation-persistence";
 export * from "./citation-history";
 export * from "./citation-history-types";
 export * from "./public-citation-sources";
+export * from "./service-request-contract";
+export * from "./service-requests";
+export * from "./service-request-api";
+export * from "./service-request-notifications";

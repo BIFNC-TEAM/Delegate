@@ -4,7 +4,7 @@ import { fixture as historyFixture, nextRun } from "./citation-postgres-fixture"
 import { createAgentContextAuthorization } from "../src/agent-context-authorization";
 import { loadSafeCitationHistory } from "../src/citation-history";
 import { completeInlineGenerationRun, publishRepresentativeVersion } from "../src/conversation-platform";
-import { setServiceBoundaryDraft, readPublishedServiceBoundaries } from "../src/service-requests";
+import { setServiceBoundaryDraft, readPublishedServiceBoundaries, readPendingServiceRequestFollowUps, resolvePendingServiceRequestFollowUpQuote } from "../src/service-requests";
 import { flushServiceRequestNotification } from "../src/service-request-notifications";
 import { prisma } from "../src/prisma";
 import { createServiceRequestBatch, createServiceRequest, createServiceRequestSuccessor, resolveServiceRequest, getServiceRequestChain, listServiceRequests, type ServiceRequestActor } from "../src/service-requests";
@@ -63,6 +63,40 @@ async function raceOnParent<T>(parentId: string, operations: [() => Promise<T>, 
   }
 }
 describe.skipIf(!enabled)("PostgreSQL service requests", () => {
+  it("bounds current-conversation pending follow-ups and excludes other conversations, visitors and terminal questions", async () => {
+    const f = await fixture();
+    const createFollow = async (conversationId: string, index: number) => {
+      const original = await createServiceRequest({ ...f.input, conversationId, idempotencyKey: `original-${index}` });
+      return createServiceRequestSuccessor({ actor: f.ownerActor, parentId: original.id, mode: "follow_up", content: "商品a还是b", summary: "商品", kind: "discount", ruleIds: ["discount"], representativeVersionId: f.version.id, options: [], reply: { action: "follow_up", text: "商品a还是b" }, idempotencyKey: `follow-${index}` });
+    };
+    const local: Awaited<ReturnType<typeof createFollow>>[] = [];
+    for (let i = 0; i < 6; i++) local.push(await createFollow(f.input.conversationId, i));
+    const current = await prisma.conversation.findUniqueOrThrow({ where: { id: f.input.conversationId } });
+    const elsewhere = await prisma.conversation.create({ data: { representativeId: current.representativeId, contactId: current.contactId, audienceIdentityId: current.audienceIdentityId, channel: "PRIVATE_CHAT", sourceChannel: "web" } });
+    const episode = await prisma.conversationEpisode.create({ data: { conversationId: elsewhere.id, representativeVersionId: f.version.id, sequence: 1 } });
+    await prisma.conversation.update({ where: { id: elsewhere.id }, data: { activeEpisodeId: episode.id } });
+    const otherQuestion = await createFollow(elsewhere.id, 100);
+    const candidates = await readPendingServiceRequestFollowUps(f.visitor, f.input.conversationId);
+    expect(candidates.items).toHaveLength(5); expect(candidates.hasMore).toBe(true);
+    expect(candidates.items.every(row => local.some(item => item.id === row.id))).toBe(true);
+    expect(candidates.items.some(row => row.id === otherQuestion.id)).toBe(false);
+    expect(candidates.items[0]).toMatchObject({question:"商品a还是b",originalSummary:"八折",truncated:false});
+    expect(Object.keys(candidates.items[0]!).sort()).toEqual(["id", "originalSummary", "parentId", "question", "truncated"]);
+    await resolveServiceRequest(f.ownerActor, local[0]!.id, "withdraw");
+    const after = await readPendingServiceRequestFollowUps(f.visitor, f.input.conversationId);
+    expect(after.hasMore).toBe(false); expect(after.items.some(row => row.id === local[0]!.id)).toBe(false);
+    const longOriginal = await createServiceRequest({ ...f.input, summary: "商品 Ａ 独有" + "摘".repeat(300), idempotencyKey: "long-original" });
+    const longQuestion = await createServiceRequestSuccessor({ actor: f.ownerActor, parentId: longOriginal.id, mode: "follow_up", content: "问".repeat(300), summary: "长问题", kind: "discount", ruleIds: ["discount"], representativeVersionId: f.version.id, options: [], reply: { action: "follow_up" }, idempotencyKey: "long-follow" });
+    const bounded = (await readPendingServiceRequestFollowUps(f.visitor, f.input.conversationId)).items.find(row => row.id === longQuestion.id)!;
+    expect(bounded.question).toHaveLength(256); expect(bounded.originalSummary).toHaveLength(256); expect(bounded.truncated).toBe(true);
+    expect(await resolvePendingServiceRequestFollowUpQuote(f.visitor, f.input.conversationId, "摘".repeat(280))).toBe(longQuestion.id);
+    expect(await resolvePendingServiceRequestFollowUpQuote(f.visitor, f.input.conversationId, "商品a独有")).toBe(longQuestion.id);
+    expect(await resolvePendingServiceRequestFollowUpQuote(f.visitor, f.input.conversationId, "商品a")).toBeNull();
+    expect(await resolvePendingServiceRequestFollowUpQuote(f.visitor, f.input.conversationId, "%")).toBeNull();
+    const outsider = await fixture();
+    await expect(readPendingServiceRequestFollowUps(outsider.visitor, f.input.conversationId)).rejects.toThrow("forbidden");
+    await expect(resolvePendingServiceRequestFollowUpQuote(outsider.visitor, f.input.conversationId, "摘")).rejects.toThrow("forbidden");
+  });
   it.each(["follow_up", "answer", "replace"] as const)("returns one saved successor for concurrent identical %s retries", async mode => {
     const f = await fixture();
     const first = await createServiceRequest(f.input);

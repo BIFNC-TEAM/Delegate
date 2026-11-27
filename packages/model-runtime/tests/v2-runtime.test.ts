@@ -25,6 +25,20 @@ const citationAnswer: Responses[number] = context => {
 
 // These are mechanism tests with scripted model decisions, NOT evidence of model autonomy.
 describe("V2 PI native execution mechanisms (scripted model)", () => {
+  it("allows one host receipt correction within the same counters and never repeats a completed write", async () => {
+    const write = vi.fn(async () => ({ text: "saved" }));
+    const feedback = vi.fn((text: string) => text === "unsupported" ? "Read the actual receipt before claiming completion." : undefined);
+    const result = await new DelegateAgentV2().run(input([fauxAssistantMessage("unsupported"), call("save"), fauxAssistantMessage("saved")], {
+      finalFeedback: feedback, tools: [tool("save", write, "write")] }));
+    expect(result.modelCalls).toBe(3); expect(result.toolCalls).toBe(1);
+    expect(write).toHaveBeenCalledOnce(); expect(result.text).toBe("saved");
+    expect(feedback).toHaveBeenCalledTimes(1);
+  });
+  it("does not loop when host correction still yields an unsupported claim", async () => {
+    const feedback = vi.fn(() => "Status unsupported.");
+    const result = await new DelegateAgentV2().run(input([fauxAssistantMessage("unsupported"), fauxAssistantMessage("still unsupported")], { finalFeedback: feedback }));
+    expect(result.modelCalls).toBe(2); expect(feedback).toHaveBeenCalledOnce();
+  });
   it("executes RAG once, maps real sources and stops without extra search/review", async () => {
     const rag = vi.fn(async () => ({ text: "12 天", sources: [{ id: "internal-doc", title: "休假制度", channel: "knowledge" as const, version: "2026", dataTime: "2026-01-01" }] }));
     const search = vi.fn(async () => ({ text: "not needed" }));

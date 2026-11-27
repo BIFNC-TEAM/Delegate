@@ -45,6 +45,9 @@ export type V2RunInput = {
   /** Host-supplied task store. Save must succeed before exposing a clarification. */
   saveSession?(session: V2Session): Promise<void>;
   onEvent?(event: PiRuntimeEvent): Promise<void> | void;
+  /** Deterministic host validation only. At most one correction within the
+   * existing task budget; does not reset write fingerprints or usage. */
+  finalFeedback?(draft: string): string | undefined;
 };
 export type V2RunResult = {
   runtime: "delegate-agent-v2"; requestId: string; traceId: string;

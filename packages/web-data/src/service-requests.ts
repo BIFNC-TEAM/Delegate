@@ -46,6 +46,42 @@ export async function getServiceRequest(actor: ServiceRequestActor, id: string) 
     return { ...row, notification: notification ? { status: message?.deliveryStatus?.toLowerCase() ?? notification.status, preparationStatus: notification.status } : null };
   });
 }
+/** Routing hints only; full business content must still be read through authorized tools. */
+export async function readPendingServiceRequestFollowUps(actor: ServiceRequestActor, conversationId: string) {
+  if (actor.role !== "visitor") throw new ServiceRequestError("forbidden", 403);
+  return prisma.$transaction(async tx => {
+    await authorizeServiceRequestActor(tx, actor);
+    const conversation = await tx.conversation.findFirst({ where: { id: conversationId,
+      representativeId: actor.representativeId, contactId: actor.contactId, audienceIdentityId: actor.audienceIdentityId }, select: { id: true } });
+    if (!conversation) throw new ServiceRequestError("forbidden", 403);
+    const rows = await tx.serviceRequest.findMany({ where: { ...visible(actor), conversationId,
+      direction: "owner_to_visitor", status: "pending" }, select: { id: true, parentId: true, content: true, parent: { select: { summary: true } } },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 6 });
+    return { items: rows.slice(0, 5).map(row => ({ id: row.id, parentId: row.parentId,
+      question: row.content.slice(0, 256), originalSummary: (row.parent?.summary ?? "").slice(0, 256),
+      truncated: row.content.length > 256 || (row.parent?.summary.length ?? 0) > 256 })), hasMore: rows.length > 5 };
+  });
+}
+/** Check uniqueness over the entire authorized pending set, including hints
+ * omitted from the bounded prompt. Return at most one ID, never full records. */
+export async function resolvePendingServiceRequestFollowUpQuote(actor: ServiceRequestActor, conversationId: string, quote: string) {
+  if (actor.role !== "visitor" || !quote || quote.length > 500) throw new ServiceRequestError("invalid_target_quote", 400);
+  return prisma.$transaction(async tx => {
+    await authorizeServiceRequestActor(tx, actor);
+    const conversation = await tx.conversation.findFirst({ where: { id: conversationId,
+      representativeId: actor.representativeId, contactId: actor.contactId, audienceIdentityId: actor.audienceIdentityId }, select: { id: true } });
+    if (!conversation) throw new ServiceRequestError("forbidden", 403);
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT s.id FROM "ServiceRequest" s JOIN "ServiceRequest" p ON p.id = s."parentId"
+      WHERE s."conversationId" = ${conversationId} AND s."representativeId" = ${actor.representativeId}
+        AND s."contactId" = ${actor.contactId} AND s."audienceIdentityId" IS NOT DISTINCT FROM ${actor.audienceIdentityId}
+        AND s.direction = 'owner_to_visitor' AND s.status = 'pending'
+        AND (strpos(lower(regexp_replace(normalize(s.content, NFKC), '\\s+', '', 'g')), ${quote}) > 0
+          OR strpos(lower(regexp_replace(normalize(p.summary, NFKC), '\\s+', '', 'g')), ${quote}) > 0)
+      LIMIT 2`;
+    return rows.length === 1 ? rows[0]!.id : null;
+  });
+}
 export async function createServiceRequest(input: {
   actor: ServiceRequestActor; conversationId: string; representativeVersionId: string;
   kind: string; content: string; summary: string; ruleIds: string[]; idempotencyKey: string;

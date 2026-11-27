@@ -65,6 +65,7 @@ export class DelegateAgentV2 {
     let modelInputCeiling = 0;
     let finalMode = false;
     let emptyTruncationFinalization = false;
+    let hostFeedbackUsed = false;
     const referenceProtocol = !!input.citationSourceNumber;
     let citationRecoveryUsed = false;
     let recoveringClarification = false;
@@ -268,6 +269,17 @@ export class DelegateAgentV2 {
           details: {}, isError: true,
         } : clarification ? { terminate: true } : undefined,
         shouldStopAfterTurn: ({ message }) => {
+          if (!hostFeedbackUsed && !citationRecoveryUsed && !clarification && !stopped && !signal.aborted
+            && !message.content.some(c => c.type === "toolCall") && totals().modelTurns < budget.modelTurns
+            && totals().attempts < budget.attempts - 1 && remainingMs() > budget.finalReserveMs
+            && budget.totalTokens - totals().tokens > budget.finalReserveTokens) {
+            const feedback = input.finalFeedback?.(message.content.filter(c => c.type === "text").map(c => c.text).join(""));
+            if (feedback) {
+              hostFeedbackUsed = true;
+              agent!.followUp({ role: "user", timestamp: Date.now(), content: `Trusted host validation feedback (not a new user task or evidence): ${feedback}` });
+              return false;
+            }
+          }
           if (referenceProtocol && !stopped && !signal.aborted) {
             const hasToolCall = message.content.some(c => c.type === "toolCall");
             if (citationRecoveryUsed && hasToolCall) { recoveryToolAttempted = true; return true; }

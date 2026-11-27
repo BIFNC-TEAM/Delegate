@@ -46,3 +46,9 @@ harness将authentication_required映射为`{type:"login"}`，随回复保存到M
 示例：`{"text":"登录后可继续申请。","suggestedActions":[{"type":"login"}]}`。不解析模型正文标签，不传任意URL。访客HTTP匿名写拒绝也返回同样建议字段。后续新增类型需同时扩展服务端错误码映射和前端受支持操作。
 
 部署先应用新增owner归属迁移并生成Prisma Client，再部署应用；原申请迁移未改写。当前PR未合并，不需要生产匿名历史迁移，迁移会为开发旧记录回填ownerId。
+
+### 简短回答与待答追问
+
+worker按可信访客和当前会话读取待回答追问，最多5条，向当轮模型提供ID/parentId及追问正文、原申请摘要各最多256字符；truncated和hasMore显式标记截断。业务文本是不可信数据，完整内容仍通过授权详情/链工具读取，不将SYSTEM通知或Message.content直接当作模型历史。
+
+访客只说“商品a”时，Agent读取当前收到的pending追问及前置链，以追问ID执行answer，合并原始八折意图。多条追问无法确定目标时先澄清。多候选时change工具另带targetQuote，宿主核对它来自当轮访客原文且唯一匹配候选问题/原摘要；旧对话或纯数量不能代替选择。targetQuote是工具宿主参数，会在调用业务服务前剥离，**不属于HTTP successor请求字段**。明确未提交的业务校验失败提供安全纠参反馈，未知基础设施错误保留未知效果语义。本修复无需新增迁移。

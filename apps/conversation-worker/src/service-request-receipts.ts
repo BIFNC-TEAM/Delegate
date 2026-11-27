@@ -22,7 +22,7 @@ export function createServiceRequestReceiptGuard() {
   return {
     observe,
     permits(text: string) {
-      if (/已(?:经|成功)?(?:为您|为你|帮您|帮你)?(?:提交|登记)|(?:request|application) (?:has been |was )?submitted/i.test(text) && !submitted) return false;
+      if (/已(?:经|成功)?(?:为您|为你|帮您|帮你)?(?:提交|登记)|(?:提交|登记)了|已更新(?:申请|为)|申请已(?:经)?更新|(?:request|application) (?:has been |was )?submitted/i.test(text) && !submitted) return false;
       if (/已(?:经)?(?:批准|获批)|申请已(?:经)?接受|owner已(?:经)?接受|(?:request|application) (?:has been |was )?approved/i.test(text) && !approved) return false;
       // A handoff registration is never proof that a person has joined.
       if (/真人已(?:经)?(?:加入|接入)|本人已(?:经)?接手|human (?:has )?joined/i.test(text)) return false;

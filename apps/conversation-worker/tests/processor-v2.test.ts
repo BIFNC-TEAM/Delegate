@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn(), authority: vi.fn(), safeHistory: vi.fn(), registerHistory: vi.fn(), allocate: vi.fn(), serviceRules: vi.fn(), serviceExecute: vi.fn(), serviceQuery: vi.fn() }));
+const mocks = vi.hoisted(() => ({ run: vi.fn(), adapters: vi.fn(), complete: vi.fn(), deliver: vi.fn(), gate: vi.fn(), authorizeUsage: vi.fn(), prior: vi.fn(), stream: vi.fn(), history: vi.fn(), contextAuthorization: vi.fn(), authority: vi.fn(), safeHistory: vi.fn(), registerHistory: vi.fn(), allocate: vi.fn(), serviceRules: vi.fn(), serviceExecute: vi.fn(), serviceQuery: vi.fn(), pendingFollowUps: vi.fn(), resolveFollowUpQuote: vi.fn() }));
 vi.mock("../src/agent-capabilities", () => ({ buildAgentCapabilities: mocks.adapters }));
 vi.mock("../src/generation-delivery", () => ({ deliverGenerationOutput: mocks.deliver }));
 vi.mock("@delegate/model-runtime/v2", async original => ({ ...await original<typeof import("@delegate/model-runtime/v2")>(),
@@ -8,7 +8,7 @@ vi.mock("@delegate/model-runtime/v2", async original => ({ ...await original<typ
 vi.mock("@delegate/web-data", async () => ({
   suggestedActionsForError: (await import("../../../packages/web-data/src/public-agent-presentation")).suggestedActionsForError,
   ServiceRequestError: (await import("../../../packages/web-data/src/service-request-contract")).ServiceRequestError,
-  readPublishedServiceBoundaries: mocks.serviceRules, executeServiceRequestOperation: mocks.serviceExecute, queryServiceRequestOperation: mocks.serviceQuery, readServiceRequestLimit: () => 5,
+  resolvePendingServiceRequestFollowUpQuote: mocks.resolveFollowUpQuote, readPendingServiceRequestFollowUps: mocks.pendingFollowUps, readPublishedServiceBoundaries: mocks.serviceRules, executeServiceRequestOperation: mocks.serviceExecute, queryServiceRequestOperation: mocks.serviceQuery, readServiceRequestLimit: () => 5,
   buildRepresentativeRuntimeProfile: () => ({ contract: { freeReplyLimit: 2 } }), buildSandboxAttachmentPath: () => "/attachments/a",
   createAgentContextAuthorization: mocks.contextAuthorization,
   loadSafeCitationHistory: mocks.safeHistory, allocateEpisodeCitationSource: mocks.allocate,
@@ -23,6 +23,7 @@ const makeHost = () => ({ config: {}, item: { runId: "run", conversationId: "con
 const usage = { modelTurns: 1, toolCalls: 0, attempts: 0, tokens: 10, inputTokens: 8, outputTokens: 2, costUsd: 0, activeMs: 5 };
 beforeEach(() => {
   mocks.serviceRules.mockResolvedValue(null);
+  mocks.pendingFollowUps.mockResolvedValue({items:[],hasMore:false});
   vi.clearAllMocks(); mocks.adapters.mockReturnValue({}); mocks.prior.mockResolvedValue(null); mocks.authorizeUsage.mockResolvedValue(false);
   mocks.authority.mockResolvedValue({ compute: { enabled: true, capabilityModes: { exec: "ask", write: "ask", browser: "allow", mcp: "allow" } }, knowledgeResources: [] });
   mocks.history.mockResolvedValue([]);
@@ -289,9 +290,69 @@ it("attaches host login suggestions without adding them to the model history", a
   mocks.run.mockImplementationOnce(async args => {
     expect(JSON.stringify(args.history)).not.toContain("suggestedActions");
     const submit = args.tools.find((tool: { name: string }) => tool.name === "submit_service_requests");
-    await expect(submit.execute("call", { overflow: false, items: [] })).rejects.toThrow("authentication_required");
+    await expect(submit.execute("call", { overflow: false, items: [] })).rejects.toMatchObject({ disposition: "not_dispatched", reason: "authentication_required" });
     return result;
   });
   await processV2ConversationTurn(makeHost() as any);
   expect(mocks.complete.mock.calls.at(-1)![0]).toMatchObject({ suggestedActions: [{ type: "login" }] });
+});
+
+it.each(["web", "telegram", "matrix"])("routes short answers using current host-scoped follow-ups on %s without altering paired history", async channel => {
+  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
+  mocks.pendingFollowUps.mockResolvedValue({ items: [{ id: "follow-2", parentId: "original-1" }, { id: "other-follow", parentId: "other-original" }], hasMore: false });
+  const host = makeHost(); host.item.channel = channel; host.item.userText = "商品 a";
+  await processV2ConversationTurn(host as any);
+  expect(mocks.pendingFollowUps).toHaveBeenCalledWith({ role: "visitor", representativeId: "rep", contactId: "contact", audienceIdentityId: "audience" }, "conv");
+  const args = mocks.run.mock.calls[0]![0];
+  expect(args.instructions).toContain('"id":"follow-2","parentId":"original-1"');
+  expect(args.instructions).toContain("clarify rather than choosing the newest");
+  expect(args.instructions).toContain("Ordinary unrelated consultation must not become an answer");
+  expect(JSON.stringify(args.history)).not.toContain("follow-2");
+  expect(args.userText).toBe("商品 a");
+});
+
+it("does not mask candidate read failures as an empty inbox", async () => {
+  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
+  mocks.pendingFollowUps.mockRejectedValue(new Error("database down"));
+  await expect(processV2ConversationTurn(makeHost() as any)).rejects.toThrow("database down");
+  expect(mocks.run).not.toHaveBeenCalled();
+});
+
+it("exposes rollback-confirmed state conflicts as correctable, while preserving unknown infrastructure effects", async () => {
+  const { ServiceRequestError } = await import("../../../packages/web-data/src/service-request-contract");
+  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
+  await processV2ConversationTurn(makeHost() as any);
+  const change = mocks.run.mock.calls[0]![0].tools.find((tool: any) => tool.name === "change_service_request");
+  mocks.serviceExecute.mockRejectedValueOnce(new ServiceRequestError("state_conflict", 409));
+  await expect(change.execute("stale", {})).rejects.toMatchObject({ disposition: "not_dispatched", reason: "state_conflict" });
+  const infrastructure = new Error("connection interrupted");
+  mocks.serviceExecute.mockRejectedValueOnce(infrastructure);
+  await expect(change.execute("unknown", {})).rejects.toBe(infrastructure);
+});
+
+it("blocks an ambiguous answer before dispatch and delivers a clarification instead of a model success claim", async () => {
+  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
+  mocks.pendingFollowUps.mockResolvedValue({ items: [
+    { id: "a", parentId: "oa", question: "多少件", originalSummary: "商品a" },
+    { id: "b", parentId: "ob", question: "多少件", originalSummary: "商品b" },
+  ], hasMore: false });
+  const result = await mocks.run();
+  mocks.run.mockImplementationOnce(async args => {
+    const change = args.tools.find((tool: any) => tool.name === "change_service_request");
+    await expect(change.execute("ambiguous", { operation: "successor", mode: "answer", id: "a", targetQuote: "商品a" })).rejects.toMatchObject({ reason: "ambiguous_follow_up", disposition: "not_dispatched" });
+    return { ...result, text: "已更新申请为10件", citationRanges: [] };
+  });
+  const host = makeHost(); host.item.userText = "10件";
+  await processV2ConversationTurn(host as any);
+  expect(mocks.serviceExecute).not.toHaveBeenCalled();
+  expect(mocks.complete.mock.calls.at(-1)![0].replyText).toContain("本次没有提交新的回答");
+});
+
+it("offers one deterministic receipt correction for a submission claim without a tool result", async () => {
+  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
+  await processV2ConversationTurn(makeHost() as any);
+  const feedback = mocks.run.mock.calls[0]![0].finalFeedback;
+  expect(feedback("已收到你的回答，并提交了商品a的申请")).toContain("No host receipt");
+  expect(feedback("已更新申请为10件")).toContain("No host receipt");
+  expect(feedback("你好，有什么可以帮助你？")).toBeUndefined();
 });

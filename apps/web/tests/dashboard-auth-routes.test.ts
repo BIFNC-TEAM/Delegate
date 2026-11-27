@@ -54,15 +54,23 @@ const computePolicyMutationRoutes = [
 ];
 
 describe("dashboard representative API auth coverage", () => {
-  it("requires owner representative access on every slug-scoped route", () => {
+  it("requires the appropriate owner access contract on every slug-scoped route", () => {
     const routeFiles = collectRouteFiles(fileURLToPath(representativeRoutesRoot));
 
     expect(routeFiles.length).toBeGreaterThan(20);
     for (const routeFile of routeFiles) {
       const source = readFileSync(routeFile, "utf8");
-      expect(source, routeFile).toMatch(
-        /authorizeDashboardRepresentativeAccess|requireDashboardRepresentative(?:Billing)?Access/,
-      );
+      if (routeFile === fileURLToPath(new URL("../app/api/dashboard/representatives/[slug]/service-requests/route.ts", import.meta.url))) {
+        // Service requests retain their original owner even after representative transfer.
+        // Other slug-scoped resources still follow the representative's current owner.
+        expect(source, routeFile).toContain("requireDashboardApiOwnerSession()");
+        expect(source, routeFile).toContain("if (!session?.ownerId)");
+        expect(source, routeFile).toContain("getServiceRequestOwnerActor(slug, session.ownerId)");
+      } else {
+        expect(source, routeFile).toMatch(
+          /authorizeDashboardRepresentativeAccess|requireDashboardRepresentative(?:Billing)?Access/,
+        );
+      }
     }
   });
 

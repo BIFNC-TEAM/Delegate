@@ -297,55 +297,28 @@ it("attaches host login suggestions without adding them to the model history", a
   expect(mocks.complete.mock.calls.at(-1)![0]).toMatchObject({ suggestedActions: [{ type: "login" }] });
 });
 
-it.each(["web", "telegram", "matrix"])("routes short answers using current host-scoped follow-ups on %s without altering paired history", async channel => {
+it.each(["web", "telegram", "matrix"])("does not let the model choose an existing request on %s", async channel => {
   mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
-  mocks.pendingFollowUps.mockResolvedValue({ items: [{ id: "follow-2", parentId: "original-1" }, { id: "other-follow", parentId: "other-original" }], hasMore: false });
-  const host = makeHost(); host.item.channel = channel; host.item.userText = "商品 a";
+  // Candidate contents/count must not reopen a model write path.
+  mocks.pendingFollowUps.mockResolvedValue({ items: [{ id: "a", question: "商品a要10件还是20件？" }, { id: "b", question: "商品b需要多少件？" }], hasMore: false });
+  const host = makeHost(); host.item.channel = channel; host.item.userText = "10件";
   await processV2ConversationTurn(host as any);
-  expect(mocks.pendingFollowUps).toHaveBeenCalledWith({ role: "visitor", representativeId: "rep", contactId: "contact", audienceIdentityId: "audience" }, "conv");
   const args = mocks.run.mock.calls[0]![0];
-  expect(args.instructions).toContain('"id":"follow-2","parentId":"original-1"');
-  expect(args.instructions).toContain("clarify rather than choosing the newest");
-  expect(args.instructions).toContain("Ordinary unrelated consultation must not become an answer");
-  expect(JSON.stringify(args.history)).not.toContain("follow-2");
-  expect(args.userText).toBe("商品 a");
+  expect(args.tools.map((tool: { name: string }) => tool.name)).not.toContain("change_service_request");
+  expect(args.instructions).toContain("Existing service requests are READ ONLY");
+  expect(args.instructions).not.toContain("PENDING_SERVICE_FOLLOW_UPS");
+  expect(mocks.pendingFollowUps).not.toHaveBeenCalled();
+  expect(mocks.resolveFollowUpQuote).not.toHaveBeenCalled();
+  expect(mocks.serviceExecute).not.toHaveBeenCalled();
 });
 
-it("does not mask candidate read failures as an empty inbox", async () => {
-  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
-  mocks.pendingFollowUps.mockRejectedValue(new Error("database down"));
-  await expect(processV2ConversationTurn(makeHost() as any)).rejects.toThrow("database down");
-  expect(mocks.run).not.toHaveBeenCalled();
-});
-
-it("exposes rollback-confirmed state conflicts as correctable, while preserving unknown infrastructure effects", async () => {
-  const { ServiceRequestError } = await import("../../../packages/web-data/src/service-request-contract");
+it("preserves unknown infrastructure effects on the remaining initial submission path", async () => {
   mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
   await processV2ConversationTurn(makeHost() as any);
-  const change = mocks.run.mock.calls[0]![0].tools.find((tool: any) => tool.name === "change_service_request");
-  mocks.serviceExecute.mockRejectedValueOnce(new ServiceRequestError("state_conflict", 409));
-  await expect(change.execute("stale", {})).rejects.toMatchObject({ disposition: "not_dispatched", reason: "state_conflict" });
+  const submit = mocks.run.mock.calls[0]![0].tools.find((tool: any) => tool.name === "submit_service_requests");
   const infrastructure = new Error("connection interrupted");
   mocks.serviceExecute.mockRejectedValueOnce(infrastructure);
-  await expect(change.execute("unknown", {})).rejects.toBe(infrastructure);
-});
-
-it("blocks an ambiguous answer before dispatch and delivers a clarification instead of a model success claim", async () => {
-  mocks.serviceRules.mockResolvedValue({ version: 1, boundaries: [] });
-  mocks.pendingFollowUps.mockResolvedValue({ items: [
-    { id: "a", parentId: "oa", question: "多少件", originalSummary: "商品a" },
-    { id: "b", parentId: "ob", question: "多少件", originalSummary: "商品b" },
-  ], hasMore: false });
-  const result = await mocks.run();
-  mocks.run.mockImplementationOnce(async args => {
-    const change = args.tools.find((tool: any) => tool.name === "change_service_request");
-    await expect(change.execute("ambiguous", { operation: "successor", mode: "answer", id: "a", targetQuote: "商品a" })).rejects.toMatchObject({ reason: "ambiguous_follow_up", disposition: "not_dispatched" });
-    return { ...result, text: "已更新申请为10件", citationRanges: [] };
-  });
-  const host = makeHost(); host.item.userText = "10件";
-  await processV2ConversationTurn(host as any);
-  expect(mocks.serviceExecute).not.toHaveBeenCalled();
-  expect(mocks.complete.mock.calls.at(-1)![0].replyText).toContain("本次没有提交新的回答");
+  await expect(submit.execute("unknown", { overflow: false, items: [] })).rejects.toBe(infrastructure);
 });
 
 it("offers one deterministic receipt correction for a submission claim without a tool result", async () => {

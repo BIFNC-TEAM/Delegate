@@ -37,3 +37,8 @@ describe("service request host contracts", () => {
 it("returns the business overflow code even for 102 valid items", () => {
   expect(() => validateServiceRequestBatch({ messageId: "m", overflow: false, items: Array.from({ length: 102 }, (_, i) => item(i)) })).toThrow("too_many_requests");
 });
+
+it.each(["resolve", "successor"])("does not accept an existing-request %s operation in an initial batch", operation => {
+  expect(() => validateServiceRequestBatch({ messageId: "m", overflow: false, items: [item(1)], operation, id: "existing", mode: "answer" })).toThrow("invalid_batch");
+  expect(() => validateServiceRequestBatch({ messageId: "m", overflow: false, items: [{ ...item(1), parentId: "existing", mode: "answer" }] })).toThrow("invalid_batch");
+});
